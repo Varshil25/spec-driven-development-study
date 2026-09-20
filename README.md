@@ -1,15 +1,21 @@
-# SDD Pilot — Milestone 2
+# Spec-Driven Development Study
 
-Pilot project repository and logging infrastructure for the independent study
-*Evaluating and Extending Spec-Driven Development: An Empirical Study of
-GitHub Spec Kit*.
+Research repository for the independent study *Evaluating and Extending
+Spec-Driven Development: An Empirical Study of GitHub Spec Kit for Software
+Engineering and OpenOwls SD-KDP for Knowledge-Base Production*.
 
-This repository is **both** the Milestone 2 deliverables:
+Varshil Patel · MS Computer Science, Temple University
+
+This repository holds the study's instrumentation and its collected data. It
+currently contains the **Milestone 2 (Weeks 3–4)** deliverables:
 
 1. a complete, instrumented run of GitHub Spec Kit's full command sequence on
    a small pilot feature, and
 2. the logging instrument (`sddlog`) and written protocol that will govern
    data collection for the controlled study in Weeks 5–7.
+
+Subsequent runs (Weeks 5–7) land in `logs/runs/` alongside the pilot run,
+under the same protocol.
 
 ## What is here
 
