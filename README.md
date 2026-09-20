@@ -56,10 +56,11 @@ development in this repository is never logged.
 
 Full command reference and operator procedure: [docs/LOGGING-PROTOCOL.md](docs/LOGGING-PROTOCOL.md).
 
-## Relationship to the earlier SPEC-Learn project
+## Relationship to the Weeks 1–2 environment check
 
-`SPEC-Learn/` (sibling directory, not part of this repository) was the Weeks
-1–2 environment check: Spec Kit installed against GitHub Copilot and driven
-through a website feature to confirm the toolchain worked. It was **not**
-instrumented, so it yields no measurements. This repository supersedes it as
-the methodological baseline for the study.
+Before this repository existed, Spec Kit was installed against GitHub Copilot
+and driven through a throwaway website feature to confirm the toolchain worked
+end to end. That check was **not** instrumented, so it produced no
+measurements, and its working directory was deleted once this repository
+superseded it. It is mentioned here only to record that the Weeks 1–2
+environment deliverable was met; nothing in the study's data depends on it.
