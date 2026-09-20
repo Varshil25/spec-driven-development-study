@@ -561,7 +561,11 @@ class TestPhaseTiming:
         """
         store = sddlog.Store(repo)
         events = []
-        for seq, (ts, etype, phase, actor) in enumerate(rows, 1):
+        for seq, row in enumerate(rows, 1):
+            ts, etype, phase, actor = row[:4]
+            # Default to a real-time hook observation; rows may override with a
+            # fifth element to simulate instrument-written events.
+            source = row[4] if len(row) > 4 else "hook"
             events.append({
                 "schema_version": sddlog.SCHEMA_VERSION,
                 "event_id": "e%d" % seq,
@@ -577,7 +581,7 @@ class TestPhaseTiming:
                 "payload": (
                     {"phase": phase} if etype.startswith("phase_")
                     else {"artifact": "spec", "words": 1} if etype == "artifact_snapshot"
-                    else {"words": 1}
+                    else {"words": 1, "source": source}
                 ),
             })
         store.events_path(run_id).write_text(
@@ -655,3 +659,106 @@ class TestPhaseTiming:
         metrics = sddlog.compute_metrics(store, run_id)
         assert metrics["per_phase"]["plan"]["active_seconds"] == 60.0
         assert metrics["per_phase"]["plan"]["timing_reliable"] is False
+
+
+    def test_operator_note_does_not_count_as_activity(self, repo):
+        """The R001 regression: a manual note written days after the agent
+        finished must not extend the phase's active span and hide the gap."""
+        run_id = start_run(repo)
+        store = self._write_log(repo, run_id, [
+            ("2026-09-17T20:00:00.000Z", "phase_start", "plan", "system"),
+            ("2026-09-17T20:05:00.000Z", "file_edit", "plan", "agent", "hook"),
+            # operator returns three days later and writes a note, then closes
+            ("2026-09-20T17:59:00.000Z", "note", "plan", "human", "manual"),
+            ("2026-09-20T18:00:00.000Z", "phase_end", "plan", "system"),
+        ])
+        metrics = sddlog.compute_metrics(store, run_id)
+        plan = metrics["per_phase"]["plan"]
+        assert plan["active_seconds"] == 300.0
+        assert plan["timing_reliable"] is False
+        assert "phase_end marker issued" in metrics["timing_warnings"][0]
+
+    def test_git_capture_edits_do_not_count_as_activity(self, repo):
+        """Git captures are written at phase close, so they always sit at the
+        far end of an idle gap."""
+        run_id = start_run(repo)
+        store = self._write_log(repo, run_id, [
+            ("2026-09-17T20:00:00.000Z", "phase_start", "plan", "system"),
+            ("2026-09-17T20:02:00.000Z", "file_edit", "plan", "agent", "hook"),
+            ("2026-09-20T17:59:59.000Z", "file_edit", "plan", "agent", "git"),
+            ("2026-09-20T18:00:00.000Z", "phase_end", "plan", "system"),
+        ])
+        plan = sddlog.compute_metrics(store, run_id)["per_phase"]["plan"]
+        assert plan["active_seconds"] == 120.0
+        assert plan["timing_reliable"] is False
+
+    def test_phase_without_hook_events_reports_no_active_time(self, repo):
+        """Better to report nothing than a number that looks measured."""
+        run_id = start_run(repo)
+        store = self._write_log(repo, run_id, [
+            ("2026-09-17T20:00:00.000Z", "phase_start", "tasks", "system"),
+            ("2026-09-17T20:01:00.000Z", "note", "tasks", "human", "manual"),
+            ("2026-09-17T20:02:00.000Z", "phase_end", "tasks", "system"),
+        ])
+        metrics = sddlog.compute_metrics(store, run_id)
+        tasks = metrics["per_phase"]["tasks"]
+        assert tasks["active_seconds"] is None
+        assert tasks["timing_reliable"] is False
+        assert "no real-time (hook) events" in metrics["timing_warnings"][0]
+
+    def test_open_phase_is_flagged(self, repo):
+        run_id = start_run(repo)
+        store = self._write_log(repo, run_id, [
+            ("2026-09-17T20:00:00.000Z", "phase_start", "implement", "system"),
+            ("2026-09-17T20:01:00.000Z", "file_edit", "implement", "agent", "hook"),
+        ])
+        metrics = sddlog.compute_metrics(store, run_id)
+        assert metrics["per_phase"]["implement"]["timing_reliable"] is False
+        assert "never closed" in metrics["timing_warnings"][0]
+
+
+# ---------------------------------------------------------------------------
+# instrument self-exclusion
+#
+# The logger ships inside the repository it measures. Its own code and output
+# must never appear as work on the task under study.
+# ---------------------------------------------------------------------------
+
+
+class TestInstrumentExclusion:
+    def test_path_classification(self):
+        assert sddlog.is_instrument_path("logs/runs/R001/events.jsonl")
+        assert sddlog.is_instrument_path("tools/sddlog/sddlog.py")
+        assert sddlog.is_instrument_path("tools/sddlog/tests/test_sddlog.py")
+        assert not sddlog.is_instrument_path("src/splitter/money.py")
+        assert not sddlog.is_instrument_path("tools/other/helper.py")
+        assert not sddlog.is_instrument_path(None)
+
+    def test_instrument_edits_are_not_captured_by_git(self, repo):
+        run_id = start_run(repo)
+        run_cli(repo, "capture-edits", "--label", "baseline")
+        (repo / "tools" / "sddlog").mkdir(parents=True)
+        (repo / "tools" / "sddlog" / "sddlog.py").write_text("# instrument\n" * 40)
+        (repo / "feature.py").write_text("real = 1\n")
+        run_cli(repo, "capture-edits", "--label", "mixed")
+        paths = [e["payload"]["path"] for e in events_of(repo, run_id)
+                 if e["type"] == "file_edit"]
+        assert paths == ["feature.py"]
+
+    def test_instrument_edits_already_logged_are_excluded_from_metrics(self, repo):
+        """Events written before a path was excluded must still be filtered at
+        derivation time -- the event log is append-only and never rewritten."""
+        run_id = start_run(repo)
+        store = sddlog.Store(repo)
+        store.append(run_id, "phase_start", {"phase": "implement"}, phase="implement")
+        store.append(run_id, "file_edit",
+                     {"path": "tools/sddlog/sddlog.py", "lines_added": 400,
+                      "lines_removed": 10, "source": "hook"}, phase="implement")
+        store.append(run_id, "file_edit",
+                     {"path": "src/splitter/money.py", "lines_added": 30,
+                      "lines_removed": 2, "source": "hook"}, phase="implement")
+        metrics = sddlog.compute_metrics(store, run_id)
+        assert metrics["totals"]["lines_added"] == 30
+        assert metrics["totals"]["lines_removed"] == 2
+        assert metrics["totals"]["distinct_files_touched"] == 1
+        assert metrics["per_phase"]["implement"]["files_touched"] == 1

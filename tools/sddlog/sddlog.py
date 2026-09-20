@@ -67,6 +67,20 @@ CONDITIONS = {"sdd", "unstructured"}
 # the R001 pilot, where an interruption inflated one phase by ~3 days.
 IDLE_THRESHOLD_SECONDS = 300
 
+
+def _is_activity(event):
+    """True if this event is a real-time observation of work happening.
+
+    Only agent-hook events qualify. Everything else the instrument writes --
+    git captures at phase close, artifact snapshots, manual operator notes,
+    transcript backfill -- carries a timestamp describing when the *instrument*
+    ran, not when the work happened. Using those to bound a phase's active
+    span would mask exactly the operator-idle gaps this measure exists to
+    detect. (Found in the R001 pilot: an operator note written three days late
+    made a stalled phase look continuously active.)
+    """
+    return (event.get("payload") or {}).get("source") == "hook"
+
 # --------------------------------------------------------------------------
 # redaction
 # --------------------------------------------------------------------------
@@ -366,10 +380,18 @@ def find_repo_root(start=None):
 # --------------------------------------------------------------------------
 
 
-# The logger writes into logs/ inside the repo under observation. Those writes
-# are instrument output, not agent work, so every measurement excludes them --
-# otherwise each capture would report its own previous events file as an edit.
-MEASURE_PATHSPEC = ["--", ".", ":(exclude)logs"]
+# The instrument lives inside the repository it observes, so its own code and
+# output would otherwise be measured as agent work. Everything under these
+# prefixes is excluded from every measurement -- at capture time via pathspec,
+# and again at derivation time, so that events already written before a path
+# was excluded are still filtered out of the metrics.
+INSTRUMENT_PATHS = ("logs/", "tools/sddlog/")
+
+MEASURE_PATHSPEC = ["--", ".", ":(exclude)logs", ":(exclude)tools/sddlog"]
+
+
+def is_instrument_path(path):
+    return bool(path) and str(path).startswith(INSTRUMENT_PATHS)
 
 
 def _numstat_for(repo, *rev_args):
@@ -535,28 +557,20 @@ def compute_metrics(store, run_id):
         ended = max(last) if last else None
 
     per_phase = {}
-    open_phase = {}
-    first_activity = {}
+    phase_start_ts = {}
+    phase_end_ts = {}
     last_activity = {}
     for event in events:
         etype = event.get("type")
         phase = event.get("phase")
         ts = parse_iso(event["ts"])
         if etype == "phase_start":
-            open_phase[event.get("phase")] = ts
+            phase_start_ts.setdefault(event.get("phase"), ts)
+            per_phase.setdefault(event.get("phase"), _empty_phase())
         elif etype == "phase_end":
-            name = event.get("phase")
-            start_ts = open_phase.pop(name, None)
-            end_ts = ts
-            bucket = per_phase.setdefault(name, _empty_phase())
-            if start_ts and end_ts:
-                bucket["wall_clock_seconds"] += round((end_ts - start_ts).total_seconds(), 1)
-                bucket["_start_ts"] = start_ts
-                bucket["_end_ts"] = end_ts
-        elif phase and ts and etype != "artifact_snapshot":
-            # Anything that is not a marker or an instrument-side snapshot
-            # counts as observed work inside the phase.
-            first_activity.setdefault(phase, ts)
+            phase_end_ts[event.get("phase")] = ts
+            per_phase.setdefault(event.get("phase"), _empty_phase())
+        elif phase and ts and _is_activity(event):
             last_activity[phase] = ts
         if phase:
             bucket = per_phase.setdefault(phase, _empty_phase())
@@ -569,29 +583,52 @@ def compute_metrics(store, run_id):
             elif etype == "tool_call":
                 bucket["tool_calls"] += 1
             elif etype == "file_edit":
-                bucket["files_touched"].add(event["payload"].get("path"))
+                path = event["payload"].get("path")
+                if is_instrument_path(path):
+                    # Instrument maintenance, not work on the task under study.
+                    continue
+                bucket["files_touched"].add(path)
                 bucket["lines_added"] += event["payload"].get("lines_added", 0)
                 bucket["lines_removed"] += event["payload"].get("lines_removed", 0)
 
     timing_warnings = []
     for name, bucket in per_phase.items():
-        start_ts = bucket.pop("_start_ts", None)
-        end_ts = bucket.pop("_end_ts", None)
+        start_ts = phase_start_ts.get(name)
+        end_ts = phase_end_ts.get(name)
         last_ts = last_activity.get(name)
+
+        if start_ts and end_ts:
+            bucket["wall_clock_seconds"] = round((end_ts - start_ts).total_seconds(), 1)
+
         if start_ts and last_ts and last_ts >= start_ts:
-            # Time from the phase opening to the last observed activity: the
-            # measure that survives a late phase_end marker.
+            # Phase opening to last real-time observation: the measure that
+            # survives a late phase_end marker.
             bucket["active_seconds"] = round((last_ts - start_ts).total_seconds(), 1)
+        else:
+            # Without real-time events there is no defensible active span.
+            # Report nothing rather than a number that looks measured.
+            bucket["active_seconds"] = None
+            if end_ts:
+                bucket["timing_reliable"] = False
+                timing_warnings.append(
+                    "%s: no real-time (hook) events in this phase; "
+                    "active_seconds unavailable and wall_clock_seconds unverified"
+                    % name
+                )
+
         if end_ts and last_ts:
             idle = round((end_ts - last_ts).total_seconds(), 1)
             bucket["trailing_idle_seconds"] = max(idle, 0.0)
             if idle > IDLE_THRESHOLD_SECONDS:
                 bucket["timing_reliable"] = False
                 timing_warnings.append(
-                    "%s: phase_end marker issued %.0fs after last activity; "
+                    "%s: phase_end marker issued %.0fs after last observed activity; "
                     "wall_clock_seconds is unreliable, use active_seconds"
                     % (name, idle)
                 )
+        elif end_ts is None:
+            bucket["timing_reliable"] = False
+            timing_warnings.append("%s: phase never closed" % name)
 
     for bucket in per_phase.values():
         bucket["files_touched"] = len(bucket["files_touched"])
@@ -599,13 +636,16 @@ def compute_metrics(store, run_id):
         # prompts is the conversational cost measure used for RQ3.
         bucket["turns"] = bucket["human_prompts"]
 
+    def _active(bucket):
+        return bucket.get("active_seconds") or 0.0
+
     reliable_phases = [b for b in per_phase.values() if b.get("timing_reliable", True)]
     totals = {
         "wall_clock_seconds": round((ended - started).total_seconds(), 1) if (started and ended) else None,
-        "active_seconds": round(sum(b.get("active_seconds", 0.0) for b in per_phase.values()), 1),
+        "active_seconds": round(sum(_active(b) for b in per_phase.values()), 1),
         "active_seconds_reliable_phases_only": round(
-            sum(b.get("active_seconds", 0.0) for b in reliable_phases), 1),
-        "phases_completed": sum(1 for p in per_phase.values() if p["wall_clock_seconds"] > 0),
+            sum(_active(b) for b in reliable_phases), 1),
+        "phases_completed": len(phase_end_ts),
         "human_prompts": sum(p["human_prompts"] for p in per_phase.values()),
         "prompt_words": sum(p["prompt_words"] for p in per_phase.values()),
         "agent_outputs": sum(p["agent_outputs"] for p in per_phase.values()),
@@ -617,7 +657,9 @@ def compute_metrics(store, run_id):
             {
                 e["payload"].get("path")
                 for e in events
-                if e.get("type") == "file_edit" and e["payload"].get("path")
+                if e.get("type") == "file_edit"
+                and e["payload"].get("path")
+                and not is_instrument_path(e["payload"].get("path"))
             }
         ),
         "events": len(events),
@@ -746,7 +788,10 @@ def verify_run(store, run_id):
 
     if not any(e.get("type") == "prompt" for e in events):
         warnings.append("no prompts captured - check hook installation")
-    if not any(e.get("type") == "file_edit" for e in events):
+    if not any(
+        e.get("type") == "file_edit" and not is_instrument_path(e["payload"].get("path"))
+        for e in events
+    ):
         warnings.append("no file edits captured - check capture-edits calls")
 
     return problems, warnings
