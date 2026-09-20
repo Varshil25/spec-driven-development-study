@@ -540,3 +540,118 @@ class TestTranscriptIngestion:
         start_run(repo)
         proc = run_cli(repo, "ingest-transcript", "--path", "/nonexistent/x.jsonl")
         assert proc.returncode != 0
+
+
+# ---------------------------------------------------------------------------
+# phase timing reliability
+#
+# Added after the R001 pilot, where an operator interruption between the end of
+# the agent's plan run and the phase_end marker inflated that phase's
+# marker-to-marker wall clock by roughly three days.
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseTiming:
+    def _write_log(self, repo, run_id, rows):
+        """Replace the event log with hand-built timestamps.
+
+        Timing behaviour is not reproducible from real runs inside a test, so
+        the log is synthesised directly and read back through the real
+        metrics code path.
+        """
+        store = sddlog.Store(repo)
+        events = []
+        for seq, (ts, etype, phase, actor) in enumerate(rows, 1):
+            events.append({
+                "schema_version": sddlog.SCHEMA_VERSION,
+                "event_id": "e%d" % seq,
+                "run_id": run_id,
+                "seq": seq,
+                "ts": ts,
+                "type": etype,
+                "actor": actor,
+                "phase": phase,
+                "condition": "sdd",
+                "task_id": "T-TEST-01",
+                "session_id": None,
+                "payload": (
+                    {"phase": phase} if etype.startswith("phase_")
+                    else {"artifact": "spec", "words": 1} if etype == "artifact_snapshot"
+                    else {"words": 1}
+                ),
+            })
+        store.events_path(run_id).write_text(
+            "\n".join(json.dumps(e) for e in events) + "\n")
+        return store
+
+    def test_active_time_ignores_a_late_phase_end_marker(self, repo):
+        run_id = start_run(repo)
+        store = self._write_log(repo, run_id, [
+            ("2026-09-17T20:00:00.000Z", "phase_start", "plan", "system"),
+            ("2026-09-17T20:00:10.000Z", "prompt", "plan", "human"),
+            ("2026-09-17T20:05:00.000Z", "file_edit", "plan", "agent"),
+            # operator walked away; marker issued three days later
+            ("2026-09-20T18:00:00.000Z", "phase_end", "plan", "system"),
+        ])
+        metrics = sddlog.compute_metrics(store, run_id)
+        plan = metrics["per_phase"]["plan"]
+        assert plan["active_seconds"] == 300.0          # 20:00:00 -> 20:05:00
+        assert plan["wall_clock_seconds"] > 200000      # contaminated
+        assert plan["timing_reliable"] is False
+        assert plan["trailing_idle_seconds"] > 200000
+
+    def test_prompt_phase_end_is_marked_reliable(self, repo):
+        run_id = start_run(repo)
+        store = self._write_log(repo, run_id, [
+            ("2026-09-17T20:00:00.000Z", "phase_start", "specify", "system"),
+            ("2026-09-17T20:03:00.000Z", "file_edit", "specify", "agent"),
+            ("2026-09-17T20:03:05.000Z", "phase_end", "specify", "system"),
+        ])
+        metrics = sddlog.compute_metrics(store, run_id)
+        specify = metrics["per_phase"]["specify"]
+        assert specify["timing_reliable"] is True
+        assert specify["active_seconds"] == 180.0
+        assert specify["trailing_idle_seconds"] == 5.0
+        assert metrics["timing_warnings"] == []
+
+    def test_unreliable_phase_is_excluded_from_reliable_total(self, repo):
+        run_id = start_run(repo)
+        store = self._write_log(repo, run_id, [
+            ("2026-09-17T20:00:00.000Z", "phase_start", "specify", "system"),
+            ("2026-09-17T20:01:00.000Z", "file_edit", "specify", "agent"),
+            ("2026-09-17T20:01:02.000Z", "phase_end", "specify", "system"),
+            ("2026-09-17T20:02:00.000Z", "phase_start", "plan", "system"),
+            ("2026-09-17T20:03:00.000Z", "file_edit", "plan", "agent"),
+            ("2026-09-20T18:00:00.000Z", "phase_end", "plan", "system"),
+        ])
+        metrics = sddlog.compute_metrics(store, run_id)
+        totals = metrics["totals"]
+        assert totals["active_seconds_reliable_phases_only"] == 60.0
+        assert totals["active_seconds"] == 120.0
+        assert len(metrics["timing_warnings"]) == 1
+        assert "plan" in metrics["timing_warnings"][0]
+
+    def test_verify_surfaces_the_timing_warning(self, repo):
+        run_id = start_run(repo)
+        self._write_log(repo, run_id, [
+            ("2026-09-17T20:00:00.000Z", "phase_start", "plan", "system"),
+            ("2026-09-17T20:03:00.000Z", "file_edit", "plan", "agent"),
+            ("2026-09-20T18:00:00.000Z", "phase_end", "plan", "system"),
+        ])
+        proc = run_cli(repo, "verify", "--run-id", run_id)
+        assert "unreliable" in proc.stdout
+        assert "use active_seconds" in proc.stdout
+
+    def test_snapshots_do_not_count_as_activity(self, repo):
+        """Snapshots are written by the instrument at phase close, so counting
+        them as activity would mask exactly the idle gap we want to detect."""
+        run_id = start_run(repo)
+        store = self._write_log(repo, run_id, [
+            ("2026-09-17T20:00:00.000Z", "phase_start", "plan", "system"),
+            ("2026-09-17T20:01:00.000Z", "file_edit", "plan", "agent"),
+            ("2026-09-20T17:59:00.000Z", "artifact_snapshot", "plan", "system"),
+            ("2026-09-20T18:00:00.000Z", "phase_end", "plan", "system"),
+        ])
+        metrics = sddlog.compute_metrics(store, run_id)
+        assert metrics["per_phase"]["plan"]["active_seconds"] == 60.0
+        assert metrics["per_phase"]["plan"]["timing_reliable"] is False

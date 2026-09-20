@@ -60,6 +60,13 @@ EVENT_TYPES = {
 
 CONDITIONS = {"sdd", "unstructured"}
 
+# Marker-to-marker wall clock is only as good as the operator's discipline in
+# closing a phase. If the gap between the last observed agent activity and the
+# phase_end marker exceeds this, the phase's wall_clock is treated as
+# contaminated by operator idle time and flagged unreliable. Discovered during
+# the R001 pilot, where an interruption inflated one phase by ~3 days.
+IDLE_THRESHOLD_SECONDS = 300
+
 # --------------------------------------------------------------------------
 # redaction
 # --------------------------------------------------------------------------
@@ -529,18 +536,28 @@ def compute_metrics(store, run_id):
 
     per_phase = {}
     open_phase = {}
+    first_activity = {}
+    last_activity = {}
     for event in events:
         etype = event.get("type")
         phase = event.get("phase")
+        ts = parse_iso(event["ts"])
         if etype == "phase_start":
-            open_phase[event.get("phase")] = parse_iso(event["ts"])
+            open_phase[event.get("phase")] = ts
         elif etype == "phase_end":
             name = event.get("phase")
             start_ts = open_phase.pop(name, None)
-            end_ts = parse_iso(event["ts"])
+            end_ts = ts
             bucket = per_phase.setdefault(name, _empty_phase())
             if start_ts and end_ts:
                 bucket["wall_clock_seconds"] += round((end_ts - start_ts).total_seconds(), 1)
+                bucket["_start_ts"] = start_ts
+                bucket["_end_ts"] = end_ts
+        elif phase and ts and etype != "artifact_snapshot":
+            # Anything that is not a marker or an instrument-side snapshot
+            # counts as observed work inside the phase.
+            first_activity.setdefault(phase, ts)
+            last_activity[phase] = ts
         if phase:
             bucket = per_phase.setdefault(phase, _empty_phase())
             if etype == "prompt":
@@ -556,14 +573,38 @@ def compute_metrics(store, run_id):
                 bucket["lines_added"] += event["payload"].get("lines_added", 0)
                 bucket["lines_removed"] += event["payload"].get("lines_removed", 0)
 
+    timing_warnings = []
+    for name, bucket in per_phase.items():
+        start_ts = bucket.pop("_start_ts", None)
+        end_ts = bucket.pop("_end_ts", None)
+        last_ts = last_activity.get(name)
+        if start_ts and last_ts and last_ts >= start_ts:
+            # Time from the phase opening to the last observed activity: the
+            # measure that survives a late phase_end marker.
+            bucket["active_seconds"] = round((last_ts - start_ts).total_seconds(), 1)
+        if end_ts and last_ts:
+            idle = round((end_ts - last_ts).total_seconds(), 1)
+            bucket["trailing_idle_seconds"] = max(idle, 0.0)
+            if idle > IDLE_THRESHOLD_SECONDS:
+                bucket["timing_reliable"] = False
+                timing_warnings.append(
+                    "%s: phase_end marker issued %.0fs after last activity; "
+                    "wall_clock_seconds is unreliable, use active_seconds"
+                    % (name, idle)
+                )
+
     for bucket in per_phase.values():
         bucket["files_touched"] = len(bucket["files_touched"])
         # One "turn" is a human prompt answered by the agent; the count of
         # prompts is the conversational cost measure used for RQ3.
         bucket["turns"] = bucket["human_prompts"]
 
+    reliable_phases = [b for b in per_phase.values() if b.get("timing_reliable", True)]
     totals = {
         "wall_clock_seconds": round((ended - started).total_seconds(), 1) if (started and ended) else None,
+        "active_seconds": round(sum(b.get("active_seconds", 0.0) for b in per_phase.values()), 1),
+        "active_seconds_reliable_phases_only": round(
+            sum(b.get("active_seconds", 0.0) for b in reliable_phases), 1),
         "phases_completed": sum(1 for p in per_phase.values() if p["wall_clock_seconds"] > 0),
         "human_prompts": sum(p["human_prompts"] for p in per_phase.values()),
         "prompt_words": sum(p["prompt_words"] for p in per_phase.values()),
@@ -585,8 +626,13 @@ def compute_metrics(store, run_id):
     artifact_sizes = {}
     for event in events:
         if event.get("type") == "artifact_snapshot":
-            payload = event["payload"]
-            artifact_sizes.setdefault(payload["artifact"], {})[event.get("phase")] = {
+            payload = event.get("payload") or {}
+            name = payload.get("artifact")
+            if not name:
+                # A truncated or partially written event must not abort the
+                # whole metrics run; the log is append-only and may end mid-write.
+                continue
+            artifact_sizes.setdefault(name, {})[event.get("phase")] = {
                 "words": payload.get("words"),
                 "sha256": payload.get("sha256"),
             }
@@ -601,12 +647,16 @@ def compute_metrics(store, run_id):
         "totals": totals,
         "per_phase": {k: per_phase[k] for k in PHASES if k in per_phase},
         "artifacts": artifact_sizes,
+        "timing_warnings": timing_warnings,
     }
 
 
 def _empty_phase():
     return {
         "wall_clock_seconds": 0.0,
+        "active_seconds": 0.0,
+        "trailing_idle_seconds": 0.0,
+        "timing_reliable": True,
         "human_prompts": 0,
         "prompt_words": 0,
         "agent_outputs": 0,
@@ -690,6 +740,9 @@ def verify_run(store, run_id):
         missing = required - seen
         if missing:
             warnings.append("SDD run missing completed phases: %s" % ", ".join(sorted(missing)))
+
+    for warning in compute_metrics(store, run_id).get("timing_warnings", []):
+        warnings.append(warning)
 
     if not any(e.get("type") == "prompt" for e in events):
         warnings.append("no prompts captured - check hook installation")
@@ -946,7 +999,9 @@ def render_report(metrics):
     lines.append("| Measure | Value |")
     lines.append("| --- | --- |")
     for label, key in (
-        ("Wall-clock (s)", "wall_clock_seconds"),
+        ("Active time, all phases (s)", "active_seconds"),
+        ("Active time, reliable phases only (s)", "active_seconds_reliable_phases_only"),
+        ("Wall-clock, run start to end (s)", "wall_clock_seconds"),
         ("Phases completed", "phases_completed"),
         ("Human prompts (turns)", "human_prompts"),
         ("Prompt words", "prompt_words"),
@@ -962,14 +1017,16 @@ def render_report(metrics):
     lines.append("")
     lines.append("## Per phase")
     lines.append("")
-    lines.append("| Phase | Wall-clock (s) | Turns | Prompt words | Tool calls | Files | +Lines | -Lines |")
+    lines.append("| Phase | Active (s) | Wall-clock (s) | Turns | Prompt words | Tool calls | Files | +Lines | -Lines |")
     lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for phase, bucket in metrics["per_phase"].items():
         lines.append(
-            "| %s | %s | %s | %s | %s | %s | %s | %s |"
+            "| %s | %s | %s%s | %s | %s | %s | %s | %s | %s |"
             % (
                 phase,
+                bucket.get("active_seconds"),
                 bucket["wall_clock_seconds"],
+                "" if bucket.get("timing_reliable", True) else " (unreliable)",
                 bucket["turns"],
                 bucket["prompt_words"],
                 bucket["tool_calls"],
@@ -978,6 +1035,12 @@ def render_report(metrics):
                 bucket["lines_removed"],
             )
         )
+    if metrics.get("timing_warnings"):
+        lines.append("")
+        lines.append("## Timing warnings")
+        lines.append("")
+        for warning in metrics["timing_warnings"]:
+            lines.append("- %s" % warning)
     if metrics.get("artifacts"):
         lines.append("")
         lines.append("## Artifact growth (words by phase)")

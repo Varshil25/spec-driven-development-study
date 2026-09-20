@@ -1,0 +1,447 @@
+diff --git a/specs/001-expense-splitter/contracts/cli.md b/specs/001-expense-splitter/contracts/cli.md
+new file mode 100644
+index 0000000..290f1fd
+--- /dev/null
++++ b/specs/001-expense-splitter/contracts/cli.md
+@@ -0,0 +1,78 @@
++# CLI Contract: Expense Splitter
++
++The tool's external interface is its command-line invocation, its stdout/stderr streams, and its exit code. This contract is the source of truth for the end-to-end tests in `tests/test_cli.py`.
++
++## Invocation
++
++```text
++python -m splitter <expenses.csv> --participants "Name1,Name2,Name3"
++```
++
++| Argument | Kind | Required | Meaning |
++|----------|------|----------|---------|
++| `expenses.csv` | positional | yes | Path to the CSV file of expenses |
++| `--participants` | option (string) | yes | Comma-separated participant names; whitespace around each name is trimmed |
++
++Running from source requires `src/` on the import path (e.g. `PYTHONPATH=src python -m splitter ...`).
++
++## Input CSV format
++
++- First line is a header with exactly the columns `payer`, `amount`, `description`.
++- Each subsequent line is one expense.
++- `amount` is a decimal currency value with at most two fractional digits (e.g. `12.50`, `30`, `0`).
++
++Example:
++
++```csv
++payer,amount,description
++Alice,30.00,Hotel
++Bob,0,none
++```
++
++## Success output (stdout, exit 0)
++
++- A deterministic, human-readable list of transfers, one per line, of the form:
++
++  ```text
++  Bob pays Alice 15.00
++  ```
++
++  Amounts are formatted at the output boundary as a plain decimal with two fractional digits (whole-cent precision, no locale symbol) — FR-018.
++
++- When the group is already settled (all net balances zero), stdout states that no payments are needed and the tool exits `0` (FR-010). Example:
++
++  ```text
++  Already settled — no payments needed.
++  ```
++
++- Payment ordering is deterministic and derived from the supplied participant-list order (FR-017, SC-005). Repeated runs on identical input produce byte-identical stdout.
++
++**Guarantees** (asserted by tests):
++- Sum of printed payment amounts == total imbalance, exactly (FR-008, SC-001).
++- Applying printed payments zeroes every net balance (SC-002).
++- Number of payments ≤ (participants with non-zero balance) − 1 (SC-003).
++
++## Error output (stderr, non-zero exit)
++
++On any invalid input the tool writes a clear message to **stderr**, writes **nothing** to stdout, and exits with a **non-zero** status (Principle III, FR-011..FR-016). The message identifies the specific problem.
++
++| Case | stderr message (illustrative) |
++|------|-------------------------------|
++| File not found / unreadable | `error: cannot read expenses file: no such file 'missing.csv'` |
++| Missing/misnamed header | `error: CSV header must have columns: payer, amount, description` |
++| Row missing a field | `error: row 3: missing required field 'amount'` |
++| Unknown payer | `error: row 2: payer 'Carol' is not in the participant list` |
++| Bad amount (non-numeric) | `error: row 2: amount 'abc' is not a valid number` |
++| Negative amount | `error: row 2: amount '-5.00' must not be negative` |
++| Over-precise amount | `error: row 2: amount '12.505' has more than two decimal places` |
++| Empty participant list | `error: participant list must not be empty` |
++| Duplicate participants | `error: duplicate participant name 'Alice'` |
++
++Exact message wording is an implementation detail fixed by the tests; the contract requires that the message is on stderr, names the offending element, stdout is empty, and the exit code is non-zero.
++
++## Exit codes
++
++| Code | Meaning |
++|------|---------|
++| `0` | Success — settlement (or "already settled") printed to stdout |
++| non-zero | Any validation or I/O error — message on stderr, no stdout settlement |
+diff --git a/specs/001-expense-splitter/data-model.md b/specs/001-expense-splitter/data-model.md
+new file mode 100644
+index 0000000..a3fbe94
+--- /dev/null
++++ b/specs/001-expense-splitter/data-model.md
+@@ -0,0 +1,86 @@
++# Phase 1 Data Model: Expense Splitter
++
++All monetary quantities below are **integer cents** (`int`), never floats (Principle II). Entities are plain in-memory values produced during a single invocation; there is no persistence.
++
++## Entity: Participant
++
++A named member of the group, drawn from the supplied participant list.
++
++| Field | Type | Notes |
++|-------|------|-------|
++| `name` | `str` | Unique within the group; exact match after trimming surrounding whitespace |
++| `paid_cents` | `int` | Total contributed across all their expenses; ≥ 0; defaults to 0 if they never paid |
++| `share_cents` | `int` | Assigned equal share of the group total (see remainder rule below) |
++
++**Derived**: `net_cents = paid_cents - share_cents` (see Net Balance).
++
++**Validation rules**:
++- The participant list MUST be non-empty (FR-014).
++- Names MUST be unique after trimming; duplicate names → reject (spec Edge Cases, Assumptions).
++- Ordering is the order names appear in the supplied `--participants` argument; this order drives all deterministic output (FR-017).
++
++## Entity: Expense
++
++A single recorded payment read from one CSV data row.
++
++| Field | Type | Notes |
++|-------|------|-------|
++| `payer` | `str` | MUST match a participant name exactly (FR-012) |
++| `amount_cents` | `int` | ≥ 0; parsed exactly from the decimal string; `0` is valid (spec Edge Cases) |
++| `description` | `str` | Informational only; never used in computation (FR — Assumptions) |
++
++**Validation rules**:
++- Row MUST contain non-blank `payer` and `amount` fields (FR-015; blank → reject).
++- `amount` MUST be numeric, non-negative, and representable in whole cents (≤ 2 decimal places); otherwise reject naming the bad amount (FR-013).
++- `payer` MUST be in the participant list; otherwise reject naming the payer (FR-012).
++- The CSV MUST have a header row with columns `payer`, `amount`, `description`; missing/misnamed header → reject (FR-002, FR-015).
++
++## Entity: Net Balance
++
++Per-participant result of `paid_cents - share_cents`.
++
++| Field | Type | Notes |
++|-------|------|-------|
++| `participant` | `str` | Participant name |
++| `net_cents` | `int` | Positive → creditor (group owes them); negative → debtor (owes group); zero → settled |
++
++**Invariants**:
++- The sum of all `net_cents` across participants MUST equal `0` (conservation, Principle II).
++- The sum of assigned `share_cents` MUST equal the group total exactly (FR-004).
++
++## Entity: Payment
++
++A proposed transfer in the settlement plan.
++
++| Field | Type | Notes |
++|-------|------|-------|
++| `from_name` | `str` | A net debtor |
++| `to_name` | `str` | A net creditor |
++| `amount_cents` | `int` | > 0 |
++
++**Invariants**:
++- The sum of all `amount_cents` MUST equal the total imbalance (sum of positive `net_cents`) exactly (FR-008, SC-001).
++- Applying all payments MUST bring every participant's `net_cents` to `0` (SC-002).
++- The count of payments MUST NOT exceed `(number of participants with non-zero net balance) - 1` (FR-007, SC-003).
++- When all balances are zero, the payment list is empty and the tool reports "already settled" (FR-010, spec Edge Cases).
++
++## Share remainder rule (deterministic)
++
++Given `total_cents` and `n` participants:
++- `base = total_cents // n`, `r = total_cents % n`.
++- Every participant gets `share_cents = base`; the first `r` participants **in supplied list order** get `+1` cent.
++- Result: `sum(share_cents) == total_cents` exactly, and any two shares differ by at most one cent.
++
++## Error taxonomy (raised by `parser.py`, formatted by `cli.py`)
++
++| Condition | Requirement |
++|-----------|-------------|
++| CSV file missing/unreadable | FR-011 |
++| Missing/misnamed header or missing required column | FR-015, FR-002 |
++| Row missing a required field (blank payer/amount) | FR-015 |
++| Payer not in participant list | FR-012 |
++| Amount non-numeric, negative, or >2 decimals | FR-013 |
++| Empty participant list | FR-014 |
++| Duplicate participant names | spec Edge Cases / Assumptions |
++
++Every error → clear stderr message + non-zero exit + **no** stdout settlement (FR-016, Principle III).
+diff --git a/specs/001-expense-splitter/plan.md b/specs/001-expense-splitter/plan.md
+new file mode 100644
+index 0000000..d11d42d
+--- /dev/null
++++ b/specs/001-expense-splitter/plan.md
+@@ -0,0 +1,90 @@
++# Implementation Plan: Expense Splitter
++
++**Branch**: `001-expense-splitter` | **Date**: 2026-09-17 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/001-expense-splitter/spec.md`
++
++## Summary
++
++A command-line tool that reads a CSV of shared group expenses (`payer, amount, description`) plus a separately supplied comma-separated participant list, computes each participant's net balance against an equal share of the group total, and prints a minimal list of debtor→creditor transfers that settles every balance to zero. All money is handled as integer cents so no cent is ever lost or invented, and any indivisible remainder is distributed deterministically. Malformed input fails loudly on stderr with a non-zero exit and no stdout settlement.
++
++Technical approach: a standard-library-only Python package `src/splitter/` split by responsibility — argument parsing/exit codes (`cli.py`), CSV reading and validation (`parser.py`), balance and minimal-transaction computation (`settle.py`), and integer-cent helpers (`money.py`). Runnable as `python -m splitter`. Tested with `pytest` in `tests/`.
++
++## Technical Context
++
++**Language/Version**: Python 3.11+
++
++**Primary Dependencies**: None at runtime (Python standard library only: `argparse`, `csv`, `sys`, `decimal` for exact parse-to-cents). `pytest` is a development-only dependency.
++
++**Storage**: N/A (reads a CSV file passed as an argument; no persistence)
++
++**Testing**: pytest
++
++**Target Platform**: Any platform with CPython 3.11+ (Linux, macOS, Windows)
++
++**Project Type**: Single-project CLI utility
++
++**Performance Goals**: Handle a typical group (up to a few dozen expenses) instantly in a single invocation; no formal throughput target (SC-006)
++
++**Constraints**: Standard library only at runtime; integer-cent arithmetic end to end (no floats holding money); byte-identical deterministic output; diagnostics to stderr with non-zero exit, results to stdout
++
++**Scale/Scope**: Small utility — 4 source modules plus `__main__.py`, one test package; input sized to human-authored expense lists (tens to low hundreds of rows)
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++| Principle | Compliance in this plan |
++|-----------|-------------------------|
++| I. Standard Library Only | Runtime imports limited to stdlib (`argparse`, `csv`, `sys`, `decimal`). `pytest` is test-only and never imported by `src/splitter/`. **PASS** |
++| II. Exact Money Arithmetic | All money held as `int` cents. `decimal.Decimal` used only to parse the input string to an exact cent count (rejecting >2 decimal places), never to hold running money as a float. Share distribution allocates remainder cents deterministically; conservation asserted by tests. **PASS** |
++| III. Fail Loudly | `parser.py` raises typed validation errors; `cli.py` maps them to a clear stderr message + non-zero exit, and prints nothing to stdout on any rejection (FR-011..FR-016). **PASS** |
++| IV. Every Requirement Is Testable | Each FR maps to at least one pytest test (see [quickstart.md](./quickstart.md) and contract tests). Money conservation and error paths are explicit test classes. **PASS** |
++| V. Deterministic Output | Participant order derived from the supplied list order (not hashing); payments produced by a deterministic settlement strategy; remainder distribution is order-defined. Byte-identical output asserted (FR-017, SC-005). **PASS** |
++
++**Initial gate**: PASS — no violations, Complexity Tracking not required.
++
++**Post-design re-check**: PASS — the Phase 1 design (see [data-model.md](./data-model.md), [contracts/](./contracts/)) introduces no third-party runtime dependency, keeps all money as integer cents, and preserves deterministic ordering. No new violations.
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/001-expense-splitter/
++├── plan.md              # This file (/speckit-plan command output)
++├── research.md          # Phase 0 output (/speckit-plan command)
++├── data-model.md        # Phase 1 output (/speckit-plan command)
++├── quickstart.md        # Phase 1 output (/speckit-plan command)
++├── contracts/           # Phase 1 output (/speckit-plan command)
++│   └── cli.md           # CLI invocation, output, and exit-code contract
++└── tasks.md             # Phase 2 output (/speckit-tasks command - NOT created by /speckit-plan)
++```
++
++### Source Code (repository root)
++
++```text
++src/
++└── splitter/
++    ├── __init__.py      # Package marker; may expose version
++    ├── __main__.py      # Enables `python -m splitter`; delegates to cli.main()
++    ├── cli.py           # argparse setup, orchestration, stdout/stderr, exit codes
++    ├── parser.py        # CSV reading, header/field validation, payer-in-participants check
++    ├── settle.py        # net-balance computation + minimal-transaction settlement
++    └── money.py         # integer-cent helpers: parse-to-cents, format-from-cents
++
++tests/
++├── __init__.py
++├── test_money.py        # cent parsing/formatting, rejection of >2 decimals & negatives
++├── test_settle.py       # balances, minimality, conservation, uneven-split remainder
++├── test_parser.py       # header/field/payer validation, participant-list validation
++└── test_cli.py          # end-to-end: exit codes, stdout settlement, stderr errors
++
++pyproject.toml           # dev metadata + pytest config (no runtime deps)
++```
++
++**Structure Decision**: Single-project CLI layout. Runtime code lives in an importable package `src/splitter/` divided along the four responsibilities named in the technical input, with `__main__.py` providing the `python -m splitter` entry point. Tests mirror the modules one-to-one plus an end-to-end CLI test. No installable packaging beyond an optional `pyproject.toml` for pytest configuration; the tool runs directly from source with `python -m splitter` (with `src/` on the path).
++
++## Complexity Tracking
++
++> No constitution violations. No entries required.
+diff --git a/specs/001-expense-splitter/quickstart.md b/specs/001-expense-splitter/quickstart.md
+new file mode 100644
+index 0000000..4980eaa
+--- /dev/null
++++ b/specs/001-expense-splitter/quickstart.md
+@@ -0,0 +1,117 @@
++# Quickstart & Validation: Expense Splitter
++
++This guide proves the feature works end to end. It references [contracts/cli.md](./contracts/cli.md) for the exact CLI surface and [data-model.md](./data-model.md) for entity/invariant details rather than repeating them.
++
++## Prerequisites
++
++- Python 3.11+ (`python --version`)
++- `pytest` for the test suite (development-only dependency): `python -m pip install pytest`
++- No third-party runtime dependencies (Constitution Principle I)
++
++## Setup
++
++From the repository root, put the package on the import path:
++
++```bash
++export PYTHONPATH=src
++```
++
++## Scenario 1 — Basic settlement (User Story 1, FR-001..FR-010)
++
++```bash
++cat > /tmp/trip.csv <<'CSV'
++payer,amount,description
++Alice,30.00,Hotel
++Bob,0,none
++CSV
++
++python -m splitter /tmp/trip.csv --participants "Alice,Bob"
++```
++
++**Expected**: exit code `0`, and stdout:
++
++```text
++Bob pays Alice 15.00
++```
++
++## Scenario 2 — Already settled (FR-010, Edge Cases)
++
++```bash
++cat > /tmp/even.csv <<'CSV'
++payer,amount,description
++Alice,10.00,Lunch
++Bob,10.00,Dinner
++CSV
++
++python -m splitter /tmp/even.csv --participants "Alice,Bob"
++```
++
++**Expected**: exit code `0`, stdout states no payments are needed (e.g. `Already settled — no payments needed.`).
++
++## Scenario 3 — Uneven split conserves every cent (User Story 3, FR-004/FR-008, SC-001)
++
++```bash
++cat > /tmp/three.csv <<'CSV'
++payer,amount,description
++Alice,10.00,Coffee
++CSV
++
++python -m splitter /tmp/three.csv --participants "Alice,Bob,Carol"
++```
++
++**Expected**: exit code `0`. Shares are `3.34 / 3.33 / 3.33` (sum exactly `10.00`); printed payments sum to exactly the total imbalance, and applying them zeroes every balance.
++
++## Scenario 4 — Malformed input fails loudly (User Story 2, FR-011..FR-016, SC-004)
++
++Each command below MUST print an error to **stderr**, print **nothing** to stdout, and exit **non-zero**.
++
++```bash
++# Missing file (FR-011)
++python -m splitter /tmp/does-not-exist.csv --participants "Alice,Bob"; echo "exit=$?"
++
++# Unknown payer (FR-012)
++printf 'payer,amount,description\nCarol,5.00,x\n' > /tmp/bad_payer.csv
++python -m splitter /tmp/bad_payer.csv --participants "Alice,Bob"; echo "exit=$?"
++
++# Negative / non-numeric / over-precise amount (FR-013)
++printf 'payer,amount,description\nAlice,-5.00,x\n' > /tmp/bad_amt.csv
++python -m splitter /tmp/bad_amt.csv --participants "Alice,Bob"; echo "exit=$?"
++
++# Empty participant list (FR-014)
++printf 'payer,amount,description\nAlice,5.00,x\n' > /tmp/ok.csv
++python -m splitter /tmp/ok.csv --participants ""; echo "exit=$?"
++
++# Missing header column (FR-015)
++printf 'payer,amount\nAlice,5.00\n' > /tmp/bad_header.csv
++python -m splitter /tmp/bad_header.csv --participants "Alice,Bob"; echo "exit=$?"
++```
++
++**Expected**: every case prints a clear stderr message naming the problem and reports a non-zero `exit=`.
++
++## Scenario 5 — Deterministic output (FR-017, SC-005)
++
++```bash
++python -m splitter /tmp/three.csv --participants "Alice,Bob,Carol" > /tmp/run1.txt
++python -m splitter /tmp/three.csv --participants "Alice,Bob,Carol" > /tmp/run2.txt
++diff /tmp/run1.txt /tmp/run2.txt && echo "byte-identical"
++```
++
++**Expected**: `diff` reports no differences (`byte-identical`).
++
++## Run the automated suite
++
++```bash
++python -m pytest
++```
++
++**Expected**: all tests pass. The suite covers money helpers (`test_money.py`), settlement + conservation + minimality (`test_settle.py`), CSV/participant validation (`test_parser.py`), and end-to-end CLI behavior including exit codes and stderr (`test_cli.py`) — one or more tests per functional requirement (Constitution Principle IV).
++
++## Requirement coverage map
++
++| Requirement group | Validated by |
++|-------------------|--------------|
++| FR-001..FR-010 (read, compute, settle, output) | Scenarios 1–3; `test_settle.py`, `test_cli.py` |
++| FR-004, FR-008, FR-009 (conservation, integer cents) | Scenario 3; `test_money.py`, `test_settle.py` |
++| FR-007 (minimal transactions) | `test_settle.py` (SC-003 bound) |
++| FR-011..FR-016 (fail loudly, no partial stdout) | Scenario 4; `test_parser.py`, `test_cli.py` |
++| FR-017, FR-018 (deterministic, formatted output) | Scenarios 1 & 5; `test_cli.py` |
+diff --git a/specs/001-expense-splitter/research.md b/specs/001-expense-splitter/research.md
+new file mode 100644
+index 0000000..d9d2fdf
+--- /dev/null
++++ b/specs/001-expense-splitter/research.md
+@@ -0,0 +1,46 @@
++# Phase 0 Research: Expense Splitter
++
++All technical parameters were supplied by the user input and the project constitution; there are no open `NEEDS CLARIFICATION` items. This document records the resolved decisions and the reasoning behind each.
++
++## Decision 1: Parse currency strings to integer cents with `decimal.Decimal`
++
++- **Decision**: Read each `amount` field as text, parse it with `decimal.Decimal`, reject any value with more than two fractional digits or a non-numeric/negative value, then convert to an `int` number of cents (`Decimal * 100`, verified to be integral).
++- **Rationale**: `Decimal` parses the human-authored decimal string exactly (no binary float error), lets us detect >2-decimal precision precisely (e.g. `12.505` → reject), and gives an exact integer cent count. This satisfies Principle II (no float ever holds money) while honoring the assumption that over-precise amounts are rejected rather than rounded (spec Assumptions, FR-013).
++- **Alternatives considered**:
++  - *Parse with `float`*: rejected — introduces binary representation error and violates Principle II.
++  - *Manual string splitting on `.`*: rejected — brittle against signs, whitespace, exponent forms, and thousands separators; `Decimal` handles these uniformly and we can validate its result.
++
++## Decision 2: Distribute the equal share with a deterministic largest-remainder allocation
++
++- **Decision**: Compute `base = total_cents // n` for each participant, then distribute the `total_cents % n` leftover cents one each to the first `r` participants in the supplied participant-list order.
++- **Rationale**: Guarantees the assigned shares sum exactly to the group total (conservation, FR-004/FR-008/SC-001) and is fully deterministic because it keys off the caller-supplied list order, not hashing (Principle V, FR-017). Per-person shares differ by at most one cent (SC of User Story 3).
++- **Alternatives considered**:
++  - *Round each share independently*: rejected — can lose or invent cents; no conservation guarantee.
++  - *Randomized remainder assignment*: rejected — violates determinism.
++
++## Decision 3: Minimal-transaction settlement via a greedy debtor/creditor match
++
++- **Decision**: Separate participants into debtors (negative net balance) and creditors (positive net balance), then repeatedly match the largest-magnitude debtor with the largest-magnitude creditor, transferring `min(|debt|, credit)` until all balances are zero. Order ties deterministically by the supplied participant-list order.
++- **Rationale**: Produces at most `k-1` transactions for `k` participants with non-zero balance (SC-003), and because every transfer fully clears at least one party, the number of transactions is minimized in the common case. Working in integer cents makes the sum of transfers equal the total imbalance exactly (FR-008). Deterministic tie-breaking preserves byte-identical output (Principle V).
++- **Alternatives considered**:
++  - *Exact minimum-transaction (subset-sum / partition) solver*: rejected — NP-hard, unnecessary for a small utility, and risks non-determinism; the greedy approach meets the SC-003 bound and the spec's definition of "minimal" (see spec Assumptions: minimize transactions with a deterministic strategy).
++  - *Every debtor pays every creditor proportionally*: rejected — produces far more than `k-1` transactions.
++
++## Decision 4: Argument and I/O contract via `argparse`
++
++- **Decision**: Use `argparse` with a positional CSV path and a `--participants` (comma-separated) option (exact CLI surface fixed in [contracts/cli.md](./contracts/cli.md)). Results to stdout, diagnostics to stderr, exit `0` on success, non-zero on any validation failure.
++- **Rationale**: Standard library, gives usage/`--help` for free, and cleanly separates parsing from computation so `cli.py` can map validation errors to exit codes (Principle III, FR-010..FR-016).
++- **Alternatives considered**:
++  - *Hand-rolled `sys.argv` parsing*: rejected — reinvents `argparse`, more error-prone, no free help text.
++
++## Decision 5: Typed validation errors raised by `parser.py`, formatted by `cli.py`
++
++- **Decision**: `parser.py` raises a small `ValidationError` (subclass of `Exception`) carrying a human-readable message for each rejection class (missing file, missing/misnamed header, missing field, unknown payer, bad amount, empty/duplicate participant list). `cli.py` catches it, writes the message to stderr, and returns a non-zero exit code without touching stdout.
++- **Rationale**: Keeps the failure decision close to the data (parser) while keeping process concerns (streams, exit codes) in `cli.py`; guarantees no partial stdout on rejection (FR-016). Testable in isolation (Principle IV).
++- **Alternatives considered**:
++  - *Return sentinel/None values*: rejected — easy to forget to check, muddies the happy path, harder to attach precise messages.
++  - *`sys.exit()` inside `parser.py`*: rejected — couples the parser to process exit, making it hard to unit-test and reuse.
++
++## Resolved unknowns
++
++None outstanding. Language (Python 3.11+), dependencies (stdlib only), testing (pytest), project type (single-project CLI), and structure were all specified by the user input and constrained by the constitution.
