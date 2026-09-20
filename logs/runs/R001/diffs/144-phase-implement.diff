@@ -1,0 +1,982 @@
+diff --git a/.gitignore b/.gitignore
+index e5f3049..05300c9 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -3,4 +3,8 @@ __pycache__/
+ .pytest_cache/
+ .venv/
+ venv/
++dist/
++build/
++*.egg-info/
++.env*
+ .DS_Store
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..690ae0f
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,23 @@
++[build-system]
++requires = ["setuptools>=61"]
++build-backend = "setuptools.build_meta"
++
++[project]
++name = "expense-splitter"
++version = "0.1.0"
++description = "CLI tool that computes a minimal settlement for shared group expenses"
++requires-python = ">=3.11"
++# No runtime dependencies: standard library only (Constitution Principle I).
++dependencies = []
++
++[project.optional-dependencies]
++# Development-only dependency; never imported by src/splitter/.
++dev = ["pytest"]
++
++[tool.setuptools.packages.find]
++where = ["src"]
++
++[tool.pytest.ini_options]
++# Put src/ on the import path so `import splitter` works without installation.
++pythonpath = ["src"]
++testpaths = ["tests"]
+diff --git a/specs/001-expense-splitter/tasks.md b/specs/001-expense-splitter/tasks.md
+index 5e6f992..58d51ec 100644
+--- a/specs/001-expense-splitter/tasks.md
++++ b/specs/001-expense-splitter/tasks.md
+@@ -28,11 +28,11 @@ Single-project CLI layout (from plan.md). Runtime code in `src/splitter/`, tests
+ 
+ **Purpose**: Project initialization and basic structure
+ 
+-- [ ] T001 Create source and test package layout: `src/splitter/` and `tests/` directories at repository root
+-- [ ] T002 [P] Create `src/splitter/__init__.py` (package marker; may expose `__version__`)
+-- [ ] T003 [P] Create `src/splitter/__main__.py` that enables `python -m splitter` by delegating to `cli.main()` (import guarded so it runs under `python -m splitter`)
+-- [ ] T004 [P] Create `tests/__init__.py` (empty test package marker)
+-- [ ] T005 [P] Create `pyproject.toml` at repository root with dev metadata and pytest config; declare NO runtime dependencies, `pytest` as a dev-only dependency (Constitution Principle I; plan.md)
++- [X] T001 Create source and test package layout: `src/splitter/` and `tests/` directories at repository root
++- [X] T002 [P] Create `src/splitter/__init__.py` (package marker; may expose `__version__`)
++- [X] T003 [P] Create `src/splitter/__main__.py` that enables `python -m splitter` by delegating to `cli.main()` (import guarded so it runs under `python -m splitter`)
++- [X] T004 [P] Create `tests/__init__.py` (empty test package marker)
++- [X] T005 [P] Create `pyproject.toml` at repository root with dev metadata and pytest config; declare NO runtime dependencies, `pytest` as a dev-only dependency (Constitution Principle I; plan.md)
+ 
+ **Checkpoint**: Package skeleton importable; `python -m splitter` resolves to a (still-empty) entry point.
+ 
+@@ -44,8 +44,8 @@ Single-project CLI layout (from plan.md). Runtime code in `src/splitter/`, tests
+ 
+ **⚠️ CRITICAL**: No user story work can begin until this phase is complete
+ 
+-- [ ] T006 [US-shared] Write failing tests in `tests/test_money.py` for cent parsing/formatting: `parse_to_cents("30.00") == 3000`, `parse_to_cents("0") == 0`, `parse_to_cents("12.50") == 1250`; rejects non-numeric (`"abc"`), negative (`"-5.00"`), and >2-decimal (`"12.505"`) values by raising; `format_cents(1500) == "15.00"` (two fractional digits, no locale symbol) — FR-009, FR-013, FR-018
+-- [ ] T007 Implement `src/splitter/money.py`: `parse_to_cents(text)` using `decimal.Decimal` to parse exactly, rejecting non-numeric, negative, and values with more than two fractional digits, then converting to an integral `int` cents (verify `Decimal * 100` is integral); `format_cents(cents)` rendering a plain decimal with exactly two fractional digits at the output boundary only. Money is `int` cents throughout; no float ever holds money (research.md Decision 1; Constitution Principle II). Make T006 pass.
++- [X] T006 [US-shared] Write failing tests in `tests/test_money.py` for cent parsing/formatting: `parse_to_cents("30.00") == 3000`, `parse_to_cents("0") == 0`, `parse_to_cents("12.50") == 1250`; rejects non-numeric (`"abc"`), negative (`"-5.00"`), and >2-decimal (`"12.505"`) values by raising; `format_cents(1500) == "15.00"` (two fractional digits, no locale symbol) — FR-009, FR-013, FR-018
++- [X] T007 Implement `src/splitter/money.py`: `parse_to_cents(text)` using `decimal.Decimal` to parse exactly, rejecting non-numeric, negative, and values with more than two fractional digits, then converting to an integral `int` cents (verify `Decimal * 100` is integral); `format_cents(cents)` rendering a plain decimal with exactly two fractional digits at the output boundary only. Money is `int` cents throughout; no float ever holds money (research.md Decision 1; Constitution Principle II). Make T006 pass.
+ 
+ **Checkpoint**: Exact integer-cent parse/format available — all stories can now begin.
+ 
+@@ -59,15 +59,15 @@ Single-project CLI layout (from plan.md). Runtime code in `src/splitter/`, tests
+ 
+ ### Tests for User Story 1 ⚠️ (write first, ensure they FAIL)
+ 
+-- [ ] T008 [P] [US1] Write failing settlement tests in `tests/test_settle.py`: net-balance computation (`net_cents = paid_cents - share_cents`), equal-share assignment for evenly divisible totals, minimal-transaction settlement (Alice paid 30.00 / Bob 0 → single `Bob→Alice 1500`), the already-settled case (all nets zero → empty payment list), and the SC-003 bound (payments ≤ non-zero-balance participants − 1) — FR-005, FR-006, FR-007, FR-010
+-- [ ] T009 [P] [US1] Write failing happy-path parser tests in `tests/test_parser.py`: reading a valid CSV with header `payer,amount,description` produces one Expense per data row with `payer:str`, `amount_cents:int` (≥ 0), `description:str` (informational, never used in computation) — FR-002
+-- [ ] T010 [P] [US1] Write failing end-to-end CLI tests in `tests/test_cli.py` (Scenarios 1 & 2 from quickstart.md): valid input → exit 0 and stdout `Bob pays Alice 15.00`; already-settled input → exit 0 and stdout stating no payments needed (e.g. `Already settled — no payments needed.`) — FR-010, contracts/cli.md
++- [X] T008 [P] [US1] Write failing settlement tests in `tests/test_settle.py`: net-balance computation (`net_cents = paid_cents - share_cents`), equal-share assignment for evenly divisible totals, minimal-transaction settlement (Alice paid 30.00 / Bob 0 → single `Bob→Alice 1500`), the already-settled case (all nets zero → empty payment list), and the SC-003 bound (payments ≤ non-zero-balance participants − 1) — FR-005, FR-006, FR-007, FR-010
++- [X] T009 [P] [US1] Write failing happy-path parser tests in `tests/test_parser.py`: reading a valid CSV with header `payer,amount,description` produces one Expense per data row with `payer:str`, `amount_cents:int` (≥ 0), `description:str` (informational, never used in computation) — FR-002
++- [X] T010 [P] [US1] Write failing end-to-end CLI tests in `tests/test_cli.py` (Scenarios 1 & 2 from quickstart.md): valid input → exit 0 and stdout `Bob pays Alice 15.00`; already-settled input → exit 0 and stdout stating no payments needed (e.g. `Already settled — no payments needed.`) — FR-010, contracts/cli.md
+ 
+ ### Implementation for User Story 1
+ 
+-- [ ] T011 [US1] Implement participant-list parsing and happy-path CSV reading in `src/splitter/parser.py`: split `--participants` on commas trimming surrounding whitespace; build ordered Participant list; read CSV via `csv` module with header `payer, amount, description`; construct Expense per row using `money.parse_to_cents` for `amount` (fields: `payer:str` matching a participant, `amount_cents:int ≥ 0`, `description:str` informational-only). Preserve supplied participant-list order for determinism (data-model.md; FR-002). Make T009 pass.
+-- [ ] T012 [US1] Implement settlement core in `src/splitter/settle.py`: compute group total (sum of `amount_cents`), assign equal shares, compute each Participant's `net_cents = paid_cents - share_cents` (positive → creditor, negative → debtor, invariant: all nets sum to 0), and produce minimal payments via greedy largest-debtor/largest-creditor match transferring `min(|debt|, credit)`, breaking ties by supplied participant-list order (research.md Decisions 2 & 3; FR-005, FR-006, FR-007). Each Payment has `from_name` (debtor), `to_name` (creditor), `amount_cents > 0`. Make T008 pass.
+-- [ ] T013 [US1] Implement CLI orchestration + success output in `src/splitter/cli.py`: `argparse` with positional `expenses.csv` and required `--participants` option; call parser then settle; write settlement to stdout formatting amounts via `money.format_cents` as `"<debtor> pays <creditor> <amount>"` one per line in deterministic order; when already settled, print the no-payments message; exit 0 (contracts/cli.md; FR-010, FR-017, FR-018). Make T010 pass.
++- [X] T011 [US1] Implement participant-list parsing and happy-path CSV reading in `src/splitter/parser.py`: split `--participants` on commas trimming surrounding whitespace; build ordered Participant list; read CSV via `csv` module with header `payer, amount, description`; construct Expense per row using `money.parse_to_cents` for `amount` (fields: `payer:str` matching a participant, `amount_cents:int ≥ 0`, `description:str` informational-only). Preserve supplied participant-list order for determinism (data-model.md; FR-002). Make T009 pass.
++- [X] T012 [US1] Implement settlement core in `src/splitter/settle.py`: compute group total (sum of `amount_cents`), assign equal shares, compute each Participant's `net_cents = paid_cents - share_cents` (positive → creditor, negative → debtor, invariant: all nets sum to 0), and produce minimal payments via greedy largest-debtor/largest-creditor match transferring `min(|debt|, credit)`, breaking ties by supplied participant-list order (research.md Decisions 2 & 3; FR-005, FR-006, FR-007). Each Payment has `from_name` (debtor), `to_name` (creditor), `amount_cents > 0`. Make T008 pass.
++- [X] T013 [US1] Implement CLI orchestration + success output in `src/splitter/cli.py`: `argparse` with positional `expenses.csv` and required `--participants` option; call parser then settle; write settlement to stdout formatting amounts via `money.format_cents` as `"<debtor> pays <creditor> <amount>"` one per line in deterministic order; when already settled, print the no-payments message; exit 0 (contracts/cli.md; FR-010, FR-017, FR-018). Make T010 pass.
+ 
+ **Checkpoint**: User Story 1 fully functional — `python -m splitter <valid.csv> --participants "..."` prints a correct minimal settlement. MVP deliverable.
+ 
+@@ -81,14 +81,14 @@ Single-project CLI layout (from plan.md). Runtime code in `src/splitter/`, tests
+ 
+ ### Tests for User Story 2 ⚠️ (write first, ensure they FAIL)
+ 
+-- [ ] T014 [P] [US2] Add failing validation tests in `tests/test_parser.py` covering the full error taxonomy (data-model.md): CSV file missing/unreadable (FR-011); missing/misnamed header or missing required column (FR-015, FR-002); row with blank `payer` or blank `amount` (FR-015); payer not in participant list, naming the payer (FR-012); amount non-numeric, negative, or >2 decimals, naming the amount (FR-013); empty participant list (FR-014); duplicate participant names after trimming, naming the duplicate (spec Edge Cases / Assumptions). Assert each raises the typed `ValidationError`.
+-- [ ] T015 [P] [US2] Add failing end-to-end error tests in `tests/test_cli.py` (Scenario 4 from quickstart.md): for each malformed variant assert exit code is non-zero, stdout is empty (no partial/best-guess settlement — FR-016), and stderr contains a clear message naming the offending element (FR-011..FR-016, SC-004)
++- [X] T014 [P] [US2] Add failing validation tests in `tests/test_parser.py` covering the full error taxonomy (data-model.md): CSV file missing/unreadable (FR-011); missing/misnamed header or missing required column (FR-015, FR-002); row with blank `payer` or blank `amount` (FR-015); payer not in participant list, naming the payer (FR-012); amount non-numeric, negative, or >2 decimals, naming the amount (FR-013); empty participant list (FR-014); duplicate participant names after trimming, naming the duplicate (spec Edge Cases / Assumptions). Assert each raises the typed `ValidationError`.
++- [X] T015 [P] [US2] Add failing end-to-end error tests in `tests/test_cli.py` (Scenario 4 from quickstart.md): for each malformed variant assert exit code is non-zero, stdout is empty (no partial/best-guess settlement — FR-016), and stderr contains a clear message naming the offending element (FR-011..FR-016, SC-004)
+ 
+ ### Implementation for User Story 2
+ 
+-- [ ] T016 [US2] Define typed `ValidationError(Exception)` in `src/splitter/parser.py` carrying a human-readable message per rejection class (research.md Decision 5)
+-- [ ] T017 [US2] Add validation to `src/splitter/parser.py`: reject empty participant list (FR-014); reject duplicate participant names after trimming, naming the duplicate (Edge Cases); require header columns exactly `payer, amount, description` and reject missing/misnamed header or missing required column (FR-002, FR-015); reject rows with blank `payer` or blank `amount` (FR-015); reject a payer not in the participant list, naming the payer (FR-012); surface `money.parse_to_cents` rejections (non-numeric/negative/>2-decimal) naming the amount and row (FR-013). Raise `ValidationError` in every case. Make T014 pass.
+-- [ ] T018 [US2] Add error handling to `src/splitter/cli.py`: catch file-open failure for the CSV path → `ValidationError`-style message (FR-011); catch `ValidationError`; write the message to stderr; write NOTHING to stdout; return a non-zero exit code (FR-016, Constitution Principle III). Make T015 pass.
++- [X] T016 [US2] Define typed `ValidationError(Exception)` in `src/splitter/parser.py` carrying a human-readable message per rejection class (research.md Decision 5)
++- [X] T017 [US2] Add validation to `src/splitter/parser.py`: reject empty participant list (FR-014); reject duplicate participant names after trimming, naming the duplicate (Edge Cases); require header columns exactly `payer, amount, description` and reject missing/misnamed header or missing required column (FR-002, FR-015); reject rows with blank `payer` or blank `amount` (FR-015); reject a payer not in the participant list, naming the payer (FR-012); surface `money.parse_to_cents` rejections (non-numeric/negative/>2-decimal) naming the amount and row (FR-013). Raise `ValidationError` in every case. Make T014 pass.
++- [X] T018 [US2] Add error handling to `src/splitter/cli.py`: catch file-open failure for the CSV path → `ValidationError`-style message (FR-011); catch `ValidationError`; write the message to stderr; write NOTHING to stdout; return a non-zero exit code (FR-016, Constitution Principle III). Make T015 pass.
+ 
+ **Checkpoint**: User Stories 1 AND 2 both work — valid input settles, every malformed input fails loudly with no stdout.
+ 
+@@ -102,13 +102,13 @@ Single-project CLI layout (from plan.md). Runtime code in `src/splitter/`, tests
+ 
+ ### Tests for User Story 3 ⚠️ (write first, ensure they FAIL)
+ 
+-- [ ] T019 [P] [US3] Add failing conservation/remainder tests in `tests/test_settle.py`: for `total_cents=1000`, `n=3`, shares are `[334, 333, 333]` (`sum == total_cents`; any two differ by ≤ 1 cent); the first `r = total_cents % n` participants in supplied order get the `+1` cent; sum of all payment `amount_cents` equals the sum of positive `net_cents` (total imbalance) exactly; applying all payments brings every `net_cents` to 0 — FR-004, FR-008, FR-009, SC-001, SC-002
+-- [ ] T020 [P] [US3] Add failing end-to-end uneven-split test in `tests/test_cli.py` (Scenario 3 from quickstart.md): Alice 10.00 across `"Alice,Bob,Carol"` → exit 0, printed payments sum exactly to the total imbalance and zero every balance
++- [X] T019 [P] [US3] Add failing conservation/remainder tests in `tests/test_settle.py`: for `total_cents=1000`, `n=3`, shares are `[334, 333, 333]` (`sum == total_cents`; any two differ by ≤ 1 cent); the first `r = total_cents % n` participants in supplied order get the `+1` cent; sum of all payment `amount_cents` equals the sum of positive `net_cents` (total imbalance) exactly; applying all payments brings every `net_cents` to 0 — FR-004, FR-008, FR-009, SC-001, SC-002
++- [X] T020 [P] [US3] Add failing end-to-end uneven-split test in `tests/test_cli.py` (Scenario 3 from quickstart.md): Alice 10.00 across `"Alice,Bob,Carol"` → exit 0, printed payments sum exactly to the total imbalance and zero every balance
+ 
+ ### Implementation for User Story 3
+ 
+-- [ ] T021 [US3] Implement the deterministic largest-remainder share allocation in `src/splitter/settle.py`: `base = total_cents // n`, `r = total_cents % n`; every participant gets `share_cents = base`; the first `r` participants in supplied list order get `+1` cent so `sum(share_cents) == total_cents` exactly and any two shares differ by at most one cent (research.md Decision 2; data-model.md remainder rule; FR-004). Make T019 pass.
+-- [ ] T022 [US3] Add conservation assertions/guards in `src/splitter/settle.py`: assert `sum(net_cents) == 0` and `sum(payment.amount_cents) == sum(positive net_cents)` so no cent is lost or invented at any step (FR-008, FR-009, Constitution Principle II). Ensure T020 passes end to end.
++- [X] T021 [US3] Implement the deterministic largest-remainder share allocation in `src/splitter/settle.py`: `base = total_cents // n`, `r = total_cents % n`; every participant gets `share_cents = base`; the first `r` participants in supplied list order get `+1` cent so `sum(share_cents) == total_cents` exactly and any two shares differ by at most one cent (research.md Decision 2; data-model.md remainder rule; FR-004). Make T019 pass.
++- [X] T022 [US3] Add conservation assertions/guards in `src/splitter/settle.py`: assert `sum(net_cents) == 0` and `sum(payment.amount_cents) == sum(positive net_cents)` so no cent is lost or invented at any step (FR-008, FR-009, Constitution Principle II). Ensure T020 passes end to end.
+ 
+ **Checkpoint**: All three user stories independently functional; uneven splits conserve every cent.
+ 
+@@ -118,10 +118,10 @@ Single-project CLI layout (from plan.md). Runtime code in `src/splitter/`, tests
+ 
+ **Purpose**: Determinism guarantee, documentation, and full validation across all stories
+ 
+-- [ ] T023 [P] Add a determinism test in `tests/test_cli.py` (Scenario 5 from quickstart.md): two runs on identical input produce byte-identical stdout (FR-017, SC-005)
+-- [ ] T024 [P] Verify performance/scope: a typical group (up to a few dozen expenses) settles in a single invocation with no interaction (SC-006) — add/confirm a representative multi-row case in `tests/test_settle.py`
+-- [ ] T025 Run the full quickstart.md validation (Scenarios 1–5) manually with `PYTHONPATH=src` and confirm each expected result
+-- [ ] T026 [P] Run `python -m pytest` from repository root and confirm all tests pass with every functional requirement covered (Constitution Principle IV)
++- [X] T023 [P] Add a determinism test in `tests/test_cli.py` (Scenario 5 from quickstart.md): two runs on identical input produce byte-identical stdout (FR-017, SC-005)
++- [X] T024 [P] Verify performance/scope: a typical group (up to a few dozen expenses) settles in a single invocation with no interaction (SC-006) — add/confirm a representative multi-row case in `tests/test_settle.py`
++- [X] T025 Run the full quickstart.md validation (Scenarios 1–5) manually with `PYTHONPATH=src` and confirm each expected result
++- [X] T026 [P] Run `python -m pytest` from repository root and confirm all tests pass with every functional requirement covered (Constitution Principle IV)
+ 
+ ---
+ 
+diff --git a/src/splitter/__init__.py b/src/splitter/__init__.py
+new file mode 100644
+index 0000000..28769f3
+--- /dev/null
++++ b/src/splitter/__init__.py
+@@ -0,0 +1,6 @@
++"""Expense Splitter: compute a minimal settlement for shared group expenses.
++
++Standard-library-only package. All money is handled as integer cents.
++"""
++
++__version__ = "0.1.0"
+diff --git a/src/splitter/__main__.py b/src/splitter/__main__.py
+new file mode 100644
+index 0000000..9a5620c
+--- /dev/null
++++ b/src/splitter/__main__.py
+@@ -0,0 +1,12 @@
++"""Entry point enabling `python -m splitter`.
++
++Delegates to :func:`splitter.cli.main`, passing its return value to the process
++exit code so validation/I-O failures surface as a non-zero status.
++"""
++
++import sys
++
++from splitter.cli import main
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/splitter/cli.py b/src/splitter/cli.py
+new file mode 100644
+index 0000000..9314c0b
+--- /dev/null
++++ b/src/splitter/cli.py
+@@ -0,0 +1,55 @@
++"""Command-line orchestration: argument parsing, output, exit codes.
++
++Results go to stdout, diagnostics to stderr; exit 0 on success (contracts/cli.md).
++US2 adds the error-handling branch that maps validation failures to stderr and a
++non-zero exit with nothing on stdout.
++"""
++
++import argparse
++import sys
++
++from splitter import money
++from splitter.parser import ValidationError, parse_expenses, parse_participants
++from splitter.settle import settle
++
++ALREADY_SETTLED = "Already settled — no payments needed."
++
++
++def _build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        prog="splitter",
++        description="Compute a minimal settlement for shared group expenses.",
++    )
++    parser.add_argument("expenses_csv", help="Path to the CSV file of expenses")
++    parser.add_argument(
++        "--participants",
++        required=True,
++        help='Comma-separated participant names, e.g. "Alice,Bob,Carol"',
++    )
++    return parser
++
++
++def main(argv: list[str] | None = None) -> int:
++    """Run the tool. Returns the process exit code (0 = success)."""
++    args = _build_parser().parse_args(argv)
++
++    # All parsing/validation happens before any stdout write, so a rejection
++    # leaves stdout untouched (FR-016; Constitution Principle III).
++    try:
++        participants = parse_participants(args.participants)
++        expenses = parse_expenses(args.expenses_csv, participants)
++        payments = settle(participants, expenses)
++    except ValidationError as error:
++        print(f"error: {error}", file=sys.stderr)
++        return 1
++
++    if not payments:
++        print(ALREADY_SETTLED)
++        return 0
++
++    for payment in payments:
++        print(
++            f"{payment.from_name} pays {payment.to_name} "
++            f"{money.format_cents(payment.amount_cents)}"
++        )
++    return 0
+diff --git a/src/splitter/money.py b/src/splitter/money.py
+new file mode 100644
+index 0000000..2999801
+--- /dev/null
++++ b/src/splitter/money.py
+@@ -0,0 +1,48 @@
++"""Integer-cent money helpers (Constitution Principle II; research.md Decision 1).
++
++Money is represented as ``int`` cents everywhere in the program. ``decimal.Decimal``
++is used *only* to parse a human-authored decimal string into an exact cent count,
++and formatting back to a decimal string happens *only* at the output boundary. No
++float ever holds money.
++"""
++
++from decimal import Decimal, InvalidOperation
++
++_CENTS = Decimal(100)
++
++
++def parse_to_cents(text: str) -> int:
++    """Parse a currency string into an exact ``int`` number of cents.
++
++    Accepts a plain decimal with at most two fractional digits (e.g. ``"30.00"``,
++    ``"12.5"``, ``"0"``). Rejects non-numeric, negative, and over-precise (more
++    than two decimal places) values by raising :class:`ValueError` (FR-013).
++    """
++    raw = text.strip()
++    try:
++        value = Decimal(raw)
++    except (InvalidOperation, ValueError, TypeError):
++        raise ValueError(f"amount {text!r} is not a valid number")
++
++    # Reject NaN / infinities, which Decimal accepts as valid literals.
++    if not value.is_finite():
++        raise ValueError(f"amount {text!r} is not a valid number")
++
++    if value < 0:
++        raise ValueError(f"amount {text!r} must not be negative")
++
++    cents = value * _CENTS
++    # More than two fractional digits leaves a non-integral cent count.
++    if cents != cents.to_integral_value():
++        raise ValueError(f"amount {text!r} has more than two decimal places")
++
++    return int(cents)
++
++
++def format_cents(cents: int) -> str:
++    """Render ``int`` cents as a plain decimal with exactly two fractional digits.
++
++    No locale symbol or thousands separator (FR-018). Output-boundary only.
++    """
++    quotient, remainder = divmod(cents, 100)
++    return f"{quotient}.{remainder:02d}"
+diff --git a/src/splitter/parser.py b/src/splitter/parser.py
+new file mode 100644
+index 0000000..9a5d8b2
+--- /dev/null
++++ b/src/splitter/parser.py
+@@ -0,0 +1,111 @@
++"""CSV reading, participant-list parsing, and input validation.
++
++Rejections raise the typed :class:`ValidationError` carrying a human-readable
++message that names the offending element (research.md Decision 5). ``cli.py`` maps
++these to a stderr message + non-zero exit. All amounts are parsed to exact integer
++cents via :mod:`splitter.money`.
++"""
++
++import csv
++from dataclasses import dataclass
++
++from splitter import money
++
++HEADER = ["payer", "amount", "description"]
++
++
++class ValidationError(Exception):
++    """Raised for any malformed input; message names the offending element."""
++
++
++@dataclass(frozen=True)
++class Expense:
++    """A single expense read from one CSV data row.
++
++    ``description`` is informational only and never used in computation.
++    """
++
++    payer: str
++    amount_cents: int
++    description: str
++
++
++def parse_participants(text: str) -> list[str]:
++    """Split the ``--participants`` string on commas, trimming each name.
++
++    Rejects an empty list (FR-014) and duplicate names after trimming (spec Edge
++    Cases), naming the duplicate. Supplied order is preserved and drives all
++    deterministic output (FR-017).
++    """
++    names = [name.strip() for name in text.split(",")]
++    names = [name for name in names if name]
++
++    if not names:
++        raise ValidationError("participant list must not be empty")
++
++    seen: set[str] = set()
++    for name in names:
++        if name in seen:
++            raise ValidationError(f"duplicate participant name {name!r}")
++        seen.add(name)
++
++    return names
++
++
++def parse_expenses(path: str, participants: list[str]) -> list[Expense]:
++    """Read and validate an expenses CSV into a list of :class:`Expense`.
++
++    Enforces the full error taxonomy (data-model.md): unreadable file (FR-011),
++    missing/misnamed header or column (FR-002, FR-015), blank payer/amount
++    (FR-015), unknown payer (FR-012), and bad amounts (FR-013). Row numbers count
++    the header as row 1, so the first data row is row 2.
++    """
++    try:
++        with open(path, newline="", encoding="utf-8") as handle:
++            rows = list(csv.reader(handle))
++    except OSError as error:
++        reason = error.strerror or "unreadable"
++        raise ValidationError(
++            f"cannot read expenses file {path!r}: {reason.lower()}"
++        )
++
++    if not rows:
++        raise ValidationError(
++            "CSV header must have columns: payer, amount, description"
++        )
++
++    header = [column.strip() for column in rows[0]]
++    if header != HEADER:
++        raise ValidationError(
++            "CSV header must have columns: payer, amount, description"
++        )
++
++    participant_set = set(participants)
++    expenses: list[Expense] = []
++    for line_number, row in enumerate(rows[1:], start=2):
++        payer = row[0].strip() if len(row) > 0 else ""
++        amount = row[1].strip() if len(row) > 1 else ""
++        description = row[2] if len(row) > 2 else ""
++
++        if not payer:
++            raise ValidationError(
++                f"row {line_number}: missing required field 'payer'"
++            )
++        if not amount:
++            raise ValidationError(
++                f"row {line_number}: missing required field 'amount'"
++            )
++        if payer not in participant_set:
++            raise ValidationError(
++                f"row {line_number}: payer {payer!r} is not in the participant list"
++            )
++        try:
++            amount_cents = money.parse_to_cents(amount)
++        except ValueError as error:
++            raise ValidationError(f"row {line_number}: {error}")
++
++        expenses.append(
++            Expense(payer=payer, amount_cents=amount_cents, description=description)
++        )
++
++    return expenses
+diff --git a/src/splitter/settle.py b/src/splitter/settle.py
+new file mode 100644
+index 0000000..93ffef0
+--- /dev/null
++++ b/src/splitter/settle.py
+@@ -0,0 +1,93 @@
++"""Net-balance computation and minimal-transaction settlement.
++
++All money is integer cents. Ordering everywhere derives from the supplied
++participant-list order, so output is deterministic (research.md Decisions 2 & 3;
++Constitution Principle V). US3 layers remainder conservation guards on top.
++"""
++
++from dataclasses import dataclass
++
++from splitter.parser import Expense
++
++
++@dataclass(frozen=True)
++class Payment:
++    """A proposed transfer from a net debtor to a net creditor."""
++
++    from_name: str
++    to_name: str
++    amount_cents: int
++
++
++def allocate_shares(total_cents: int, n: int) -> list[int]:
++    """Split ``total_cents`` into ``n`` shares that sum exactly to the total.
++
++    ``base = total_cents // n`` for everyone; the first ``r = total_cents % n``
++    participants (in supplied order) get ``+1`` cent, so shares sum to the total
++    exactly and any two differ by at most one cent (FR-004; research.md Dec. 2).
++    """
++    base, remainder = divmod(total_cents, n)
++    return [base + 1 if i < remainder else base for i in range(n)]
++
++
++def compute_nets(participants: list[str], expenses: list[Expense]) -> list[int]:
++    """Return each participant's ``net_cents = paid_cents - share_cents``.
++
++    Results are in supplied participant order; they sum to zero (conservation).
++    """
++    paid = {name: 0 for name in participants}
++    for expense in expenses:
++        paid[expense.payer] += expense.amount_cents
++
++    total = sum(paid.values())
++    shares = allocate_shares(total, len(participants))
++    return [paid[name] - shares[i] for i, name in enumerate(participants)]
++
++
++def minimal_payments(participants: list[str], nets: list[int]) -> list[Payment]:
++    """Greedily match largest debtor with largest creditor (research.md Dec. 3).
++
++    Produces at most ``k - 1`` payments for ``k`` non-zero balances (SC-003),
++    and the payment amounts sum to the total imbalance exactly (FR-008). Ties are
++    broken by supplied participant order for deterministic output.
++    """
++    # Preserve supplied order as the tie-break key.
++    debtors = [[name, -net] for name, net in zip(participants, nets) if net < 0]
++    creditors = [[name, net] for name, net in zip(participants, nets) if net > 0]
++
++    payments: list[Payment] = []
++    while debtors and creditors:
++        # Largest magnitude first; ties keep earlier supplied-order entries.
++        debtors.sort(key=lambda d: -d[1])
++        creditors.sort(key=lambda c: -c[1])
++        debtor, creditor = debtors[0], creditors[0]
++
++        transfer = min(debtor[1], creditor[1])
++        payments.append(Payment(debtor[0], creditor[0], transfer))
++
++        debtor[1] -= transfer
++        creditor[1] -= transfer
++        if debtor[1] == 0:
++            debtors.pop(0)
++        if creditor[1] == 0:
++            creditors.pop(0)
++
++    return payments
++
++
++def settle(participants: list[str], expenses: list[Expense]) -> list[Payment]:
++    """Compute the minimal settlement for a group (top-level orchestration).
++
++    Asserts conservation invariants so no cent is ever lost or invented
++    (FR-008, FR-009; Constitution Principle II).
++    """
++    nets = compute_nets(participants, expenses)
++    assert sum(nets) == 0, "net balances must sum to zero (conservation)"
++
++    payments = minimal_payments(participants, nets)
++
++    total_imbalance = sum(net for net in nets if net > 0)
++    assert sum(p.amount_cents for p in payments) == total_imbalance, (
++        "payments must sum to the total imbalance (conservation)"
++    )
++    return payments
+diff --git a/tests/__init__.py b/tests/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+new file mode 100644
+index 0000000..abc5f2c
+--- /dev/null
++++ b/tests/test_cli.py
+@@ -0,0 +1,124 @@
++"""End-to-end CLI tests (T010 US1; T015/T020/T023 appended later).
++
++Exercises the process-level contract in contracts/cli.md via ``cli.main`` with
++captured stdout/stderr and return code. Covers FR-010, FR-017, FR-018.
++"""
++
++from splitter.cli import main
++
++
++def write_csv(tmp_path, text, name="expenses.csv"):
++    p = tmp_path / name
++    p.write_text(text)
++    return str(p)
++
++
++class TestSuccessOutput:
++    def test_basic_settlement(self, tmp_path, capsys):
++        path = write_csv(
++            tmp_path,
++            "payer,amount,description\nAlice,30.00,Hotel\nBob,0,none\n",
++        )
++        rc = main([path, "--participants", "Alice,Bob"])
++        captured = capsys.readouterr()
++        assert rc == 0
++        assert captured.out == "Bob pays Alice 15.00\n"
++        assert captured.err == ""
++
++    def test_already_settled(self, tmp_path, capsys):
++        path = write_csv(
++            tmp_path,
++            "payer,amount,description\nAlice,10.00,Lunch\nBob,10.00,Dinner\n",
++        )
++        rc = main([path, "--participants", "Alice,Bob"])
++        captured = capsys.readouterr()
++        assert rc == 0
++        assert captured.out.strip() == "Already settled — no payments needed."
++        assert captured.err == ""
++
++
++class TestErrorOutput:
++    """Every malformed variant: non-zero exit, empty stdout, clear stderr."""
++
++    def _assert_fails(self, capsys, rc, names):
++        captured = capsys.readouterr()
++        assert rc != 0
++        assert captured.out == ""  # no partial/best-guess settlement (FR-016)
++        assert names in captured.err
++
++    def test_missing_file(self, tmp_path, capsys):
++        rc = main([str(tmp_path / "nope.csv"), "--participants", "Alice,Bob"])
++        self._assert_fails(capsys, rc, "nope.csv")
++
++    def test_unknown_payer(self, tmp_path, capsys):
++        path = write_csv(tmp_path, "payer,amount,description\nCarol,5.00,x\n")
++        rc = main([path, "--participants", "Alice,Bob"])
++        self._assert_fails(capsys, rc, "Carol")
++
++    def test_negative_amount(self, tmp_path, capsys):
++        path = write_csv(tmp_path, "payer,amount,description\nAlice,-5.00,x\n")
++        rc = main([path, "--participants", "Alice,Bob"])
++        self._assert_fails(capsys, rc, "-5.00")
++
++    def test_over_precise_amount(self, tmp_path, capsys):
++        path = write_csv(tmp_path, "payer,amount,description\nAlice,12.505,x\n")
++        rc = main([path, "--participants", "Alice,Bob"])
++        self._assert_fails(capsys, rc, "12.505")
++
++    def test_empty_participant_list(self, tmp_path, capsys):
++        path = write_csv(tmp_path, "payer,amount,description\nAlice,5.00,x\n")
++        rc = main([path, "--participants", ""])
++        self._assert_fails(capsys, rc, "participant")
++
++    def test_missing_header_column(self, tmp_path, capsys):
++        path = write_csv(tmp_path, "payer,amount\nAlice,5.00\n")
++        rc = main([path, "--participants", "Alice,Bob"])
++        self._assert_fails(capsys, rc, "header")
++
++    def test_duplicate_participants(self, tmp_path, capsys):
++        path = write_csv(tmp_path, "payer,amount,description\nAlice,5.00,x\n")
++        rc = main([path, "--participants", "Alice,Alice"])
++        self._assert_fails(capsys, rc, "Alice")
++
++
++class TestUnevenSplit:
++    """US3 (T020): uneven split conserves every cent end to end (Scenario 3)."""
++
++    def _parse_payments(self, out):
++        # Lines look like "Bob pays Alice 3.34".
++        payments = []
++        for line in out.splitlines():
++            debtor, _pays, creditor, amount = line.split()
++            payments.append((debtor, creditor, int(round(float(amount) * 100))))
++        return payments
++
++    def test_uneven_split_zeroes_all_balances(self, tmp_path, capsys):
++        path = write_csv(tmp_path, "payer,amount,description\nAlice,10.00,Coffee\n")
++        rc = main([path, "--participants", "Alice,Bob,Carol"])
++        captured = capsys.readouterr()
++        assert rc == 0
++        assert captured.err == ""
++
++        payments = self._parse_payments(captured.out)
++        # Alice paid 1000, shares 334/333/333 -> nets +666 / -333 / -333.
++        nets = {"Alice": 666, "Bob": -333, "Carol": -333}
++        assert sum(amt for _f, _t, amt in payments) == 666  # total imbalance
++        for debtor, creditor, amount in payments:
++            nets[debtor] += amount
++            nets[creditor] -= amount
++        assert all(v == 0 for v in nets.values())
++
++
++class TestDeterminism:
++    """Polish (T023): two runs on identical input are byte-identical (SC-005)."""
++
++    def test_output_is_byte_identical_across_runs(self, tmp_path, capsys):
++        path = write_csv(tmp_path, "payer,amount,description\nAlice,10.00,Coffee\n")
++
++        main([path, "--participants", "Alice,Bob,Carol"])
++        first = capsys.readouterr().out
++        main([path, "--participants", "Alice,Bob,Carol"])
++        second = capsys.readouterr().out
++
++        assert first == second
++        assert first != ""
+diff --git a/tests/test_money.py b/tests/test_money.py
+new file mode 100644
+index 0000000..9cdb984
+--- /dev/null
++++ b/tests/test_money.py
+@@ -0,0 +1,55 @@
++"""Tests for integer-cent parsing/formatting (T006).
++
++Covers FR-009 (exact integer cents), FR-013 (reject bad amounts), FR-018
++(two-fractional-digit output). Money is `int` cents throughout; no float ever
++holds money (Constitution Principle II).
++"""
++
++import pytest
++
++from splitter.money import format_cents, parse_to_cents
++
++
++class TestParseToCents:
++    def test_whole_dollars(self):
++        assert parse_to_cents("30.00") == 3000
++
++    def test_zero(self):
++        assert parse_to_cents("0") == 0
++
++    def test_fractional(self):
++        assert parse_to_cents("12.50") == 1250
++
++    def test_single_decimal_place(self):
++        assert parse_to_cents("12.5") == 1250
++
++    def test_integer_dollars_no_decimal(self):
++        assert parse_to_cents("30") == 3000
++
++    def test_rejects_non_numeric(self):
++        with pytest.raises(ValueError):
++            parse_to_cents("abc")
++
++    def test_rejects_negative(self):
++        with pytest.raises(ValueError):
++            parse_to_cents("-5.00")
++
++    def test_rejects_more_than_two_decimals(self):
++        with pytest.raises(ValueError):
++            parse_to_cents("12.505")
++
++
++class TestFormatCents:
++    def test_two_fractional_digits(self):
++        assert format_cents(1500) == "15.00"
++
++    def test_sub_dollar(self):
++        assert format_cents(5) == "0.05"
++
++    def test_zero(self):
++        assert format_cents(0) == "0.00"
++
++    def test_no_locale_symbol(self):
++        rendered = format_cents(123456)
++        assert rendered == "1234.56"
++        assert "$" not in rendered and "," not in rendered
+diff --git a/tests/test_parser.py b/tests/test_parser.py
+new file mode 100644
+index 0000000..f5aa4b6
+--- /dev/null
++++ b/tests/test_parser.py
+@@ -0,0 +1,133 @@
++"""Parser tests: happy-path CSV + participant parsing (T009 US1).
++
++Validation/error-taxonomy tests are appended in T014 (US2). Covers FR-002.
++"""
++
++import pytest
++
++from splitter.parser import (
++    Expense,
++    ValidationError,
++    parse_expenses,
++    parse_participants,
++)
++
++
++def write_csv(tmp_path, text):
++    p = tmp_path / "expenses.csv"
++    p.write_text(text)
++    return str(p)
++
++
++class TestParseParticipants:
++    def test_splits_on_commas(self):
++        assert parse_participants("Alice,Bob,Carol") == ["Alice", "Bob", "Carol"]
++
++    def test_trims_surrounding_whitespace(self):
++        assert parse_participants(" Alice , Bob ,Carol") == ["Alice", "Bob", "Carol"]
++
++    def test_preserves_supplied_order(self):
++        assert parse_participants("Carol,Alice,Bob") == ["Carol", "Alice", "Bob"]
++
++
++class TestParseExpenses:
++    def test_valid_csv_one_expense_per_row(self, tmp_path):
++        path = write_csv(
++            tmp_path,
++            "payer,amount,description\nAlice,30.00,Hotel\nBob,0,none\n",
++        )
++        exps = parse_expenses(path, ["Alice", "Bob"])
++        assert exps == [
++            Expense(payer="Alice", amount_cents=3000, description="Hotel"),
++            Expense(payer="Bob", amount_cents=0, description="none"),
++        ]
++
++    def test_amount_is_int_cents(self, tmp_path):
++        path = write_csv(
++            tmp_path, "payer,amount,description\nAlice,12.50,Cab\n"
++        )
++        (expense,) = parse_expenses(path, ["Alice"])
++        assert expense.amount_cents == 1250
++        assert isinstance(expense.amount_cents, int)
++
++    def test_description_is_informational(self, tmp_path):
++        path = write_csv(
++            tmp_path, "payer,amount,description\nAlice,5.00,anything here\n"
++        )
++        (expense,) = parse_expenses(path, ["Alice"])
++        assert expense.description == "anything here"
++
++
++class TestParticipantValidation:
++    def test_empty_participant_list_rejected(self):
++        with pytest.raises(ValidationError):
++            parse_participants("")
++
++    def test_whitespace_only_participant_list_rejected(self):
++        with pytest.raises(ValidationError):
++            parse_participants("   ")
++
++    def test_duplicate_names_rejected_naming_duplicate(self):
++        with pytest.raises(ValidationError, match="Alice"):
++            parse_participants("Alice,Bob,Alice")
++
++    def test_duplicate_after_trimming_rejected(self):
++        with pytest.raises(ValidationError, match="Alice"):
++            parse_participants("Alice, Alice ")
++
++
++class TestExpenseValidation:
++    PARTS = ["Alice", "Bob"]
++
++    def test_missing_file_rejected(self, tmp_path):
++        missing = str(tmp_path / "nope.csv")
++        with pytest.raises(ValidationError):
++            parse_expenses(missing, self.PARTS)
++
++    def test_missing_header_column_rejected(self, tmp_path):
++        path = write_csv(tmp_path, "payer,amount\nAlice,5.00\n")
++        with pytest.raises(ValidationError):
++            parse_expenses(path, self.PARTS)
++
++    def test_misnamed_header_rejected(self, tmp_path):
++        path = write_csv(tmp_path, "who,amount,description\nAlice,5.00,x\n")
++        with pytest.raises(ValidationError):
++            parse_expenses(path, self.PARTS)
++
++    def test_blank_payer_rejected(self, tmp_path):
++        path = write_csv(tmp_path, "payer,amount,description\n,5.00,x\n")
++        with pytest.raises(ValidationError, match="payer"):
++            parse_expenses(path, self.PARTS)
++
++    def test_blank_amount_rejected(self, tmp_path):
++        path = write_csv(tmp_path, "payer,amount,description\nAlice,,x\n")
++        with pytest.raises(ValidationError, match="amount"):
++            parse_expenses(path, self.PARTS)
++
++    def test_unknown_payer_rejected_naming_payer(self, tmp_path):
++        path = write_csv(tmp_path, "payer,amount,description\nCarol,5.00,x\n")
++        with pytest.raises(ValidationError, match="Carol"):
++            parse_expenses(path, self.PARTS)
++
++    def test_non_numeric_amount_rejected(self, tmp_path):
++        path = write_csv(tmp_path, "payer,amount,description\nAlice,abc,x\n")
++        with pytest.raises(ValidationError, match="abc"):
++            parse_expenses(path, self.PARTS)
++
++    def test_negative_amount_rejected(self, tmp_path):
++        path = write_csv(tmp_path, "payer,amount,description\nAlice,-5.00,x\n")
++        with pytest.raises(ValidationError, match="-5.00"):
++            parse_expenses(path, self.PARTS)
++
++    def test_over_precise_amount_rejected(self, tmp_path):
++        path = write_csv(tmp_path, "payer,amount,description\nAlice,12.505,x\n")
++        with pytest.raises(ValidationError, match="12.505"):
++            parse_expenses(path, self.PARTS)
++
++    def test_error_names_the_row(self, tmp_path):
++        path = write_csv(
++            tmp_path,
++            "payer,amount,description\nAlice,5.00,x\nBob,abc,y\n",
++        )
++        with pytest.raises(ValidationError, match="row 3"):
++            parse_expenses(path, self.PARTS)
+diff --git a/tests/test_settle.py b/tests/test_settle.py
+new file mode 100644
+index 0000000..6089d6b
+--- /dev/null
++++ b/tests/test_settle.py
+@@ -0,0 +1,133 @@
++"""Settlement + conservation tests (T008 US1, T019/T024 appended later).
++
++Covers net-balance computation, equal-share assignment, minimal-transaction
++settlement, the already-settled case, and the SC-003 bound
++(FR-005, FR-006, FR-007, FR-010).
++"""
++
++from splitter.parser import Expense
++from splitter.settle import (
++    Payment,
++    allocate_shares,
++    compute_nets,
++    minimal_payments,
++    settle,
++)
++
++
++def E(payer, amount_cents, description="x"):
++    return Expense(payer=payer, amount_cents=amount_cents, description=description)
++
++
++class TestShareAllocation:
++    def test_even_division(self):
++        assert allocate_shares(4000, 4) == [1000, 1000, 1000, 1000]
++
++    def test_shares_sum_to_total(self):
++        assert sum(allocate_shares(3000, 2)) == 3000
++
++
++class TestNets:
++    def test_net_is_paid_minus_share(self):
++        # total 3000, equal share 1500 each; Alice paid 3000, Bob 0.
++        nets = compute_nets(["Alice", "Bob"], [E("Alice", 3000), E("Bob", 0)])
++        assert nets == [1500, -1500]
++
++    def test_nets_sum_to_zero(self):
++        nets = compute_nets(
++            ["A", "B", "C"], [E("A", 3000), E("B", 600), E("C", 0)]
++        )
++        assert sum(nets) == 0
++
++
++class TestSettle:
++    def test_single_minimal_transfer(self):
++        pays = settle(["Alice", "Bob"], [E("Alice", 3000), E("Bob", 0)])
++        assert pays == [Payment("Bob", "Alice", 1500)]
++
++    def test_already_settled_is_empty(self):
++        pays = settle(["Alice", "Bob"], [E("Alice", 1000), E("Bob", 1000)])
++        assert pays == []
++
++    def test_payments_zero_every_balance(self):
++        parts = ["A", "B", "C", "D"]
++        exps = [E("A", 4000), E("B", 0), E("C", 0), E("D", 0)]
++        nets = compute_nets(parts, exps)
++        pays = settle(parts, exps)
++        applied = dict(zip(parts, nets))
++        for pay in pays:
++            applied[pay.from_name] += pay.amount_cents
++            applied[pay.to_name] -= pay.amount_cents
++        assert all(v == 0 for v in applied.values())
++
++    def test_sc003_transaction_bound(self):
++        parts = ["A", "B", "C", "D"]
++        exps = [E("A", 4000), E("B", 0), E("C", 0), E("D", 0)]
++        nets = compute_nets(parts, exps)
++        nonzero = sum(1 for n in nets if n != 0)
++        assert len(settle(parts, exps)) <= nonzero - 1
++
++    def test_minimal_payments_matches_settle(self):
++        parts = ["Alice", "Bob"]
++        nets = compute_nets(parts, [E("Alice", 3000), E("Bob", 0)])
++        assert minimal_payments(parts, nets) == [Payment("Bob", "Alice", 1500)]
++
++
++class TestConservation:
++    """US3 (T019): every cent conserved on uneven splits (FR-004/008/009)."""
++
++    def test_uneven_share_allocation(self):
++        shares = allocate_shares(1000, 3)
++        assert shares == [334, 333, 333]
++
++    def test_shares_sum_exactly_and_differ_by_at_most_one_cent(self):
++        shares = allocate_shares(1000, 3)
++        assert sum(shares) == 1000
++        assert max(shares) - min(shares) <= 1
++
++    def test_first_r_participants_get_extra_cent(self):
++        # total 1001, n=4 -> base 250, r=1 -> first participant gets +1.
++        assert allocate_shares(1001, 4) == [251, 250, 250, 250]
++
++    def test_payments_sum_to_total_imbalance(self):
++        parts = ["Alice", "Bob", "Carol"]
++        exps = [E("Alice", 1000)]
++        nets = compute_nets(parts, exps)
++        pays = settle(parts, exps)
++        assert sum(p.amount_cents for p in pays) == sum(n for n in nets if n > 0)
++
++    def test_applying_payments_zeroes_every_balance(self):
++        parts = ["Alice", "Bob", "Carol"]
++        exps = [E("Alice", 1000)]
++        nets = compute_nets(parts, exps)
++        applied = dict(zip(parts, nets))
++        for pay in settle(parts, exps):
++            applied[pay.from_name] += pay.amount_cents
++            applied[pay.to_name] -= pay.amount_cents
++        assert all(v == 0 for v in applied.values())
++
++
++class TestScope:
++    """Polish (T024): a typical multi-row group settles in one call (SC-006)."""
++
++    def test_multi_row_group_conserves_and_zeroes(self):
++        parts = ["Alice", "Bob", "Carol", "Dave", "Erin"]
++        exps = [
++            E("Alice", 4213),
++            E("Bob", 1050),
++            E("Carol", 9999),
++            E("Dave", 0),
++            E("Erin", 777),
++            E("Alice", 333),
++            E("Carol", 12),
++        ]
++        nets = compute_nets(parts, exps)
++        assert sum(nets) == 0
++        pays = settle(parts, exps)
++        applied = dict(zip(parts, nets))
++        for pay in pays:
++            applied[pay.from_name] += pay.amount_cents
++            applied[pay.to_name] -= pay.amount_cents
++        assert all(v == 0 for v in applied.values())
++        nonzero = sum(1 for n in nets if n != 0)
++        assert len(pays) <= nonzero - 1
