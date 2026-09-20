@@ -1,0 +1,297 @@
+diff --git a/tools/sddlog/sddlog.py b/tools/sddlog/sddlog.py
+index 331e2ac..ded1a8c 100755
+--- a/tools/sddlog/sddlog.py
++++ b/tools/sddlog/sddlog.py
+@@ -60,6 +60,13 @@ EVENT_TYPES = {
+ 
+ CONDITIONS = {"sdd", "unstructured"}
+ 
++# Marker-to-marker wall clock is only as good as the operator's discipline in
++# closing a phase. If the gap between the last observed agent activity and the
++# phase_end marker exceeds this, the phase's wall_clock is treated as
++# contaminated by operator idle time and flagged unreliable. Discovered during
++# the R001 pilot, where an interruption inflated one phase by ~3 days.
++IDLE_THRESHOLD_SECONDS = 300
++
+ # --------------------------------------------------------------------------
+ # redaction
+ # --------------------------------------------------------------------------
+@@ -529,18 +536,28 @@ def compute_metrics(store, run_id):
+ 
+     per_phase = {}
+     open_phase = {}
++    first_activity = {}
++    last_activity = {}
+     for event in events:
+         etype = event.get("type")
+         phase = event.get("phase")
++        ts = parse_iso(event["ts"])
+         if etype == "phase_start":
+-            open_phase[event.get("phase")] = parse_iso(event["ts"])
++            open_phase[event.get("phase")] = ts
+         elif etype == "phase_end":
+             name = event.get("phase")
+             start_ts = open_phase.pop(name, None)
+-            end_ts = parse_iso(event["ts"])
++            end_ts = ts
+             bucket = per_phase.setdefault(name, _empty_phase())
+             if start_ts and end_ts:
+                 bucket["wall_clock_seconds"] += round((end_ts - start_ts).total_seconds(), 1)
++                bucket["_start_ts"] = start_ts
++                bucket["_end_ts"] = end_ts
++        elif phase and ts and etype != "artifact_snapshot":
++            # Anything that is not a marker or an instrument-side snapshot
++            # counts as observed work inside the phase.
++            first_activity.setdefault(phase, ts)
++            last_activity[phase] = ts
+         if phase:
+             bucket = per_phase.setdefault(phase, _empty_phase())
+             if etype == "prompt":
+@@ -556,14 +573,38 @@ def compute_metrics(store, run_id):
+                 bucket["lines_added"] += event["payload"].get("lines_added", 0)
+                 bucket["lines_removed"] += event["payload"].get("lines_removed", 0)
+ 
++    timing_warnings = []
++    for name, bucket in per_phase.items():
++        start_ts = bucket.pop("_start_ts", None)
++        end_ts = bucket.pop("_end_ts", None)
++        last_ts = last_activity.get(name)
++        if start_ts and last_ts and last_ts >= start_ts:
++            # Time from the phase opening to the last observed activity: the
++            # measure that survives a late phase_end marker.
++            bucket["active_seconds"] = round((last_ts - start_ts).total_seconds(), 1)
++        if end_ts and last_ts:
++            idle = round((end_ts - last_ts).total_seconds(), 1)
++            bucket["trailing_idle_seconds"] = max(idle, 0.0)
++            if idle > IDLE_THRESHOLD_SECONDS:
++                bucket["timing_reliable"] = False
++                timing_warnings.append(
++                    "%s: phase_end marker issued %.0fs after last activity; "
++                    "wall_clock_seconds is unreliable, use active_seconds"
++                    % (name, idle)
++                )
++
+     for bucket in per_phase.values():
+         bucket["files_touched"] = len(bucket["files_touched"])
+         # One "turn" is a human prompt answered by the agent; the count of
+         # prompts is the conversational cost measure used for RQ3.
+         bucket["turns"] = bucket["human_prompts"]
+ 
++    reliable_phases = [b for b in per_phase.values() if b.get("timing_reliable", True)]
+     totals = {
+         "wall_clock_seconds": round((ended - started).total_seconds(), 1) if (started and ended) else None,
++        "active_seconds": round(sum(b.get("active_seconds", 0.0) for b in per_phase.values()), 1),
++        "active_seconds_reliable_phases_only": round(
++            sum(b.get("active_seconds", 0.0) for b in reliable_phases), 1),
+         "phases_completed": sum(1 for p in per_phase.values() if p["wall_clock_seconds"] > 0),
+         "human_prompts": sum(p["human_prompts"] for p in per_phase.values()),
+         "prompt_words": sum(p["prompt_words"] for p in per_phase.values()),
+@@ -585,8 +626,13 @@ def compute_metrics(store, run_id):
+     artifact_sizes = {}
+     for event in events:
+         if event.get("type") == "artifact_snapshot":
+-            payload = event["payload"]
+-            artifact_sizes.setdefault(payload["artifact"], {})[event.get("phase")] = {
++            payload = event.get("payload") or {}
++            name = payload.get("artifact")
++            if not name:
++                # A truncated or partially written event must not abort the
++                # whole metrics run; the log is append-only and may end mid-write.
++                continue
++            artifact_sizes.setdefault(name, {})[event.get("phase")] = {
+                 "words": payload.get("words"),
+                 "sha256": payload.get("sha256"),
+             }
+@@ -601,12 +647,16 @@ def compute_metrics(store, run_id):
+         "totals": totals,
+         "per_phase": {k: per_phase[k] for k in PHASES if k in per_phase},
+         "artifacts": artifact_sizes,
++        "timing_warnings": timing_warnings,
+     }
+ 
+ 
+ def _empty_phase():
+     return {
+         "wall_clock_seconds": 0.0,
++        "active_seconds": 0.0,
++        "trailing_idle_seconds": 0.0,
++        "timing_reliable": True,
+         "human_prompts": 0,
+         "prompt_words": 0,
+         "agent_outputs": 0,
+@@ -691,6 +741,9 @@ def verify_run(store, run_id):
+         if missing:
+             warnings.append("SDD run missing completed phases: %s" % ", ".join(sorted(missing)))
+ 
++    for warning in compute_metrics(store, run_id).get("timing_warnings", []):
++        warnings.append(warning)
++
+     if not any(e.get("type") == "prompt" for e in events):
+         warnings.append("no prompts captured - check hook installation")
+     if not any(e.get("type") == "file_edit" for e in events):
+@@ -946,7 +999,9 @@ def render_report(metrics):
+     lines.append("| Measure | Value |")
+     lines.append("| --- | --- |")
+     for label, key in (
+-        ("Wall-clock (s)", "wall_clock_seconds"),
++        ("Active time, all phases (s)", "active_seconds"),
++        ("Active time, reliable phases only (s)", "active_seconds_reliable_phases_only"),
++        ("Wall-clock, run start to end (s)", "wall_clock_seconds"),
+         ("Phases completed", "phases_completed"),
+         ("Human prompts (turns)", "human_prompts"),
+         ("Prompt words", "prompt_words"),
+@@ -962,14 +1017,16 @@ def render_report(metrics):
+     lines.append("")
+     lines.append("## Per phase")
+     lines.append("")
+-    lines.append("| Phase | Wall-clock (s) | Turns | Prompt words | Tool calls | Files | +Lines | -Lines |")
++    lines.append("| Phase | Active (s) | Wall-clock (s) | Turns | Prompt words | Tool calls | Files | +Lines | -Lines |")
+     lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+     for phase, bucket in metrics["per_phase"].items():
+         lines.append(
+-            "| %s | %s | %s | %s | %s | %s | %s | %s |"
++            "| %s | %s | %s%s | %s | %s | %s | %s | %s | %s |"
+             % (
+                 phase,
++                bucket.get("active_seconds"),
+                 bucket["wall_clock_seconds"],
++                "" if bucket.get("timing_reliable", True) else " (unreliable)",
+                 bucket["turns"],
+                 bucket["prompt_words"],
+                 bucket["tool_calls"],
+@@ -978,6 +1035,12 @@ def render_report(metrics):
+                 bucket["lines_removed"],
+             )
+         )
++    if metrics.get("timing_warnings"):
++        lines.append("")
++        lines.append("## Timing warnings")
++        lines.append("")
++        for warning in metrics["timing_warnings"]:
++            lines.append("- %s" % warning)
+     if metrics.get("artifacts"):
+         lines.append("")
+         lines.append("## Artifact growth (words by phase)")
+diff --git a/tools/sddlog/tests/test_sddlog.py b/tools/sddlog/tests/test_sddlog.py
+index 86e83c8..03ea4c7 100644
+--- a/tools/sddlog/tests/test_sddlog.py
++++ b/tools/sddlog/tests/test_sddlog.py
+@@ -540,3 +540,118 @@ class TestTranscriptIngestion:
+         start_run(repo)
+         proc = run_cli(repo, "ingest-transcript", "--path", "/nonexistent/x.jsonl")
+         assert proc.returncode != 0
++
++
++# ---------------------------------------------------------------------------
++# phase timing reliability
++#
++# Added after the R001 pilot, where an operator interruption between the end of
++# the agent's plan run and the phase_end marker inflated that phase's
++# marker-to-marker wall clock by roughly three days.
++# ---------------------------------------------------------------------------
++
++
++class TestPhaseTiming:
++    def _write_log(self, repo, run_id, rows):
++        """Replace the event log with hand-built timestamps.
++
++        Timing behaviour is not reproducible from real runs inside a test, so
++        the log is synthesised directly and read back through the real
++        metrics code path.
++        """
++        store = sddlog.Store(repo)
++        events = []
++        for seq, (ts, etype, phase, actor) in enumerate(rows, 1):
++            events.append({
++                "schema_version": sddlog.SCHEMA_VERSION,
++                "event_id": "e%d" % seq,
++                "run_id": run_id,
++                "seq": seq,
++                "ts": ts,
++                "type": etype,
++                "actor": actor,
++                "phase": phase,
++                "condition": "sdd",
++                "task_id": "T-TEST-01",
++                "session_id": None,
++                "payload": (
++                    {"phase": phase} if etype.startswith("phase_")
++                    else {"artifact": "spec", "words": 1} if etype == "artifact_snapshot"
++                    else {"words": 1}
++                ),
++            })
++        store.events_path(run_id).write_text(
++            "\n".join(json.dumps(e) for e in events) + "\n")
++        return store
++
++    def test_active_time_ignores_a_late_phase_end_marker(self, repo):
++        run_id = start_run(repo)
++        store = self._write_log(repo, run_id, [
++            ("2026-09-17T20:00:00.000Z", "phase_start", "plan", "system"),
++            ("2026-09-17T20:00:10.000Z", "prompt", "plan", "human"),
++            ("2026-09-17T20:05:00.000Z", "file_edit", "plan", "agent"),
++            # operator walked away; marker issued three days later
++            ("2026-09-20T18:00:00.000Z", "phase_end", "plan", "system"),
++        ])
++        metrics = sddlog.compute_metrics(store, run_id)
++        plan = metrics["per_phase"]["plan"]
++        assert plan["active_seconds"] == 300.0          # 20:00:00 -> 20:05:00
++        assert plan["wall_clock_seconds"] > 200000      # contaminated
++        assert plan["timing_reliable"] is False
++        assert plan["trailing_idle_seconds"] > 200000
++
++    def test_prompt_phase_end_is_marked_reliable(self, repo):
++        run_id = start_run(repo)
++        store = self._write_log(repo, run_id, [
++            ("2026-09-17T20:00:00.000Z", "phase_start", "specify", "system"),
++            ("2026-09-17T20:03:00.000Z", "file_edit", "specify", "agent"),
++            ("2026-09-17T20:03:05.000Z", "phase_end", "specify", "system"),
++        ])
++        metrics = sddlog.compute_metrics(store, run_id)
++        specify = metrics["per_phase"]["specify"]
++        assert specify["timing_reliable"] is True
++        assert specify["active_seconds"] == 180.0
++        assert specify["trailing_idle_seconds"] == 5.0
++        assert metrics["timing_warnings"] == []
++
++    def test_unreliable_phase_is_excluded_from_reliable_total(self, repo):
++        run_id = start_run(repo)
++        store = self._write_log(repo, run_id, [
++            ("2026-09-17T20:00:00.000Z", "phase_start", "specify", "system"),
++            ("2026-09-17T20:01:00.000Z", "file_edit", "specify", "agent"),
++            ("2026-09-17T20:01:02.000Z", "phase_end", "specify", "system"),
++            ("2026-09-17T20:02:00.000Z", "phase_start", "plan", "system"),
++            ("2026-09-17T20:03:00.000Z", "file_edit", "plan", "agent"),
++            ("2026-09-20T18:00:00.000Z", "phase_end", "plan", "system"),
++        ])
++        metrics = sddlog.compute_metrics(store, run_id)
++        totals = metrics["totals"]
++        assert totals["active_seconds_reliable_phases_only"] == 60.0
++        assert totals["active_seconds"] == 120.0
++        assert len(metrics["timing_warnings"]) == 1
++        assert "plan" in metrics["timing_warnings"][0]
++
++    def test_verify_surfaces_the_timing_warning(self, repo):
++        run_id = start_run(repo)
++        self._write_log(repo, run_id, [
++            ("2026-09-17T20:00:00.000Z", "phase_start", "plan", "system"),
++            ("2026-09-17T20:03:00.000Z", "file_edit", "plan", "agent"),
++            ("2026-09-20T18:00:00.000Z", "phase_end", "plan", "system"),
++        ])
++        proc = run_cli(repo, "verify", "--run-id", run_id)
++        assert "unreliable" in proc.stdout
++        assert "use active_seconds" in proc.stdout
++
++    def test_snapshots_do_not_count_as_activity(self, repo):
++        """Snapshots are written by the instrument at phase close, so counting
++        them as activity would mask exactly the idle gap we want to detect."""
++        run_id = start_run(repo)
++        store = self._write_log(repo, run_id, [
++            ("2026-09-17T20:00:00.000Z", "phase_start", "plan", "system"),
++            ("2026-09-17T20:01:00.000Z", "file_edit", "plan", "agent"),
++            ("2026-09-20T17:59:00.000Z", "artifact_snapshot", "plan", "system"),
++            ("2026-09-20T18:00:00.000Z", "phase_end", "plan", "system"),
++        ])
++        metrics = sddlog.compute_metrics(store, run_id)
++        assert metrics["per_phase"]["plan"]["active_seconds"] == 60.0
++        assert metrics["per_phase"]["plan"]["timing_reliable"] is False
