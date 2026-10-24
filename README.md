@@ -22,10 +22,11 @@ Study runs (R002 onwards) land in `logs/runs/` alongside the pilot run, under
 protocol 1.1.
 
 **Sealed held-out tests.** The held-out test suites for the five study tasks,
-with their reference implementations, are kept out of this repository until
-the last study run is finished. Their SHA-256 hashes are recorded in section 11
-of the [pre-registration](docs/PREREGISTRATION.md), so anyone can check later
-that the published suites are the ones frozen before any data existed.
+with their reference implementations, are in [sealed/](sealed/) as an encrypted
+archive, to be decrypted and published once the last study run is finished.
+Their SHA-256 hashes are recorded in section 11 of the
+[pre-registration](docs/PREREGISTRATION.md), so anyone can check later that the
+published suites are the ones frozen before any data existed.
 
 ## What is here
 
@@ -44,6 +45,7 @@ that the published suites are the ones frozen before any data existed.
 | [prompts/](prompts/) | The fixed constitution and plan prompts, and what is typed in each phase |
 | [schedule/](schedule/) | Counterbalanced run order (seed 20261023) and the run log |
 | [coding/](coding/) | Requirement register for the Part III traceability and security coding |
+| [sealed/](sealed/) | The sealed held-out suite for the five study tasks, encrypted until the last study run |
 | [practice/T-LOGIN-01/](practice/T-LOGIN-01/) | Practice comparison, excluded from analysis: both builds, their scores, and the task's held-out tests |
 | [specs/001-expense-splitter/](specs/001-expense-splitter/) | Spec Kit artifacts produced by the pilot run |
 | [.specify/memory/constitution.md](.specify/memory/constitution.md) | Project constitution produced by `/speckit-constitution` in the pilot |

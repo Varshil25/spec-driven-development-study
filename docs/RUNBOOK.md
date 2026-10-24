@@ -11,7 +11,7 @@ checklist to follow with the terminal open. Paths below assume:
 | `$BASE` | `~/sdd-study/base` | base repository built in step 0.5 |
 | run dirs | `~/sdd-study/runs/R0NN` | one fresh clone per run |
 
-Keep `sealed-heldout-v1.zip` **closed** until all study runs are finished.
+The sealed suite is in the repository only as `sealed/sealed-heldout-v1.zip.enc`. Keep it **encrypted**, and keep any decrypted copy closed, until all study runs are finished.
 
 ---
 
@@ -156,8 +156,11 @@ Every one of these also goes into the deviations log, section 12 of `PREREGISTRA
 
 ## 6. After the last study run: start of Part III
 
-1. **Unseal.** Unzip `sealed-heldout-v1.zip` next to the kit and check it is the frozen version:
+1. **Unseal.** Decrypt the archive, unzip it next to the kit and check it is the frozen version (full steps in `sealed/README.md`):
    ```bash
+   openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in sealed/sealed-heldout-v1.zip.enc -out sealed-heldout-v1.zip
+   sha256sum sealed-heldout-v1.zip                                              # must equal section 11
+   unzip -n sealed-heldout-v1.zip                                             # -n keeps sealed/README.md
    python3 $KIT/tools/study/score_run.py --hash-only --heldout sealed/heldout   # must equal section 11
    ```
 2. **Score** every run with the pre-registered interpreter (install `pytest` and `bandit==1.9.4` for it first):

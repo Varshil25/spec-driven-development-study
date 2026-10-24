@@ -258,6 +258,7 @@ Otherwise the result is **"no consistent difference"**. Minimum differences: pas
 | --- | --- |
 | Sealed archive | `sealed-heldout-v1.zip`, SHA-256 `9451954e1d4d4a914cad422b0477c838626ce9507bb9ac23966dbcc5a02c2198` |
 | Held-out suite tree hash | `a9b755596fa4d76f0658118373662f75c55dce3212a28a934cae2d1187425b9a` (`score_run.py --hash-only --heldout sealed/heldout`) |
+| Encrypted copy | `sealed/sealed-heldout-v1.zip.enc` in the study repository, SHA-256 `9ead2595d7649e3f4c975c371f99c0beb6311c7bc2dd739edf4c0a1967cf5e4d` (AES-256-CBC, PBKDF2, 600,000 iterations; passphrase held by the author) |
 | Archive contents | `heldout/` (157 test cases), `reference/` (5 reference implementations), `validation/` (6 naive variants, their scores, and the validation report) |
 | Instrument | `sddlog` 1.1, 67 tests (`sddlog-v1.1.patch`) |
 | Base repository commit | ______________________ (from `make_base.sh`) |
