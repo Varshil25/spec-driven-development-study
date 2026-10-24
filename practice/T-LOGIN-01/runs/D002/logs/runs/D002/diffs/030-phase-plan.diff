@@ -1,0 +1,1211 @@
+diff --git a/specs/001-secure-login-app/contracts/cli.md b/specs/001-secure-login-app/contracts/cli.md
+new file mode 100644
+index 0000000..48ca022
+--- /dev/null
++++ b/specs/001-secure-login-app/contracts/cli.md
+@@ -0,0 +1,125 @@
++# Contract: Command-Line Interface
++
++**Feature**: `001-secure-login-app` | **Plan**: [../plan.md](../plan.md)
++
++Run as `python -m loginapp …`, with `src/` on `PYTHONPATH` (FR-032).
++
++- The command names, arguments, exit statuses and the two stdout lines (`added USERNAME`, `listening on 127.0.0.1:PORT`) come from the product owner and are fixed.
++- The wording of the stderr messages is set by this plan. Tests check the parts each FR requires: the bad value, the rule or the variable named, and that no secret appears.
++
++## Exit statuses
++
++| Status | Meaning |
++|--------|---------|
++| 0 | Success (`adduser`) |
++| 1 | Problem with the environment or a file: secret unset or empty, accounts file unreadable, invalid or not writable, port in use, or the server could not start. |
++| 2 | Invalid usage or input: unknown or missing command or argument, invalid username, invalid password, port out of range. |
++| 3 | `adduser`: the username already exists. |
++| 130 | `serve` was stopped with Ctrl+C. The spec does not require a status for this. |
++
++- Every error is written to **stderr**, as `loginapp: error: <message>`, or as argparse's usage block for usage errors.
++- Nothing is written to **stdout** unless the command succeeds.
++- A value the user supplied appears in a message `repr()`-quoted, for example `'al-ice'`.
++- No message ever contains a password, a hash, a token or the secret (FR-029).
++- An expected error never produces a traceback (SC-007).
++
++## Global usage (FR-007)
++
++```text
++python -m loginapp COMMAND ...
++COMMAND is one of: adduser, serve
++```
++
++- `argparse` with `allow_abbrev=False` and `add_help=False` on the main parser and both subcommands.
++  - So a shortened name like `addu` or `--use` is refused, and `-h` / `--help` are unrecognised arguments.
++  - The spec defines no help option, and Principle IV says not to add one.
++- These cases write a usage message to stderr and exit **2**:
++  - no command;
++  - an unknown command;
++  - a missing required argument;
++  - an unrecognised argument;
++  - an option given twice, such as `--users a --users b`. A custom action refuses this; argparse would otherwise keep the last value silently.
++- These forms are accepted: `--users=FILE`, `--port=PORT`, and options before or after the `USERNAME` positional.
++
++## `adduser`
++
++```text
++python -m loginapp adduser USERNAME --users FILE
++stdin: one line, the password
++```
++
++### Order of checks (FR-004)
++
++The first failure decides the exit status:
++
++| # | Check | On failure: stderr | Exit |
++|---|-------|--------------------|------|
++| 1 | Arguments (FR-007) | argparse usage + `error: …` | 2 |
++| 2 | Username matches `^[A-Za-z0-9_]{3,32}$` (FR-002) | `loginapp: error: invalid username 'al-ice': must be 3 to 32 characters, each an ASCII letter, digit or underscore` | 2 |
++| 3 | Password: read first stdin line as bytes, strip one `\n` or `\r\n`, decode UTF-8 strictly, require ≥ 12 characters (FR-003) | `loginapp: error: invalid password: must be at least 12 characters of UTF-8 text` | 2 |
++| 4 | Read FILE. A missing file counts as no accounts (FR-007). | `loginapp: error: cannot read accounts file 'users.json': <reason>` or `loginapp: error: invalid accounts file 'users.json': <rule broken>` | 1 |
++| 5 | USERNAME not already in FILE, case-sensitive (FR-004) | `loginapp: error: username 'alice' already exists` | 3 |
++| 6 | Write FILE through a temporary file and `os.replace` (FR-006, FR-007) | `loginapp: error: cannot write accounts file 'users.json': <reason>` | 1 |
++
++### Notes
++
++- Standard input is read only if check 2 passes. It is never echoed.
++- An empty stdin (EOF at once) gives an empty password, so check 3 fails with status 2.
++- Input with no final line ending is accepted as it is.
++- The password message is the same whether the password is too short or not UTF-8. It states the 12-character minimum and never includes the input (FR-003).
++- `<reason>` is the `strerror` of the `OSError`, for example `No such file or directory` or `Is a directory`. It never comes from the file's contents.
++- `<rule broken>` names the rule that failed, never a field value (see [data-model.md](../data-model.md#validity-rules)).
++- **On success**:
++  - stdout gets exactly `added USERNAME\n`, and the exit status is 0;
++  - FILE has mode `0600`;
++  - every account that was in FILE before is still there, byte-for-byte;
++  - nothing is written to stderr.
++
++### Examples
++
++```text
++$ printf 'correct-horse-battery\n' | python -m loginapp adduser alice --users users.json
++added alice                                                                # exit 0
++$ printf 'correct-horse-battery\n' | python -m loginapp adduser alice --users users.json
++loginapp: error: username 'alice' already exists                          # stderr, exit 3
++$ printf 'short-pass1\n' | python -m loginapp adduser alice --users users.json
++loginapp: error: invalid password: must be at least 12 characters of UTF-8 text   # exit 2 (FR-004 order)
++```
++
++## `serve`
++
++```text
++python -m loginapp serve --port PORT --users FILE
++env: LOGINAPP_SECRET (required, non-empty)
++```
++
++### Order of startup checks (FR-010)
++
++The first failure decides the exit status. None of these failures prints the `listening on` line.
++
++| # | Check | On failure: stderr | Exit |
++|---|-------|--------------------|------|
++| 1 | Arguments, including PORT: 1–5 ASCII digits with a value of 1–65535 (FR-007, FR-010) | argparse usage + `error: argument --port: invalid port '0': must be a whole number from 1 to 65535` | 2 |
++| 2 | `LOGINAPP_SECRET` set, non-empty, encodable as UTF-8 (FR-009) | `loginapp: error: LOGINAPP_SECRET is not set or is empty` (or `… is not valid UTF-8 text`) | 1 |
++| 3 | FILE exists, is readable and valid (FR-010) | `loginapp: error: cannot read accounts file 'users.json': <reason>` or `loginapp: error: invalid accounts file 'users.json': <rule broken>` | 1 |
++| 4 | Bind and listen on `127.0.0.1:PORT` (FR-008, FR-010) | `loginapp: error: cannot listen on 127.0.0.1:8000: <reason>` (for example `Address already in use`) | 1 |
++
++- A PORT like `+8000`, ` 8000`, `8_000`, `08000x` or one using non-ASCII digits is refused at check 1.
++- A PORT with leading zeros, such as `08000`, is 5 ASCII digits with a value of 8000, so it is accepted. The line then says `listening on 127.0.0.1:8000`, because PORT is printed as an integer.
++
++### Ready line (FR-008)
++
++When checks 1–4 pass, the socket is already listening. The program then writes `listening on 127.0.0.1:PORT\n` to stdout and flushes it at once (`print(..., flush=True)`), then starts serving.
++
++### While running
++
++- Requests are not logged.
++- These events write one `loginapp: error: …` line (or block) to stderr:
++  - an accounts file that cannot be read or is invalid during a sign-in (FR-011);
++  - an unexpected exception (FR-031): exception type and traceback frames, without the exception message.
++- Neither kind of message contains passwords, hashes, tokens or the secret (FR-029).
++
++### Stopping
++
++- Ctrl+C (SIGINT) closes the listening socket, writes `loginapp: stopped` to stderr and exits with status 130.
++- Any other signal uses Python's default behaviour.
+diff --git a/specs/001-secure-login-app/contracts/http.md b/specs/001-secure-login-app/contracts/http.md
+new file mode 100644
+index 0000000..416b4db
+--- /dev/null
++++ b/specs/001-secure-login-app/contracts/http.md
+@@ -0,0 +1,129 @@
++# Contract: HTTP Interface
++
++**Feature**: `001-secure-login-app` | **Plan**: [../plan.md](../plan.md)
++
++The server listens on `127.0.0.1:PORT` only. It speaks HTTP/1.0, so every connection closes after one response. The status codes, paths, header names, cookie name and attributes, token format and the message `Invalid username or password` come from the product owner and are fixed. The HTTP version and reason phrases are not part of the contract.
++
++## Headers on every response (FR-012, FR-028)
++
++| Header | Value | When |
++|--------|-------|------|
++| `Cache-Control` | `no-store` | always |
++| `X-Frame-Options` | `DENY` | always |
++| `X-Content-Type-Options` | `nosniff` | always |
++| `Content-Type` | `text/html; charset=utf-8` | every response with a body |
++| `Content-Length` | byte length of the body (`0` for 303) | always |
++
++- These headers are added in one `end_headers` override. They are therefore also present on errors that `http.server` produces itself, before any route runs:
++  - 400 for bad syntax or HTTP/0.9;
++  - 414 for a URI that is too long;
++  - 431 for too many headers;
++  - 501 for an unsupported method;
++  - 505 for an unsupported HTTP version.
++- Every body is HTML: a complete `<!doctype html>` document with `<meta charset="utf-8">`.
++
++## Routing (FR-021, FR-022)
++
++- The path is the raw request-target up to the first `?`, matched **exactly**. The query string is ignored. Case matters, there is no percent-decoding, and a leading `//` is not collapsed.
++
++| Path | GET | POST | Other methods |
++|------|-----|------|---------------|
++| `/login` | 200 login page | sign-in | 501 |
++| `/dashboard` | dashboard or 303 | 405, `Allow: GET` | 501 |
++| `/logout` | 405, `Allow: POST` | sign-out | 501 |
++| anything else (`/`, `/dashboard/`, `/login.html`, `//login`, `/LOGIN`) | 404 | 404 | 501 |
++
++- 404 and 405 have small HTML bodies: `Not found` and `Method not allowed`.
++- 501 is `http.server`'s own error page, with the headers above.
++
++## `GET /login` (FR-013)
++
++- **200** with the login page.
++- No `Set-Cookie` header.
++- A `session` cookie sent with the request is ignored (spec: no redirect when already signed in).
++
++The page holds exactly one form:
++
++```html
++<form method="post" action="/login">
++  <label>Username <input type="text" name="username" autocomplete="username" required></label>
++  <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
++  <button type="submit">Sign in</button>
++</form>
++```
++
++The text `Invalid username or password` does not appear on this page.
++
++## `POST /login` (FR-011, FR-014, FR-015, FR-016, FR-030)
++
++The checks run in this order:
++
++| # | Condition | Response |
++|---|-----------|----------|
++| 1 | More than one `Content-Length` header, or a value that is not ASCII digits | **400**, HTML error page |
++| 2 | `Content-Length` > 65536 | **413**, HTML error page, body not read |
++| 3 | Fewer bytes than `Content-Length` arrive before end-of-stream | **400** |
++| 4 | Malformed submission: no `Content-Length` (treated as an empty body), empty body, `Content-Type` missing or repeated, media type other than `application/x-www-form-urlencoded` (case-insensitive, parameters ignored), body bytes or a decoded field not valid UTF-8, `username` or `password` missing, empty or repeated. Other fields are ignored. | **401** failure page (below). The accounts file is not read and no state changes. |
++| 5 | Accounts file missing, unreadable or invalid at this moment | **500**, generic page; one error line on stderr naming FILE |
++| 6 | Username has no account, password wrong, or username locked | **401** failure page; lock state updated as in [data-model.md](../data-model.md#sign-in-lock-state-in-memory) |
++| 7 | Credentials correct and username not locked | **303 See Other**, `Location: /dashboard`, `Set-Cookie` as below, `Content-Length: 0` |
++
++### Failure page (401)
++
++- The same bytes as the login page, with one extra element before the form:
++
++  ```html
++  <p class="error" role="alert">Invalid username or password</p>
++  ```
++
++- The page never includes the submitted username or password.
++- Responses 4 and 6 are byte-identical, and so are their headers, except `Date`.
++- Every case in row 6 costs one scrypt hash (FR-016).
++
++### Session cookie (FR-024, FR-025)
++
++```text
++Set-Cookie: session=<JWT>; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800
++```
++
++`<JWT>` is the token described in [data-model.md](../data-model.md#session-token). There is no `Secure` attribute, because the server uses plain HTTP over loopback (spec Assumptions).
++
++## `GET /dashboard` (FR-017, FR-018, FR-023, FR-026, FR-027)
++
++- **Session lookup**:
++  1. Join all `Cookie` request headers with `; `.
++  2. Split on `;`, then split each pair on its first `=`, stripping spaces.
++  3. A session candidate exists only when exactly one pair is named `session` and its value is non-empty.
++- **Valid session**: **200**.
++  - The page contains `<h1>Welcome, {html.escape(sub, quote=True)}</h1>` and this sign-out form:
++
++    ```html
++    <form method="post" action="/logout"><button type="submit">Sign out</button></form>
++    ```
++
++  - No `Set-Cookie` header (FR-026).
++- **Otherwise**: **303**, `Location: /login`, `Content-Length: 0`, no body, no `Set-Cookie`. "Otherwise" covers:
++  - no `Cookie` header;
++  - an empty or repeated `session` cookie;
++  - a token that fails any acceptance step: malformed, non-canonical encoding, `alg` not `HS256`, bad signature, wrong secret, bad claim types, expired;
++  - a token not issued by this run, or signed out.
++
++## `POST /logout` (FR-019, FR-020)
++
++- The request body is never read.
++- If the request carries a session candidate that is a valid session at this moment, the token moves from the issued registry to the signed-out map before the response is written.
++- The response is the same whether or not the session was valid:
++
++  ```text
++  303 See Other
++  Location: /login
++  Set-Cookie: session=; Max-Age=0; Path=/
++  Content-Length: 0
++  ```
++
++- Other sessions of the same username, which hold different tokens, are not affected.
++
++## Errors (FR-031)
++
++- An exception in a route handler gives **500** with the generic page `<h1>Internal server error</h1>`. The page contains no exception text, path or stack trace.
++- The report goes to stderr only (see [cli.md](cli.md#while-running)). The handling thread ends normally, so the server keeps accepting requests.
+diff --git a/specs/001-secure-login-app/data-model.md b/specs/001-secure-login-app/data-model.md
+new file mode 100644
+index 0000000..68430c5
+--- /dev/null
++++ b/specs/001-secure-login-app/data-model.md
+@@ -0,0 +1,224 @@
++# Data Model: Secure Login Web Application
++
++**Feature**: `001-secure-login-app` | **Date**: 2026-10-23 | **Plan**: [plan.md](plan.md) | **Research**: [research.md](research.md)
++
++The application has one persistent store, the accounts file. Everything else lives in memory and lasts only for one run of `serve`.
++
++## Constants
++
++These values are fixed in code (`src/loginapp/accounts.py`, `src/loginapp/server.py`, `src/loginapp/tokens.py`). Tests check them exactly.
++
++| Name | Value | Requirement |
++|------|-------|-------------|
++| Username pattern | `^[A-Za-z0-9_]{3,32}$` (ASCII only, whole string) | FR-002 |
++| Minimum password length | 12 characters | FR-003 |
++| Hash function | `scrypt` (`hashlib.scrypt`) | FR-005 |
++| scrypt `n` | 131072 (2^17) | FR-005 |
++| scrypt `r` | 8 | FR-005 |
++| scrypt `p` | 1 | FR-005 |
++| Derived key length | 32 bytes | FR-005 |
++| Salt length | 16 bytes, from `secrets.token_bytes` | FR-005 |
++| scrypt `maxmem` | 268435456 (256 MiB) (a limit, not stored) | FR-005 |
++| Hashes running at once | at most 4 (process-wide semaphore) | FR-030, FR-031 |
++| Session lifetime | 1800 seconds | FR-024, FR-025, FR-026 |
++| Failures that lock a username | 5 in a row | FR-030 |
++| Lock duration | 900 seconds | FR-030 |
++| Largest sign-in body | 65536 bytes | FR-015 |
++| Listen address | `127.0.0.1` | FR-008 |
++
++## Account
++
++One person who can sign in. Stored in the accounts file under its username.
++
++| Field | Type | Rule |
++|-------|------|------|
++| username (the key in `accounts`) | string | Matches the username pattern. Unique and case-sensitive: `Alice` and `alice` are different accounts. |
++| `algorithm` | string | Exactly `"scrypt"` |
++| `n` | integer | Exactly `131072` |
++| `r` | integer | Exactly `8` |
++| `p` | integer | Exactly `1` |
++| `salt` | string | Exactly 32 lowercase hex characters (16 bytes). Random for each account. |
++| `hash` | string | Exactly 64 lowercase hex characters (32 bytes): `scrypt(password.encode("utf-8"), salt, n, r, p, dklen=32)` |
++
++- No other fields are allowed. The password itself is never stored (FR-005).
++- `verify(password, record)` recomputes the hash with the record's salt and settings, then compares the result with `hmac.compare_digest`.
++- The password is hashed exactly as typed, as its UTF-8 bytes, with no Unicode normalisation.
++- Two accounts with the same password get different hashes, because their salts differ.
++
++## Accounts file
++
++The single file named by `--users`. Only `adduser` writes it, and `serve` only reads it.
++
++```json
++{
++  "accounts": {
++    "alice": {
++      "algorithm": "scrypt",
++      "hash": "9f2c…64 hex chars…",
++      "n": 131072,
++      "p": 1,
++      "r": 8,
++      "salt": "4b1e…32 hex chars…"
++    }
++  }
++}
++```
++
++### Validity rules
++
++A file breaking any of these rules is "not a valid accounts file" (FR-007, FR-010, FR-011):
++
++1. It is UTF-8 text that parses as JSON. An empty file is invalid.
++2. No JSON object anywhere in it has a duplicate key.
++3. The top level is an object with exactly one key, `accounts`, whose value is an object. It may be empty.
++4. Every key of `accounts` matches the username pattern.
++5. Every value is an object with exactly the fields in the Account table, each meeting its rule.
++   - The integers must be real JSON integers. `true` and `131072.0` are invalid.
++
++Error messages name the file and the rule that failed (for example `account 'bob': field 'salt' must be 32 lowercase hex characters`). They never include a field's value (FR-029).
++
++### Lifecycle
++
++```text
++(absent) --adduser ok--> present, mode 0600, 1 account
++present  --adduser ok--> present, mode 0600, accounts + 1    (old accounts unchanged)
++present  --adduser fails (any status)--> unchanged (bytes and mode)
++```
++
++- **Reading** opens the file and validates it.
++  - In `adduser`, a missing file counts as an empty `accounts` object. Any other `OSError` is "cannot be read" (exit 1).
++  - In `serve`, a missing file is an error.
++    - At startup it means exit 1 (FR-010).
++    - During a well-formed sign-in it means a 500 response (FR-011).
++- **Writing** (`adduser` only) goes through a temporary file:
++  1. Serialise with `json.dumps(obj, indent=2, sort_keys=True) + "\n"`.
++  2. Create a temporary file with `tempfile.mkstemp(dir=<FILE's folder>, prefix="." + <FILE's name> + ".", suffix=".tmp")`. It gets mode `0600` from the start.
++  3. Write, flush and `os.fsync`, then `os.replace(temp, FILE)`.
++  4. On any error, remove the temporary file and exit 1 naming FILE.
++
++  A reader therefore sees either the complete old file or the complete new one (FR-006, FR-011).
++
++## Session token
++
++A JWT in compact form (RFC 7519), carried in the `session` cookie.
++
++```text
++base64url(header) "." base64url(payload) "." base64url(signature)     (no "=" padding)
++
++header    = {"alg":"HS256","typ":"JWT"}                       (these exact bytes)
++payload   = {"sub":USERNAME,"iat":IAT,"exp":IAT+1800}        (json.dumps, separators=(",", ":"))
++signature = HMAC-SHA256(key = LOGINAPP_SECRET.encode("utf-8"),
++                        msg = ASCII(segment1 + "." + segment2))
++```
++
++| Claim | Type | Value |
++|-------|------|-------|
++| `sub` | string | The username that signed in |
++| `iat` | integer | `int(clock())` at issue: whole seconds since the Unix epoch, rounded down |
++| `exp` | integer | `iat + 1800` |
++
++### Acceptance (FR-023)
++
++`tokens.decode(token, secret, now)` returns the claims or raises `InvalidToken`. Each step must pass before the next one runs:
++
++1. The token is ASCII with exactly two `.` characters, which gives three segments.
++2. Every segment is non-empty, uses only `A–Z a–z 0–9 - _`, and is **canonical**: decoding it and encoding it again (without padding) gives the same text. This refuses added `=` padding and altered unused final bits (FR-020).
++3. The header decodes to a JSON object with no duplicate keys, and its `alg` is the string `"HS256"`. Other header fields are allowed.
++4. `hmac.compare_digest(signature, HMAC-SHA256(secret, segment1 + "." + segment2))` is true.
++5. The payload is a JSON object with no duplicate keys. `sub` is a `str`; `iat` and `exp` are `int` and not `bool`.
++6. `now < exp`. There is no clock tolerance, so at `now == exp` the token is refused.
++
++The server then adds the checks that need state, with the token's exact string as the key:
++
++7. The token is in this run's **issued-token registry** (FR-027).
++8. The token is not in the **signed-out map** (FR-020).
++
++## Issued-token registry (in memory)
++
++`issued: dict[str, int]`, mapping a token string to its `exp`. It is owned by the running `LoginServer` and guarded by the server's state lock.
++
++- **Added**: when a sign-in succeeds, before the 303 response is written.
++- **Removed**:
++  - when the token is signed out (it moves to the signed-out map);
++  - when it has expired, by a sweep at each sign-in and sign-out that removes every entry with `exp <= now`.
++- **Lost** when the server stops. A new run starts empty, so it refuses every token from an earlier run (FR-027).
++
++## Signed-out map (in memory)
++
++`signed_out: dict[str, int]`, mapping a token string to its `exp`. Same owner and lock.
++
++- **Added**: by `POST /logout` when the presented token is valid at that moment, in the same critical section that removes it from `issued`, before the response is written (FR-020).
++- **Removed**: by the same expiry sweep, and when the server stops.
++- Its only other job is to stop a new sign-in from producing a byte-identical token while the old one is still unexpired (see [Issuing a token](#issuing-a-token)).
++
++## Issuing a token
++
++The server records `run_start = int(clock())` immediately after it binds the port, before it prints `listening on`. After a password has been verified, it issues a token like this:
++
++```text
++loop:
++    with state lock:
++        iat = int(clock())
++        token = encode(sub, iat, secret)
++        if iat > run_start and token not in signed_out:
++            issued[token] = iat + 1800
++            return token
++    sleep(iat + 1 - clock())        # outside the lock; at most 1 second
++```
++
++- An earlier run on the same port stopped issuing tokens before this run could bind the port. Its tokens therefore all have `iat <= run_start`. Because of the `iat > run_start` rule, this run can never re-issue an earlier run's bytes (FR-027). This covers an earlier run's signed-out tokens too (FR-020). Two servers running at the same time on different ports are not a restart, and this rule does not cover them.
++- The `signed_out` rule stops a same-second sign-in from re-issuing a token that was just signed out (FR-020).
++- The wait adds at most 1 s, so a sign-in still finishes in under 2 s (SC-002).
++- If the same user signs in twice in the same second without signing out, both get the same token. This is accepted (spec Edge Cases).
++
++## Session lifecycle
++
++```text
++           sign-in ok
++(none) ─────────────────▶ ACTIVE ──── now >= exp ─────────▶ EXPIRED   (refused, swept)
++                            │
++                            ├── POST /logout ──────────────▶ SIGNED-OUT (refused until exp)
++                            │
++                            └── server stops ──────────────▶ ENDED     (refused by every later run)
++```
++
++- Only ACTIVE tokens open the dashboard.
++- `GET /dashboard` never changes a token's state and never sets a cookie (FR-026).
++- A lock on the username does not affect ACTIVE tokens (FR-030).
++
++## Sign-in lock state (in memory)
++
++These maps are owned by the running `LoginServer` and guarded by the same state lock:
++
++- `failures: dict[str, int]`: username → failed attempts in a row. A missing key means 0.
++- `locked_at: dict[str, float]`: username → `clock()` at the fifth failure.
++
++Keys are added only for usernames that exist in the accounts file at the time of the attempt. A restart clears both maps.
++
++### Transitions for a well-formed attempt
++
++These run under the state lock, after hashing, with the attempt time `t = clock()`. The username exists in the file.
++
++```text
++                 wrong password (count < 4): count += 1
++               ┌──────────────┐
++               ▼              │
++   UNLOCKED(count) ───────────┘
++      │    │
++      │    └─ correct password ──▶ UNLOCKED(0) + token issued
++      │
++      └─ wrong password (count == 4) ──▶ LOCKED(locked_at = t), count = 0
++
++   LOCKED(s):
++      t - s <  900 ─▶ refused (standard 401); nothing counted; s unchanged
++      t - s >= 900 ─▶ lock cleared, count = 0, attempt handled as UNLOCKED(0)
++```
++
++- An attempt for a username that has no account is refused and changes no state.
++- A malformed submission (FR-015) changes no state and does not read the file.
++- One critical section covers the lock check, the comparison of the password result and the update. As a result, 10 simultaneous wrong attempts give exactly 5 counted failures and a lock, and the other 5 find the lock in place (FR-030).
++
++## Server secret
++
++- `LOGINAPP_SECRET`, read once by `serve` at startup. It must be non-empty and encodable as UTF-8.
++- It is held in memory only, passed to `tokens.encode` and `tokens.decode` as `secret.encode("utf-8")`, and never printed (FR-029).
+diff --git a/specs/001-secure-login-app/plan.md b/specs/001-secure-login-app/plan.md
+new file mode 100644
+index 0000000..bc1233d
+--- /dev/null
++++ b/specs/001-secure-login-app/plan.md
+@@ -0,0 +1,285 @@
++# Implementation Plan: Secure Login Web Application
++
++**Branch**: `001-secure-login-app` | **Date**: 2026-10-23 | **Spec**: [spec.md](spec.md)
++
++**Input**: Feature specification from `specs/001-secure-login-app/spec.md`
++
++**Planning guidance from the product owner**: Use Python 3.11 or newer and the standard library only, as the specification says. Follow the interface in the specification exactly. Use pytest for tests.
++
++## Summary
++
++The product is a local web application with two parts:
++
++- `python -m loginapp adduser` adds accounts to a JSON accounts file. It stores a salted scrypt hash of each password, never the password.
++- `python -m loginapp serve` runs an `http.server` web server on 127.0.0.1. It offers a login page, a private dashboard and sign-out.
++
++Sessions are HS256 JWTs in an `HttpOnly; SameSite=Strict` cookie, written with `hmac`, `hashlib` and `base64`. They last 30 minutes.
++
++Each server run keeps three things in memory:
++
++- a registry of the tokens it issued, so that tokens from earlier runs are refused (FR-027);
++- a map of signed-out tokens (FR-020);
++- per-username failure counts and locks, so that 5 failures in a row lock a username for 900 s (FR-030).
++
++All of this state sits behind one lock. Failed sign-ins of every kind cost exactly one scrypt hash, so they take the same time (FR-016). Everything is Python standard library. pytest is used for tests only.
++
++## Technical Context
++
++**Language/Version**:
++
++- The code is written for Python ≥ 3.11 (product owner).
++- It is verified on CPython 3.13.17, as the constitution's Technical Constraints require.
++- A smoke test also runs it on the CPython 3.11.17 installed here.
++- The code uses only features present in both versions ([research R12](research.md#r12-python-311-compatibility-rules)).
++
++**Primary Dependencies**: none outside the standard library. The runtime modules are listed in [research R12](research.md#r12-python-311-compatibility-rules).
++
++**Storage**:
++
++- One JSON accounts file, given by `--users`, with mode `0600`, written atomically ([data-model](data-model.md#accounts-file)).
++- Session and lock state is kept in memory, for one server run only.
++
++**Testing**: pytest 9.1.1 (development only), run as `python3 -m pytest` from the repository root.
++
++**Target Platform**:
++
++- A local POSIX machine (Linux, macOS), verified on Linux.
++- The server binds `127.0.0.1` only. FR-006's owner-only mode relies on POSIX permissions.
++
++**Project Type**: a command-line program that also runs a local web server. It is one Python package under `src/`.
++
++**Performance Goals**:
++
++- A sign-in takes < 2 s (SC-002). Measured: one scrypt hash takes 0.42–0.46 s, and at most 1 s of extra waiting is possible ([research R5](research.md#r5-sign-out-fr-019-fr-020)).
++- Request rate is not a goal.
++
++**Constraints**:
++
++- Each scrypt hash uses 128 MiB. At most 4 run at once, so peak memory is about 512 MiB.
++- Request bodies are limited to 64 KiB.
++- No clock tolerance at session expiry.
++- Every failure case costs the same: one hash.
++
++**Scale/Scope**: one operator, a handful of accounts, one machine, a few people signing in.
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++Constitution v1.0.0 (`.specify/memory/constitution.md`).
++
++| Gate | Pre-research | Post-design | Evidence |
++|------|--------------|-------------|----------|
++| **I. Standard Library Only**: runtime imports only stdlib + `loginapp`; nothing to install; pytest not imported by runtime code | PASS | PASS | Module list in [research R12](research.md#r12-python-311-compatibility-rules), all in `sys.stdlib_module_names`. The JWT is hand-written ([R6](research.md#r6-jwt-implementation-fr-023-fr-024-fr-025)), not PyJWT. Enforced by `test_fr032_runtime_imports_stdlib_only` (AST scan of `src/`). |
++| **II. Fail Loudly**: every invalid input is rejected with a named message and a non-zero exit or error response; nothing that looks valid goes to stdout; no tracebacks for expected errors; no swallowed exceptions | PASS | PASS | The CLI's order of checks, messages and exit codes are in [contracts/cli.md](contracts/cli.md). The HTTP error responses are in [contracts/http.md](contracts/http.md). Library functions raise `InvalidToken` / `SignInRefused` / `AccountsFileError` and never return sentinels. Unexpected errors become a 500 plus a stderr report (FR-031). Client disconnects become a one-line stderr message ([R9](research.md#r9-responses-errors-and-logging-fr-012-fr-019-fr-028-fr-029-fr-031)). Repeated options are refused, not "last wins" ([R10](research.md#r10-command-line-parsing-fr-001fr-004-fr-007-fr-009-fr-010)). |
++| **III. Every Requirement Is Testable**: every FR maps to ≥ 1 pytest test citing its ID; every invalid-input case is tested; no skipped-only coverage | PASS | PASS | See [FR → test map](#fr--test-map) below. Every FR has tests that cannot be skipped. The only skippable test (the 3.11 smoke test) is extra. |
++| **IV. Simplicity**: smallest design; plain functions; added complexity recorded | PASS (with entries) | PASS (with entries) | 4 runtime modules plus `__init__`/`__main__`. Classes only where `http.server` requires them (`LoginServer`, `Handler`) and for the three exception types. Every addition beyond the minimum is listed in [Complexity Tracking](#complexity-tracking). |
++| **Technical Constraints**: CPython 3.13; pytest; `python3 -m pytest` from the repository root with nothing else set up | PASS | PASS | `pyproject.toml` holds only `[tool.pytest.ini_options]` (`pythonpath = ["src"]`, `testpaths = ["tests"]`). The constitution's CPython 3.13 and the product owner's "3.11 or newer" do not conflict: the code targets the 3.11 subset and is verified on 3.13. |
++| **Plan gate** (Workflow §2): stdlib-only confirmed; error behaviour defined; tests named per FR; complexity recorded | PASS | PASS | The four rows above. |
++| **Specification gate** (Workflow §1): FR IDs, testable, no `[NEEDS CLARIFICATION]` | PASS | n/a | `checklists/requirements.md` iteration 2; spec has no markers. |
++
++No gate fails, and nothing needs an ERROR. Technical Context has no `NEEDS CLARIFICATION` items. Decisions marked **(review)** in [research.md](research.md) are listed under [Open review points](#open-review-points). They are design choices made within the spec's latitude. None of them blocks planning.
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/001-secure-login-app/
++├── plan.md              # This file
++├── research.md          # Phase 0: decisions R1–R13
++├── data-model.md        # Phase 1: accounts file, token, in-memory state, state machines
++├── quickstart.md        # Phase 1: run and validation guide
++├── contracts/
++│   ├── cli.md           # Phase 1: adduser / serve, check order, messages, exit codes
++│   └── http.md          # Phase 1: routes, statuses, headers, cookies, pages
++├── checklists/
++│   └── requirements.md  # from /speckit-specify
++└── tasks.md             # Phase 2 (/speckit-tasks; not created here)
++```
++
++### Source Code (repository root)
++
++```text
++pyproject.toml           # [tool.pytest.ini_options] only: pythonpath = ["src"], testpaths = ["tests"]
++src/
++└── loginapp/
++    ├── __init__.py      # package marker (docstring only)
++    ├── __main__.py      # `from loginapp.cli import main; raise SystemExit(main())`
++    ├── cli.py           # argparse parser, adduser and serve commands, stderr messages, exit codes
++    ├── accounts.py      # username/password rules, scrypt hash and verify, accounts-file load/validate/save
++    ├── tokens.py        # HS256 JWT encode/decode, canonical base64url, InvalidToken
++    └── server.py        # LoginServer (ThreadingHTTPServer + state), Handler, routing, HTML pages, make_server()
++tests/
++├── conftest.py          # fixtures: run_cli, ServerProcess (subprocess), inproc_server + FakeClock, raw HTTP helper,
++│                        #           a session-scoped accounts file holding alice and bob
++├── test_adduser.py      # FR-001 – FR-007
++├── test_accounts.py     # FR-005, FR-006 (unit)
++├── test_serve.py        # FR-008 – FR-010
++├── test_tokens.py       # FR-023, FR-024 (unit)
++├── test_login.py        # FR-011, FR-013 – FR-016
++├── test_sessions.py     # FR-017 – FR-020, FR-023 – FR-027
++├── test_routing.py      # FR-012, FR-021, FR-022, FR-028
++├── test_lockout.py      # FR-016, FR-030
++└── test_robustness.py   # FR-029, FR-031, FR-032
++```
++
++**Structure Decision**:
++
++- **Single project** (the template's option 1, without its `models/` and `services/` layers). The program is one small package. The spec fixes its location as `src/loginapp`.
++- **Modules**: there are four runtime modules, one per concern the spec names: CLI, accounts, tokens and HTTP server.
++  - Page rendering lives in `server.py`, not in a module of its own.
++  - `__main__.py` only calls `cli.main()`. Tests can therefore call `cli.main(argv)` in-process, for example to inject a write failure (FR-006), without running the program on import.
++- **Study tooling**: the `tools/` and `logs/` directories belong to the study and are not touched. `testpaths` keeps `python3 -m pytest` to this feature's suite.
++
++### Module responsibilities and interfaces
++
++These are the internal interfaces. The external ones are in `contracts/`.
++
++- **`accounts.py`**
++  - **Constants**: `USERNAME_RE`, `MIN_PASSWORD_CHARS = 12`, `SCRYPT_N = 2**17`, `SCRYPT_R = 8`, `SCRYPT_P = 1`, `DKLEN = 32`, `SALT_BYTES = 16`.
++  - **Exception**: `AccountsFileError(Exception)`. Its message names the file and the rule that failed, never a value.
++  - **Functions**:
++    - `check_username(name) -> None` and `check_password(text) -> None` raise `ValueError` with the contract message.
++    - `make_record(password) -> dict`.
++    - `verify(password, record) -> bool`.
++    - `dummy_verify(password) -> None`, which does the same work as `verify` for unknown usernames.
++    - `load(path, missing_ok) -> dict[str, dict]` raises `AccountsFileError`.
++    - `save(path, accounts) -> None` raises `OSError`. It writes atomically with mode `0600`.
++  - **Concurrency**: one module-level `BoundedSemaphore(4)` limits how many hashes run at once.
++- **`tokens.py`**
++  - **Exception**: `InvalidToken(ValueError)`.
++  - **Functions**:
++    - `encode(sub, iat, key: bytes) -> str`.
++    - `decode(token, key: bytes, now: float) -> dict` raises `InvalidToken`, following [data-model steps 1–6](data-model.md#acceptance-fr-023).
++- **`server.py`**
++  - **Exception**: `SignInRefused(Exception)`, the standard sign-in failure. It carries no detail, so the 401 response cannot differ between cases.
++  - **Entry point**: `make_server(port, users_path, secret: str, clock=time.time, sleep=time.sleep) -> LoginServer`.
++    - It binds and listens before returning, and sets `run_start`.
++    - `clock` and `sleep` are for tests only. The CLI never passes them.
++  - **`LoginServer(ThreadingHTTPServer)`**
++    - **State**: `lock`, `issued`, `signed_out`, `failures`, `locked_at` and `run_start`.
++    - **Operations**:
++      - `issue_token(username) -> str`.
++      - `session_user(cookie_header) -> str` returns the signed-in username, or raises `InvalidToken` when there is no valid session. The HTTP layer maps that to 303 → `/login`.
++      - `sign_out(cookie_header) -> None` revokes the presented token if it is valid, and does nothing otherwise, as FR-019 requires.
++      - `attempt(username, password) -> str` returns a new token, or raises `SignInRefused` for the standard failure. The HTTP layer maps that to the 401 page.
++      - `AccountsFileError` propagates and becomes 500.
++      - No function returns `None` or another sentinel in place of an answer (Principle II).
++  - **`Handler(BaseHTTPRequestHandler)`**
++    - Overrides `parse_request` (to refuse HTTP/0.9), `end_headers` (protective headers), `log_message` (does nothing) and `do_GET` / `do_POST`. Both of the latter route on the raw request-target.
++    - Route functions return `(status, headers, body)`, and one `send()` writes it. An exception anywhere in a route gives the FR-031 500.
++  - **Page functions**: `login_page(error: bool)`, `dashboard_page(username)` and `simple_page(title)`. Each returns `bytes`.
++- **`cli.py`**: `main(argv=None) -> int`. It builds the parser, runs the checks in order, prints messages and returns the exit code. `serve` prints the ready line with `flush=True`, then calls `serve_forever()`.
++
++### Request flow for `POST /login`
++
++1. Validate `Content-Length`: 400 or 413 ([contracts/http.md](contracts/http.md#post-login-fr-011-fr-014-fr-015-fr-016-fr-030)).
++2. Read the body, then parse and validate the form. A malformed form gets the 401 page straight away.
++3. Load the accounts file. If that fails, respond 500 and write one line to stderr.
++4. Hash outside the lock, always exactly once: `verify()` for a known username (even a locked one), `dummy_verify()` for an unknown one.
++5. Under the lock, apply the [lock transitions](data-model.md#transitions-for-a-well-formed-attempt).
++6. On success, `issue_token()`, which may wait up to 1 s outside the lock ([data-model](data-model.md#issuing-a-token)). The response is 303 with a `Set-Cookie`. Otherwise it is the 401 page.
++
++## FR → test map
++
++- Every test name starts with `test_frNNN_`, which cites the FR ID (Principle III, SC-009).
++- **Kinds of test**: **S** = subprocess (`python -m loginapp`), **I** = in-process server (with `FakeClock` where noted), **U** = unit.
++- Every FR has at least one test that cannot be skipped.
++
++| FR | Tests (file :: name) | Kind | What is checked |
++|----|----------------------|------|-----------------|
++| FR-001 | `test_adduser.py::test_fr001_adds_account_and_prints_added`, `test_fr001_creates_missing_file`, `test_fr001_password_line_handling` (param: `\n`, `\r\n`, no final newline, inner spaces kept, only first line used) | S | stdout is exactly `added alice\n`, exit 0, file holds the account; the password is verified with `accounts.verify` |
++| FR-002 | `test_fr002_rejects_bad_usernames` (param: 2 chars, 33 chars, `al-ice`, `josé`, `a b`, empty), `test_fr002_accepts_boundaries` (3, 32, `A_9`) | S | exit 2; stderr names the username and the rule; stdout empty; file unchanged or not created; no `Traceback` |
++| FR-003 | `test_fr003_rejects_bad_passwords` (param: 11 chars, empty stdin, invalid UTF-8, 11 multi-byte chars), `test_fr003_counts_characters_not_bytes` (12 × `é` accepted) | S | exit 2; stderr states `12` and does not contain the input; stdout empty; file unchanged |
++| FR-004 | `test_fr004_duplicate_exits_3`, `test_fr004_usernames_case_sensitive`, `test_fr004_check_order` (param: existing + short password → 2; bad username + bad password → username message; bad password + broken file → 2; valid + broken file → 1) | S | the exit status and which message wins; file unchanged |
++| FR-005 | `test_accounts.py::test_fr005_record_has_pinned_scrypt_settings` (exact `scrypt`, `n=131072`, `r=8`, `p=1`, 16-byte salt, 32-byte hash), `test_fr005_hash_matches_hashlib_scrypt`, `test_fr005_password_absent_from_file` (plain, hex, base64), `test_fr005_same_password_different_records` | U+S | settings equal the values recorded in [research R1](research.md#r1-password-hashing-fr-005-fr-016-sc-002) |
++| FR-006 | `test_fr006_file_mode_0600` (new file, and one that was `0644`), `test_fr006_existing_accounts_kept_byte_for_byte`, `test_fr006_failed_write_leaves_file_intact` (in-process `cli.main` with `os.replace` monkeypatched to raise: exit 1, bytes and mode unchanged, no temp file left) | S+I | |
++| FR-007 | `test_adduser.py::test_fr007_usage_errors_exit_2` (param: no args, `nope`, `adduser`, missing `--users`, extra argument, `--users a --users b`, `addu`, `--use`, `-h`), `test_fr007_unreadable_file_exits_1` (FILE is a directory), `test_fr007_invalid_file_exits_1` (param: empty, not JSON, duplicate key, wrong `n`, short salt, extra field, bad username key, `true` as integer), `test_fr007_unwritable_location_exits_1` (missing folder; parent is a regular file) | S | usage on stderr; exit code; message names FILE; existing file unchanged |
++| FR-008 | `test_serve.py::test_fr008_ready_line_unbuffered` (read through a pipe with a 10 s timeout while the process keeps running), `test_fr008_accepts_connections_after_ready_line`, `test_fr008_loopback_only` (in-process `getsockname()[0] == "127.0.0.1"`; subprocess: a connect to 127.0.0.2 is refused) | S+I | |
++| FR-009 | `test_fr009_missing_or_empty_secret` (param: unset, empty) | S | exit 1; stderr names `LOGINAPP_SECRET`; no `listening on` |
++| FR-010 | `test_fr010_bad_port_exits_2` (param: `0`, `65536`, `abc`, `-1`, `+80`, `' 80'`, `8_000`, full-width digits), `test_fr010_port_in_use_exits_1`, `test_fr010_bad_accounts_file_exits_1` (missing, directory, invalid), `test_fr010_check_order` (param: bad port + no secret → 2; no secret + missing file → secret message; missing file + busy port → file message) | S | exit code; stderr names the value; no `listening on` |
++| FR-011 | `test_login.py::test_fr011_account_added_while_running_can_sign_in`, `test_fr011_broken_file_at_sign_in_gives_500` (then restored → 303) | S | 500 has no `Set-Cookie`; stderr names FILE |
++| FR-012 | `test_routing.py::test_fr012_every_body_is_html_utf8` (param over the response table: 200 login, 401, 303, 404, 405, 400, 413, 500, 501 `PUT`, 400 garbage request line, 400 HTTP/0.9) | I | `Content-Type: text/html; charset=utf-8` on every response with a body; body starts with `<!doctype html>` |
++| FR-013 | `test_login.py::test_fr013_login_form` (parsed with `html.parser`) | I | 200; form `method=post action=/login`; `username` text input; `password` password input; a submit button; no error message |
++| FR-014 | `test_fr014_correct_credentials_redirect_with_cookie`, `test_fr014_extra_fields_ignored`, `test_fr014_content_type_parameters_allowed` (`; charset=UTF-8`, upper-case media type), `test_fr014_percent_encoded_and_raw_utf8` | I | 303, `Location: /dashboard`, `Set-Cookie: session=` |
++| FR-015 | `test_fr015_unknown_user_and_wrong_password_identical`, `test_fr015_malformed_submissions_get_401` (param: missing / empty / repeated field, empty body, no `Content-Length`, missing or other `Content-Type`, invalid UTF-8 raw and percent-encoded), `test_fr015_page_does_not_echo_input`, `test_fr015_oversized_body_413_without_reading` (headers only, `Content-Length: 100000000`), `test_fr015_invalid_content_length_400` (param: `abc`, `-1`, `1e3`, two headers), `test_fr015_truncated_body_400` | I | 401 bodies byte-identical; headers identical apart from `Date`; no `Set-Cookie` |
++| FR-016 | `test_lockout.py::test_fr016_failure_timing_within_factor_2` (7 attempts each: unknown user, wrong password, locked user; real scrypt) | I | each pair of medians has a ratio ≤ 2 |
++| FR-017 | `test_sessions.py::test_fr017_dashboard_welcome_and_logout_form`, `test_fr017_username_is_escaped` (unit `dashboard_page("<b>&\"x")`) | I+U | 200; `Welcome, alice`; form posts to `/logout`; markup is escaped |
++| FR-018 | `test_fr018_no_valid_session_redirects` (param: no cookie, empty, repeated `session`, malformed, random text, tampered `sub` → `bob`, other secret, `alg` `none`, `alg` `HS512`, expired, signed out) | I (FakeClock) | 303, `Location: /login`, no body, no `Welcome` |
++| FR-019 | `test_fr019_logout_clears_cookie` (param: valid session, no cookie, invalid, expired) | I | 303, `Location: /login`, `Set-Cookie: session=` with `Max-Age=0` and `Path=/` |
++| FR-020 | `test_fr020_signed_out_copy_refused`, `test_fr020_reencoded_copy_refused` (`=` padding; last character with the same decoded bytes), `test_fr020_other_sessions_unaffected`, `test_fr020_same_second_sign_in_after_logout_gets_new_token` (FakeClock), `test_serve.py::test_fr020_signed_out_token_refused_after_restart` | I+S | |
++| FR-021 | `test_routing.py::test_fr021_unknown_paths_404` (param: `/`, `/dashboard/`, `/login.html`, `//login`, `/LOGIN`, `/logout/x`; GET and POST), `test_fr021_query_string_ignored` (`/login?x=1` → 200) | I | 404 with an HTML body |
++| FR-022 | `test_fr022_wrong_method_405_with_allow` (`GET /logout` → `Allow: POST`; `POST /dashboard` → `Allow: GET`), `test_fr022_other_methods_error` (param: `PUT`, `DELETE`, `PATCH` × every path) | I | 405 and its `Allow` value; other methods get a status of 400 or more |
++| FR-023 | `test_tokens.py::test_fr023_accepts_valid_token`, `test_fr023_rejects_malformed` (param: 2 or 4 segments, empty segment, non-ASCII, `=` padding, non-canonical last character, characters outside base64url, header not JSON, duplicate header key, missing / `none` / `HS512` / non-string `alg`, bad signature, other secret, payload not an object, `sub` not a string, `iat` a float, `exp` a bool, missing claim, duplicate claim), `test_fr023_expiry_boundary` (`now = exp − 1` accepted; `exp` refused) | U | `decode` raises `InvalidToken`, never returns a sentinel |
++| FR-024 | `test_fr024_token_format` (header bytes exactly `{"alg":"HS256","typ":"JWT"}`, no padding, claims are exactly `sub`, `iat`, `exp`, `exp == iat + 1800`, `iat == int(clock)`), `test_fr024_independent_verifier_accepts` (the test's own HMAC-SHA256 verifier), `test_sessions.py::test_fr024_issued_cookie_token_verifies` | U+I | |
++| FR-025 | `test_sessions.py::test_fr025_cookie_attributes` | I | `HttpOnly`, `SameSite=Strict`, `Path=/`, `Max-Age=1800` |
++| FR-026 | `test_fr026_dashboard_sets_no_cookie`, `test_fr026_fixed_lifetime_despite_use` (FakeClock: dashboard at `iat+1799` → 200, at `iat+1800` → 303) | I | |
++| FR-027 | `test_serve.py::test_fr027_restart_refuses_earlier_tokens` (subprocess restart with the same secret), `test_sessions.py::test_fr027_same_second_restart` (two in-process servers on one `FakeClock` in the same second), `test_fr027_current_run_tokens_accepted_until_expiry` | S+I | |
++| FR-028 | `test_routing.py::test_fr028_protective_headers_everywhere` (same response table as FR-012) | I | the 3 headers with their exact values |
++| FR-029 | `test_robustness.py::test_fr029_no_secrets_in_output` (full subprocess flow: adduser, serve, good and bad sign-ins, lock, logout, broken file, then SIGINT; scan all stdout and stderr), `test_fr029_internal_error_report_has_no_request_data` | S+I | stdout and stderr contain no password, secret, token, salt or hash hex; the stop message has no `Traceback` |
++| FR-030 | `test_lockout.py::test_fr030_five_failures_lock`, `test_fr030_lock_ends_at_900_seconds` (FakeClock: `+899` refused, `+900` accepted), `test_fr030_success_resets_count`, `test_fr030_locked_attempts_not_counted_or_extending`, `test_fr030_lock_is_per_username`, `test_fr030_unknown_case_variant_and_malformed_not_counted`, `test_fr030_existing_session_survives_lock`, `test_fr030_concurrent_failures_lock` (10 simultaneous threads), `test_fr030_new_server_has_no_locks`, `test_fr030_locked_response_identical` | I | the locked 401 is byte-identical to an ordinary 401 |
++| FR-031 | `test_robustness.py::test_fr031_unexpected_error_generic_500_and_continues` (`dashboard_page` monkeypatched to raise `RuntimeError("detail-xyz")`) | I | 500 with the generic page; `detail-xyz` appears in neither the body nor stderr; stderr has the report; the next request gets 200 |
++| FR-032 | `test_fr032_runs_as_module_with_src_on_path`, `test_fr032_runtime_imports_stdlib_only` (AST scan: every top-level import is in `sys.stdlib_module_names` or is `loginapp`), `test_fr032_python311_syntax` (`ast.parse(..., feature_version=(3, 11))`), `test_fr032_python311_smoke` (skipped only if `python3.11` is absent; extra) | S+U | |
++
++### Invalid-input coverage (Principle III)
++
++Each invalid-input case in the spec's Edge Cases has a test above:
++
++| Edge case | Tests |
++|-----------|-------|
++| username and password boundaries | FR-002, FR-003 |
++| password input forms | FR-001, FR-003 |
++| several problems at once | FR-004, FR-010 order tests |
++| accounts-file problems | FR-007, FR-010, FR-011 |
++| port problems | FR-010 |
++| malformed sign-ins | FR-015 |
++| odd cookies | FR-018 |
++| re-encoded tokens | FR-020, FR-023 |
++| lock boundaries and counting | FR-030 |
++| restarts | FR-027 |
++| exact expiry | FR-023, FR-026 |
++| paths and methods | FR-021, FR-022 |
++| internal errors | FR-031 |
++
++Each test asserts the message or response as well as the status.
++
++### Test-suite notes
++
++- **Running it**:
++  - Tests use real scrypt settings. There is no fast-hash switch in runtime code.
++  - The suite needs about 250–300 hashes, roughly 2–3 minutes here.
++  - The `alice` and `bob` accounts file is built once per session and copied into each test.
++- **Environment limits**:
++  - The tests run as root, so "unreadable" is produced by using a directory as FILE, not by changing permissions.
++  - The 413 test sends only the headers, because a large body causes a TCP reset ([research R11](research.md#r11-test-strategy-principle-iii-sc-009)).
++- **Timeouts**:
++  - Each subprocess server is started on a free port found by binding to port 0, and stopped in a `finally`.
++  - Every socket and subprocess read has a timeout, so no test can hang.
++
++## Open review points
++
++These are decisions made within the spec's latitude. They are flagged **(review)** in [research.md](research.md). None blocks `/speckit-tasks`. Each can be changed by updating the named section.
++
++1. **scrypt settings** (R1): `n=2^17, r=8, p=1`, recorded as the OWASP minimum. They were not re-checked online, because this session forbids web access.
++2. **Concurrent `adduser`** (R2): not protected. Two `adduser` commands run at the same moment on one file could lose one of the additions.
++3. **Short request body** (R8): when fewer bytes arrive than `Content-Length` declares, the response is 400, treated as an invalid declared length.
++4. **Broken accounts file and malformed sign-ins** (R7): a malformed sign-in gets 401 without reading FILE, so it gets 401 even while FILE is broken. A well-formed sign-in gets 500.
++5. **argparse equivalents** (R10): `--users=FILE`, and options in any order, are accepted. A repeated option is refused with status 2.
++6. **Non-UTF-8 `LOGINAPP_SECRET`** (R10): exits with status 1, naming the variable.
++7. **Risks not addressed** (R13): DNS rebinding (no `Host` check), no idle-connection timeout, and a system clock stepped backwards between runs.
++
++## Complexity Tracking
++
++> Principle IV deviations beyond "plain functions and built-in types". Each one names the requirement that needs it.
++
++| Addition | Why Needed | Simpler Alternative Rejected Because |
++|----------|------------|-------------------------------------|
++| `ThreadingHTTPServer` plus one state lock (a `LoginServer` subclass holding state) | FR-030: the count must be correct under simultaneous attempts. SC-002: sign-in in under 2 s. FR-031: keep serving. | A single-threaded `HTTPServer` lets one stalled connection block every user. It also runs 10 simultaneous sign-ins one after another (~4.5 s). |
++| Process-wide `BoundedSemaphore(4)` around scrypt | FR-031 / FR-030: each hash needs 128 MiB, and a burst of sign-ins must not exhaust memory. | No cap: an uncapped burst could kill the process. PBKDF2 (needs no memory cap): not memory-hard, and OWASP ranks it below scrypt (R1). |
++| Issued-token registry + signed-out map + `run_start` and wait-for-next-second rule | FR-020 (copies refused, including after a same-second sign-in again); FR-027 (earlier runs refused, including in the same second) | Signed-out set only: fails FR-027. `iat > run_start` only: fails if the clock steps back. Per-run signing key: violates FR-024. File-based record: no storage location in the contract (R4, R5). |
++| Hand-written JWT with a canonical-base64url check | FR-023, FR-024; FR-020 (re-encoded copies refused) | PyJWT is third-party (Principle I). `urlsafe_b64decode` alone accepts padding and non-canonical final characters (R6). |
++| Hand-written `Cookie` header parsing | FR-018: repeated and malformed `session` cookies must count as no session | `http.cookies.SimpleCookie` silently drops pairs it cannot parse and merges duplicates (R8). |
++| Routing on the raw request-target; `parse_request` override for HTTP/0.9; `handle_error` override | FR-021: exact paths, so `//login` → 404. FR-012 / FR-028: headers on every response. FR-029: no exception messages in output. | `self.path` turns `//login` into `/login`. HTTP/0.9 responses have no headers. The default `handle_error` prints full tracebacks (R8, R9). |
++| argparse action that refuses repeated options; strict `--port` type | Principle II (no silent "last wins"); FR-007, FR-010 | Plain argparse keeps the last `--users`. `int()` accepts `+80`, `8_000` and non-ASCII digits (R10). |
++| `clock` / `sleep` parameters on `make_server` (test support only, not exposed by the CLI) | Tests for FR-026, FR-027 (same second), FR-030 (900 s boundary) and FR-020 (same-second sign-in again) | Real sleeping for 900 or 1800 s, or hoping the timing lands on a second boundary, is impossible in an automated suite or makes it flaky. |
+diff --git a/specs/001-secure-login-app/quickstart.md b/specs/001-secure-login-app/quickstart.md
+new file mode 100644
+index 0000000..5546eab
+--- /dev/null
++++ b/specs/001-secure-login-app/quickstart.md
+@@ -0,0 +1,157 @@
++# Quickstart and Validation Guide: Secure Login Web Application
++
++**Feature**: `001-secure-login-app` | **Plan**: [plan.md](plan.md)
++
++This guide shows how to run the application and check the main behaviours by hand. The full behaviour is defined in [contracts/cli.md](contracts/cli.md), [contracts/http.md](contracts/http.md) and [data-model.md](data-model.md). The automated suite (`python3 -m pytest`) is what proves every FR.
++
++## Prerequisites
++
++- Python 3.11 or newer. Nothing else is needed at run time (FR-032, SC-008).
++- pytest, for the automated tests only.
++- `curl`, for the manual checks below (optional).
++- Run every command from the repository root.
++
++## 1. Run the automated suite
++
++```bash
++python3 -m pytest
++```
++
++- **Expected**: every test passes, with none skipped or xfailed, except the Python 3.11 smoke test. That test skips only when no `python3.11` is installed.
++- **Time**: about 2–3 minutes, because every sign-in in the suite uses the real scrypt settings (see [research.md](research.md#r11-test-strategy-principle-iii-sc-009)).
++- **Coverage check (SC-009)**: every FR ID must appear in the test suite:
++
++```bash
++for n in $(seq -w 1 32); do grep -rqE "FR-0$n\b" tests/ || echo "FR-0$n has no test"; done
++```
++
++**Expected**: no output.
++
++## 2. Create accounts (User Story 1)
++
++```bash
++export PYTHONPATH=src
++rm -f users.json
++printf 'correct-horse-battery\n' | python3 -m loginapp adduser alice --users users.json; echo "exit=$?"
++```
++
++| Step | Command | Expected |
++|------|---------|----------|
++| first account | the command above | stdout `added alice`, `exit=0` |
++| file permissions | `stat -c '%a' users.json` | `600` |
++| no plain password | `grep -c correct-horse users.json` | `0` |
++| second account | `printf 'another-long-pass\n' \| python3 -m loginapp adduser bob --users users.json` | `added bob`; the file now holds both accounts |
++| duplicate | the first command again | stderr says `'alice' already exists`, exit 3, stdout empty |
++| bad username | `printf 'correct-horse-battery\n' \| python3 -m loginapp adduser al-ice --users users.json` | stderr names `'al-ice'` and the rule, exit 2 |
++| short password | `printf 'short-pass1\n' \| python3 -m loginapp adduser carol --users users.json` | stderr states the 12-character minimum, exit 2 |
++| order of checks | `printf 'short\n' \| python3 -m loginapp adduser alice --users users.json` | exit **2**, not 3 (FR-004) |
++| missing folder | `printf 'correct-horse-battery\n' \| python3 -m loginapp adduser dave --users no/such/dir/u.json` | stderr names the file, exit 1 |
++
++## 3. Start the server (User Story 2)
++
++```bash
++LOGINAPP_SECRET=change-me python3 -m loginapp serve --port 8000 --users users.json
++```
++
++**Expected**: `listening on 127.0.0.1:8000` appears at once, and the process keeps running. Leave it running in its own terminal for the checks below.
++
++Startup failures. Each check needs the port to be free, except the one that needs it in use. None of them prints `listening on`:
++
++| Command | Expected |
++|---------|----------|
++| `env -u LOGINAPP_SECRET python3 -m loginapp serve --port 8001 --users users.json` | stderr names `LOGINAPP_SECRET`, exit 1 |
++| `LOGINAPP_SECRET=x python3 -m loginapp serve --port 70000 --users users.json` | exit 2 |
++| `LOGINAPP_SECRET=x python3 -m loginapp serve --port 8001 --users missing.json` | stderr names the file, exit 1 |
++| `LOGINAPP_SECRET=x python3 -m loginapp serve --port 8000 --users users.json` (while the first server runs) | stderr names the port, exit 1 |
++
++## 4. Sign in, view the dashboard, sign out (User Stories 2, 3 and 5)
++
++In a second terminal:
++
++```bash
++curl -s -i 127.0.0.1:8000/login | head -20
++```
++
++**Expected**:
++
++- status 200;
++- `Content-Type: text/html; charset=utf-8`;
++- `Cache-Control: no-store`, `X-Frame-Options: DENY` and `X-Content-Type-Options: nosniff`;
++- a form posting `username` and `password` to `/login`.
++
++```bash
++curl -s -i -d 'username=alice&password=[REDACTED:assigned_secret] 127.0.0.1:8000/login
++```
++
++**Expected**:
++
++- `303 See Other` and `Location: /dashboard`;
++- `Set-Cookie: session=eyJ…; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800`.
++
++Copy the token from that header (the text after `session=`, up to the first `;`), then:
++
++```bash
++TOKEN='<paste here>'
++curl -s -b "session=$TOKEN" 127.0.0.1:8000/dashboard        # page shows "Welcome, alice" and a Sign out button
++curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8000/dashboard                # 303 (no cookie)
++curl -s -o /dev/null -w '%{http_code}\n' -b "session=${TOKEN}A" 127.0.0.1:8000/dashboard    # 303 (tampered)
++```
++
++Check the token's claims (`exp` must equal `iat + 1800`):
++
++```bash
++python3 -c "import base64,json,sys; p=sys.argv[1].split('.')[1]; print(json.loads(base64.urlsafe_b64decode(p+'='*(-len(p)%4))))" "$TOKEN"
++```
++
++Sign out, then try the kept copy:
++
++```bash
++curl -s -i -X POST -b "session=$TOKEN" 127.0.0.1:8000/logout | grep -iE '^(HTTP|Location|Set-Cookie)'
++# 303, Location: /login, Set-Cookie: session=; ...; Max-Age=0
++curl -s -o /dev/null -w '%{http_code}\n' -b "session=$TOKEN" 127.0.0.1:8000/dashboard   # 303 (signed out)
++```
++
++## 5. Failed sign-ins and the lock (User Story 4)
++
++```bash
++for i in 1 2 3; do
++  curl -s -o /dev/null -w '%{http_code}\n' -d "username=nobody&password=[REDACTED:assigned_secret]$i" 127.0.0.1:8000/login
++done                                                                                # 401 three times
++for i in 1 2 3 4 5; do
++  curl -s -o /dev/null -w '%{http_code}\n' -d "username=bob&password=[REDACTED:assigned_secret]$i" 127.0.0.1:8000/login
++done                                                                                # 401 five times, bob is now locked
++curl -s -o /dev/null -w '%{http_code}\n' -d 'username=bob&password=[REDACTED:assigned_secret] 127.0.0.1:8000/login
++# 401: locked, even with the correct password
++curl -s -o /dev/null -w '%{http_code}\n' -d 'username=alice&password=[REDACTED:assigned_secret] 127.0.0.1:8000/login
++# 303: alice is not affected
++```
++
++- **Indistinguishable failures**: compare `curl -s -i` output for an unknown username, a wrong password for `alice`, and the locked `bob`. Apart from `Date`, they must be byte-identical.
++- **Lock expiry**: the lock ends 900 s after the fifth failure. The automated suite checks this boundary with a controlled clock. To check it by hand, wait 15 minutes, or restart the server, which also clears locks.
++
++## 6. Restart ends all sessions (FR-027)
++
++1. Sign in as `alice` and keep the token.
++2. Stop the server (Ctrl+C) and start it again with the same `LOGINAPP_SECRET`.
++3. Send the kept token to the dashboard:
++
++```bash
++curl -s -o /dev/null -w '%{http_code}\n' -b "session=$TOKEN" 127.0.0.1:8000/dashboard   # 303
++```
++
++## 7. Accounts added while running (FR-011)
++
++With the server running:
++
++```bash
++printf 'a-third-long-pass\n' | python3 -m loginapp adduser carol --users users.json
++curl -s -o /dev/null -w '%{http_code}\n' -d 'username=carol&password=[REDACTED:assigned_secret] 127.0.0.1:8000/login   # 303
++```
++
++## Clean up
++
++Stop the server, then:
++
++```bash
++rm -f users.json
++```
+diff --git a/specs/001-secure-login-app/research.md b/specs/001-secure-login-app/research.md
+new file mode 100644
+index 0000000..5063adc
+--- /dev/null
++++ b/specs/001-secure-login-app/research.md
+@@ -0,0 +1,255 @@
++# Research: Secure Login Web Application
++
++**Feature**: `001-secure-login-app` | **Date**: 2026-10-23 | **Plan**: [plan.md](plan.md)
++
++This file records each design decision the plan depends on. Every decision names the requirement it serves. Measurements were taken in this environment: CPython 3.13.17 (and 3.11.17 for compatibility probes), OpenSSL 3.0.13, 2 vCPUs, 8 GiB RAM, Linux, running as root.
++
++No `NEEDS CLARIFICATION` items remain. Decisions a product owner might want to review are marked **(review)**.
++
++---
++
++## R1. Password hashing (FR-005, FR-016, SC-002)
++
++- **Decision**: `hashlib.scrypt`, with the following settings:
++  - `n = 131072` (2^17), `r = 8`, `p = 1`, `dklen = 32`.
++  - Salt: 16 bytes from `secrets.token_bytes`, a new salt for each account.
++  - The call passes `maxmem = 268435456` (256 MiB). OpenSSL's default limit (32 MiB) rejects `n = 2^17`; the call needs 134,220,800 bytes, measured. `maxmem` is a limit, not an allocation.
++  - A module-level `threading.BoundedSemaphore(4)` lets at most 4 hashes run at once, so peak hashing memory stays near 512 MiB.
++  - Stored hashes are compared with `hmac.compare_digest`.
++- **OWASP minimum**: these settings are the scrypt minimum in the OWASP Password Storage Cheat Sheet: N=2^17 (128 MiB), r=8 (1024 bytes), p=1. **(review)** The values come from the cheat sheet as known to the planner. This session's rules forbid web access, so they were not checked online again. Tests pin these exact values (FR-005). If OWASP has raised them, change this section and the constants together.
++- **Measured cost**:
++  - One hash takes 0.42–0.46 s.
++  - 4 hashes at once take 0.92 s, because `hashlib.scrypt` releases the GIL and the work runs in parallel.
++  - 10 hashes at once take 2.5 s.
++  - A sign-in therefore takes about 0.5 s, well within the 2 s target (SC-002).
++  - The test suite pays this cost for every sign-in attempt it makes (see R11).
++- **Rationale**:
++  - scrypt is the strongest password-hashing function in the standard library. Argon2id and bcrypt are not in the stdlib.
++  - scrypt is memory-hard, so an accounts file that leaks is costly to crack on GPUs.
++  - The semaphore exists because each hash allocates 128 MiB. Without a cap, a burst of simultaneous sign-ins could exhaust memory and kill the server. That would break FR-031 ("keep serving") and the 10-simultaneous-attempts rule in FR-030.
++- **Alternatives considered**:
++  - PBKDF2-HMAC-SHA256 with 600,000 iterations, the OWASP minimum (0.35–0.39 s measured). It is simpler (no memory cap needed) and meets FR-005. Rejected because it is not memory-hard. OWASP ranks scrypt above PBKDF2 and recommends PBKDF2 mainly where FIPS-140 compliance is required.
++  - Raising scrypt costs above the minimum: rejected, because it adds latency and memory for no requirement.
++  - No concurrency cap: rejected, for the memory reason above.
++
++## R2. Accounts file format and writing (FR-005, FR-006, FR-007, FR-011)
++
++- **Decision**: a UTF-8 JSON document. The exact schema is in [data-model.md](data-model.md#accounts-file).
++  - Top level: an object `{"accounts": {USERNAME: RECORD, ...}}`.
++  - Each record holds the algorithm name and the cost settings, plus `salt` and `hash` as lowercase hex.
++  - **Validation** runs on every load: startup, `adduser`, and every well-formed sign-in. It is strict, and any deviation makes the file "not a valid accounts file":
++    - duplicate JSON keys are rejected with an `object_pairs_hook`;
++    - the set of keys must be exact;
++    - the algorithm and settings must be the exact values from R1;
++    - the hex fields must have the exact lengths;
++    - every username key must satisfy the FR-002 rule.
++  - **Writing** (`adduser` only):
++    - serialise with `json.dumps(..., indent=2, sort_keys=True)` plus a final newline;
++    - `tempfile.mkstemp(dir=<FILE's folder>)` creates the temporary file with mode `0o600` from the start;
++    - write, flush and `os.fsync`, then `os.replace(temp, FILE)`;
++    - on any failure, delete the temporary file and leave FILE alone.
++  - Each successful `adduser` therefore leaves FILE with mode `0600`, even if it was `0644` before (FR-006). The server sees either the old file or the new one, never a half-written one (FR-011).
++- **Rationale**: `json` is in the stdlib and easy to read for review. Strict validation follows Principle II. `os.replace` is atomic on POSIX and Windows.
++- **Alternatives considered**:
++  - `sqlite3`: atomic, but heavier than one small JSON document.
++  - `dbm` / `shelve`: the format depends on the platform, and updates are not atomic.
++  - `pickle`: unsafe to load.
++  - Line-based text: needs a hand-written escaping scheme.
++  - Base64 instead of hex: `b64decode` accepts non-canonical input unless extra checks are added. A fixed-length lowercase-hex regex is simpler to check exactly.
++- **Not supported**: two `adduser` commands running at the same moment on the same file. One of the two additions could be lost. The spec assumes that FILE changes only through the account command, which the operator runs. Locking would need `fcntl` (POSIX only) for a case the spec does not raise. **(review)**
++
++## R3. HTTP server (FR-008, FR-012, FR-021, FR-022, FR-028, FR-030, FR-031)
++
++- **Decision**:
++  - `http.server.ThreadingHTTPServer` bound to `("127.0.0.1", PORT)`, with one `BaseHTTPRequestHandler` subclass.
++  - `protocol_version` stays at `HTTP/1.0`, so every connection closes after one response. This matches the spec's example output.
++  - The handler sets `error_content_type = "text/html; charset=utf-8"`.
++  - It overrides `end_headers` to add `Cache-Control: no-store`, `X-Frame-Options: DENY` and `X-Content-Type-Options: nosniff`. These headers therefore also appear on the errors that http.server generates itself (400, 414, 431, 501, 505).
++- **Rationale**:
++  - The product owner named `http.server`.
++  - Threads are needed so that one slow request (a 0.5 s hash, or a stalled client) does not block every other client. Shared state is protected by a lock (R7).
++  - Keeping HTTP/1.0 avoids keep-alive, pipelining and request desync.
++- **Probes that shaped this**:
++  - The constructor binds and listens, so "accepting connections" is true before the `listening on` line is printed.
++  - A second bind to a port in use fails with `EADDRINUSE` even with `SO_REUSEADDR` (FR-010).
++  - A socket bound to 127.0.0.1 refuses connections to 127.0.0.2 on Linux, which gives tests a way to check loopback-only binding.
++  - On Python 3.11 the default `error_content_type` is `text/html;charset=utf-8` (no space), so the override is required by FR-012.
++- **Alternatives considered**:
++  - Single-threaded `HTTPServer`: one stalled client would freeze the server.
++  - `wsgiref`: adds a layer for no benefit.
++
++## R4. Sessions across restarts (FR-023, FR-027)
++
++- **Decision**: each server run keeps an in-memory **registry of the tokens it issued**, a map from token string to `exp`.
++  - A session is valid only if all of these hold:
++    - the token passes the stateless JWT checks (R6);
++    - its exact string is in the registry;
++    - it is not signed out (R5);
++    - the current time is before `exp`.
++  - Expired entries are removed at each sign-in and sign-out.
++  - A new run starts with an empty registry, so every earlier token is refused (FR-027). This holds even if the new run starts in the same second the old one issued a token.
++- **Same-second rule**: the registry alone leaves one gap. Suppose the new run issues a token for the same user in the same second as the old run did. That token is byte-identical to the old one, so a kept copy of the old token would work again.
++  - To close the gap, the server records `run_start = int(clock())` right after binding the port. It issues only tokens with `iat > run_start`.
++  - A sign-in in the run's first second therefore waits until the next second; the waiting rule is shared with R5.
++  - On the same port, the earlier run must have released the port before this run could bind it, so all of its tokens have `iat <= run_start`. This run therefore never re-creates them.
++  - Two servers running at the same time on different ports are separate servers, not a restart. They are not covered.
++- **Rationale**: this is the simplest approach that is exactly correct. It needs no extra claims and no storage.
++- **Alternatives considered**:
++  - Accepting any token with `iat > run_start` and keeping no registry: this is one integer instead of a dict. It is rejected because it is only correct while the wall clock never moves backwards. If the clock is stepped back between runs, for example by an NTP correction, every unexpired token from the earlier run would pass again. That breaks FR-027's "MUST be refused". With the registry, a step back can only matter in the narrow re-creation case in R13. The registry costs one dict and a sweep of expired entries.
++  - A per-run signing key: violates FR-024, which requires signing with `LOGINAPP_SECRET` itself.
++  - Saving issued or revoked tokens to a file: the CLI contract defines no place to store such a file (see the spec's Assumptions).
++
++## R5. Sign-out (FR-019, FR-020)
++
++- **Decision**:
++  - `POST /logout` with a session that is valid at that moment moves the token from the registry to a **signed-out map** (token → `exp`). This happens under the state lock, before the response is written.
++  - Entries leave the signed-out map once they expire. A restart clears both maps, and FR-027 then refuses every older token anyway.
++  - **Re-encoded copies** are refused by the canonical-encoding rule in R6: a segment must re-encode to exactly itself. Added `=` padding and an altered last character are therefore malformed. They would not be in the registry either.
++  - **Signing in again in the same second**: suppose a token is signed out and the same user signs in again within the same second. The new token would be byte-identical to the signed-out one, and FR-020 requires refusing it. In that case sign-in waits until the next whole second and builds the token again with the new `iat`. The wait is at most 1 s, so sign-in still takes under 1.5 s (SC-002).
++- **Why this matters**: tests and users commonly sign in, sign out and sign in again. A sign-in takes about 0.5 s of hashing, so without the wait the second token would collide in about half of all runs. That user would then get a 303 to a dashboard that immediately sends them back to the login page.
++- **Alternatives considered**:
++  - Deleting the token from the registry only: the next same-second sign-in would bring a signed-out copy back to life, violating FR-020.
++  - Adding a `jti` claim: forbidden, because the claims are fixed (FR-024).
++  - Back-dating or forward-dating `iat`: violates FR-024 or SC-006.
++
++## R6. JWT implementation (FR-023, FR-024, FR-025)
++
++- **Decision**: a small hand-written HS256 implementation using `hmac`, `hashlib.sha256`, `base64.urlsafe_b64encode` and `urlsafe_b64decode`, and `json`.
++  - **Encoding**:
++    - the header is the exact bytes `{"alg":"HS256","typ":"JWT"}`;
++    - the payload is `{"sub":…,"iat":…,"exp":…}` with compact separators;
++    - every segment is base64url with the padding removed;
++    - the signature is HMAC-SHA256 over `ASCII(b64(header) + "." + b64(payload))`, keyed with `LOGINAPP_SECRET.encode("utf-8")`.
++  - **Decoding** is a pure function `decode(token, secret, now) -> claims`. It raises `InvalidToken` and never returns a sentinel (Principle II). It checks, in order:
++    1. ASCII only, exactly 3 dot-separated segments.
++    2. Each segment uses only `[A-Za-z0-9_-]`, is not empty, and is canonical: decoding and re-encoding gives the same text.
++    3. The header is a JSON object with no duplicate keys, and its `alg` is the string `"HS256"`.
++    4. The signature is checked with `hmac.compare_digest` before the payload is parsed.
++    5. The payload is a JSON object with no duplicate keys: `sub` is a `str`, and `iat` and `exp` are `int` but not `bool`.
++    6. `now < exp`, with no clock tolerance.
++- **Checked here**: the HMAC and base64url code reproduces the RFC 7515 Appendix A.1 HS256 signature. A non-canonical last character decodes to the same bytes as the original (`…k` and `…l`), so `urlsafe_b64decode` alone would accept a re-encoded copy.
++- **Why keep the stateless checks**: the registry (R4) is keyed by the exact token string, so on its own it would already refuse forged and re-encoded tokens. The stateless checks still earn their place:
++  - they implement FR-023's list item by item;
++  - they make `decode` refuse the FR-020 re-encodings by itself, so these cases can be unit-tested without a server;
++  - they cost microseconds;
++  - the canonical check is one comparison.
++- **Alternatives considered**: PyJWT is third-party and forbidden by Principle I.
++
++## R7. Failed sign-ins and lockout (FR-014, FR-015, FR-016, FR-030)
++
++- **Decision**: in-memory dicts `failures[username] -> int` and `locked_at[username] -> float`, protected by the single state lock. Only usernames that exist in the file are ever keys, so the memory used is bounded by the number of accounts. A well-formed attempt is handled like this:
++  1. Read and validate the accounts file. On error, respond 500 and leave the lock state unchanged (FR-011).
++  2. Hash the submitted password **outside the lock**, always exactly once:
++     - against the account's own record if the username exists, even when it is locked;
++     - against a fixed dummy salt with the same settings if it does not exist.
++     Every failure case therefore costs one scrypt (FR-016).
++  3. **Under the lock**, at time `t = clock()`:
++     - If the username has no account: fail, and count nothing.
++     - If it is locked and `t - locked_at < 900`: fail. Nothing is counted and the lock is not extended.
++     - If it is locked and the 900 s are up: clear the lock, set the count to 0, and continue.
++     - If the password is correct: reset the count and issue a token (R5).
++     - Otherwise: add 1 to the count. If it reaches 5, set `locked_at = t`, reset the count, and fail.
++- **Rationale**:
++  - The lock decision and the count update happen in one critical section. So 10 simultaneous wrong attempts produce exactly 5 counted failures and a lock, and the rest are refused without being counted (FR-030's concurrency example).
++  - Hashing outside the lock keeps sign-ins for different users running in parallel.
++  - The same time source drives tokens and locks, so a test can control both with one fake clock (R11).
++- **Not counted**: malformed submissions skip steps 1–3. They get an immediate 401 and count for no one.
++- **Malformed submissions and a broken file (review)**: FR-011 says a sign-in attempt must get 500 when FILE is unreadable, and FR-015 says malformed submissions get 401. The plan reads FILE only for well-formed attempts. So a malformed submission gets 401 even while FILE is broken, and a well-formed one gets 500.
++
++## R8. Request parsing (FR-015, FR-018, FR-021, FR-022, FR-028)
++
++- **Path**: the path is the raw request-target from `self.requestline`, cut at the first `?`. `self.path` is not used, because http.server folds a leading `//` into `/` and would then match `//login` as `/login`. FR-021 requires exact matching, so `//login` must get 404.
++- **HTTP/0.9**: the handler refuses HTTP/0.9 requests (`GET /login` with no version) by overriding `parse_request`. It switches `request_version` to `HTTP/1.0` and sends 400. The reason is that HTTP/0.9 responses have no headers at all, which would break FR-012 and FR-028.
++  - On 3.11, http.server still reads header lines for HTTP/0.9 before calling the override. The request therefore waits for a blank line first.
++- **Methods**: `do_GET` and `do_POST` are implemented. For any other method, http.server's own 501 is sent, with the HTML body and the protective headers (FR-022).
++- **`POST /login` body**, checked in this order:
++  1. More than one `Content-Length` header, or a value that is not one or more ASCII digits (after the header parser's usual trimming), → **400** (an invalid declared body length).
++  2. A declared length over 65,536 → **413**, without reading the body.
++  3. Read exactly the declared number of bytes. If fewer arrive before end-of-stream → **400**, treated as an invalid declared length. **(review)**
++  - No `Content-Length` header means an empty body. The spec says "no declared body length counts as an empty body", so a request with `Transfer-Encoding: chunked` and no `Content-Length` gets the standard 401, and its body is never read. `Transfer-Encoding` is not given any meaning of its own. The connection closes after one response (R3), so unread bytes cannot be taken as a second request.
++  4. Any of the following → **401**, the standard failure:
++     - the `Content-Type` header is missing or appears more than once;
++     - its media type, compared case-insensitively and ignoring parameters, is not `application/x-www-form-urlencoded`. Parameters such as `charset` are ignored, and the body is always decoded as UTF-8;
++     - the body bytes are not valid UTF-8. Raw UTF-8 (as `curl -d` sends it) and percent-encoded UTF-8 (as browsers send it) are both accepted;
++     - `urllib.parse.parse_qsl(text, keep_blank_values=True, encoding="utf-8", errors="strict")` raises an error, for example on a percent-escape that decodes to invalid UTF-8;
++     - `username` or `password` is not present exactly once with a non-empty value.
++- **Cookies**: the cookie header is parsed by hand.
++  - All `Cookie` header lines are joined. They are split on `;` and each pair on the first `=`, with spaces stripped.
++  - Exactly one non-empty `session` value counts as a candidate. Zero values, more than one, or an empty value means no session.
++  - `http.cookies.SimpleCookie` was rejected: it silently drops pairs it cannot parse and it accepts quoted values, which makes "repeated" and "malformed" impossible to detect reliably.
++- **Logout body**: `POST /logout` never reads the body.
++
++## R9. Responses, errors and logging (FR-012, FR-019, FR-028, FR-029, FR-031)
++
++- **Building responses**: each route function returns `(status, headers, body_bytes)`, and one `send` function writes the result. Nothing is written until the response is complete, so an exception can always be turned into a clean 500.
++- **Redirects**: 303 responses have `Content-Length: 0` and no body.
++- **Unexpected errors (FR-031)**:
++  - The dispatcher catches `Exception` and writes a report to stderr: `loginapp: internal error while handling METHOD PATH: ExceptionType`, followed by the stack frames from `traceback.format_tb`. PATH is the routed path, without the query string.
++  - The exception *message* is left out because it can contain request data, and FR-029 forbids writing secrets.
++  - The client gets a generic 500 page, and the server keeps running.
++- **Errors outside the dispatcher**: `LoginServer.handle_error` is overridden. Probed on 3.11: a client that disconnects early makes socketserver print a full traceback, including exception messages. The override writes one line instead: `loginapp: error: connection failed: ExceptionType`. Examples are `BrokenPipeError` and `ConnectionResetError`. The server keeps running.
++- **Request logging**: `log_message` is overridden to do nothing, so there is no request logging. The spec allows request lines but does not require them. http.server's default log line contains the full request line, which could include a password or token in the query string. Its `log_error` echoes raw request lines. Turning both off is the simplest way to guarantee FR-029.
++- **Accounts file broken at sign-in (FR-011)**: one line goes to stderr, `loginapp: error: …` naming FILE, and the client gets 500.
++- **HTTP version differences**: reason phrases differ between Python versions. For example, 413 is "Request Entity Too Large" on 3.11 and "Content Too Large" on 3.13. Only status codes are part of the contract, and tests check only codes.
++
++## R10. Command-line parsing (FR-001–FR-004, FR-007, FR-009, FR-010)
++
++- **Decision**: `argparse`, with `allow_abbrev=False` on the main parser and on both subparsers. The subcommand is required.
++  - A custom action rejects a repeated option. For example, `--users a --users b` exits with status 2. Probed: argparse would otherwise keep the last value silently.
++  - `--port` uses a `type=` function that accepts only 1–5 ASCII digits whose value is 1–65535. Probed: `int()` alone accepts `+8000`, ` 8000`, `8_000` and non-ASCII digits. A port error therefore happens during argument parsing (exit 2), which is first in the FR-010 order.
++  - argparse's usual equivalents are accepted: `--users=FILE`, and options before or after the positional. **(review)**
++- **Password input**:
++  - `sys.stdin.buffer.readline()` reads the first line as bytes. One trailing `\n` or `\r\n` is removed, and a lone `\r` at the end of the input stays part of the password.
++  - The bytes are decoded as UTF-8 (`strict`). The length check counts characters.
++  - Standard input is not read at all if the username is invalid.
++- **Secret**: `LOGINAPP_SECRET` that is unset or empty → exit 1. A value that cannot be encoded as UTF-8 also exits with status 1, naming the variable. **(review)** This can happen on POSIX, where an environment value with invalid bytes arrives with surrogate escapes.
++- **Messages**:
++  - Every message is one `loginapp: error: …` line on stderr. Values the user supplied are quoted with `repr()`, so control characters cannot change the terminal.
++  - The exact texts are in [contracts/cli.md](contracts/cli.md).
++  - `Ctrl+C` during `serve` prints `loginapp: stopped` to stderr and exits with status 130. It does not print a traceback.
++
++## R11. Test strategy (Principle III, SC-009)
++
++- **Running**:
++  - `python3 -m pytest` from the repository root.
++  - `pyproject.toml` holds only `[tool.pytest.ini_options]` with `pythonpath = ["src"]` and `testpaths = ["tests"]`. `testpaths` keeps the run on this feature's suite rather than the study tooling under `tools/`.
++  - Tests import only the stdlib, pytest and `loginapp`.
++- **Three kinds of test**:
++  - **Subprocess tests** run `sys.executable -m loginapp` with `PYTHONPATH=<repo>/src`. They cover the CLI, startup, `listening on` buffering, restarts and the absence of secrets in output.
++  - **In-process server tests** use `server.make_server(port, users_path, secret, clock=…, sleep=…)` in a background thread. A `FakeClock` provides `time()`, and a `sleep()` that moves the fake time forward. These tests cover the 1800 s and 900 s boundaries, FR-027's same-second case and the FR-020 sign-in-again wait, none of which can be tested in real time. The clock parameters are internal; the CLI does not expose them.
++  - **Unit tests** call the `tokens`, `accounts` and page-rendering functions directly.
++- **Root caveat**: the tests run as root, so changing permissions cannot make a file unreadable. Tests produce "unreadable" another way: by putting a directory where FILE should be, which raises `IsADirectoryError`. For "cannot be created", they point FILE into a folder that does not exist, or below a regular file.
++- **413 caveat**: a client that sends a large body to a server that closes without reading it may get a TCP reset instead of the response. Probed: 0 of 20 clients saw the 413 with a 10 MB body. So the 413 test sends only the headers, with a large `Content-Length`.
++- **Timing test (FR-016)**:
++  - 7 attempts for each of three cases: unknown username, wrong password, locked username.
++  - It compares the medians, each pair within a factor of 2.
++  - Every case costs one scrypt, so the expected ratio is about 1.0. The factor of 2 leaves plenty of room for noise.
++- **Cost**:
++  - Tests use the real scrypt settings. Runtime code has no test-only "fast hashing" switch, because such a switch would weaken security.
++  - To keep the hash count down, a session-scoped fixture builds one accounts file holding `alice` and `bob`, and each test copies it.
++  - Expect about 250–300 hashes, about 2–3 minutes on this machine. Most of them come from sign-in attempts and the lockout tests, which need 5 failures each.
++- **Python 3.11 checks (FR-032 / constraint)**:
++  - Every `src/` file is parsed with `ast.parse(..., feature_version=(3, 11))`.
++  - A smoke test runs `adduser`, `serve` and one sign-in under `python3.11` when `shutil.which("python3.11")` finds it, which it does here. This test is extra; the FR-032 tests that cannot be skipped are listed in the plan.
++  - Probed: `feature_version` rejects PEP 695 syntax but **not** PEP 701 f-string quote reuse. That is why the smoke test exists, and why implementers follow R12.
++
++## R12. Python 3.11 compatibility rules
++
++- The code must run on 3.11 and newer, and is verified on 3.13.
++- Do not use:
++  - `type X = …` or `def f[T]` (PEP 695, 3.12);
++  - f-strings that reuse the outer quote character or contain backslashes in expressions (PEP 701, 3.12);
++  - `typing.override`, `itertools.batched`, `pathlib.Path.walk` (3.12);
++  - anything added in 3.13;
++  - any module removed in 3.13.
++- Allowed modules: `argparse`, `base64`, `hashlib`, `hmac`, `html`, `http.server`, `json`, `os`, `re`, `secrets`, `sys`, `tempfile`, `threading`, `time`, `traceback`, `urllib.parse`. All are in `sys.stdlib_module_names` on 3.11 and 3.13.
++
++## R13. Known risks this plan does not address (review)
++
++None of these is required by the spec, and each would add behaviour that is outside the product owner's contract:
++
++- **DNS rebinding**: a web page on another site could rebind its own hostname to 127.0.0.1 and send sign-in attempts it can read the answers to. The lockout limits this to 5 guesses per username every 15 minutes. Checking the `Host` header would block it, but that adds a response the contract does not define.
++- **Slow or idle clients**: there is no per-connection timeout, so a local client can hold a thread open indefinitely.
++- **Concurrent `adduser`** (R2).
++- **No `Secure` cookie attribute**: the server uses plain HTTP over loopback, as recorded in the spec's Assumptions.
++- **System clock stepped backwards between runs**: if the clock is set back, a new run could sign in the same user in exactly the same second as an earlier run did. It would then re-create that run's token bytes (R4). This needs the same username, the same `iat` second and a clock change, so it is not handled.

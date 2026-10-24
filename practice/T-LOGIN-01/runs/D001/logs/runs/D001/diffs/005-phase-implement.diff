@@ -1,0 +1,1670 @@
+diff --git a/src/loginapp/__init__.py b/src/loginapp/__init__.py
+new file mode 100644
+index 0000000..673f82d
+--- /dev/null
++++ b/src/loginapp/__init__.py
+@@ -0,0 +1,3 @@
++"""loginapp - a small login web application built on the standard library."""
++
++__version__ = "1.0.0"
+diff --git a/src/loginapp/__main__.py b/src/loginapp/__main__.py
+new file mode 100644
+index 0000000..eb53e2f
+--- /dev/null
++++ b/src/loginapp/__main__.py
+@@ -0,0 +1,3 @@
++from .cli import main
++
++raise SystemExit(main())
+diff --git a/src/loginapp/cli.py b/src/loginapp/cli.py
+new file mode 100644
+index 0000000..40f9535
+--- /dev/null
++++ b/src/loginapp/cli.py
+@@ -0,0 +1,128 @@
++"""Command line: `adduser` and `serve`."""
++
++from __future__ import annotations
++
++import argparse
++import getpass
++import os
++import sys
++
++from . import users
++
++EXIT_OK = 0
++EXIT_ERROR = 1
++EXIT_INVALID = 2
++EXIT_EXISTS = 3
++
++SECRET_ENV = "LOGINAPP_SECRET"
++MIN_SECRET_BYTES = 32  # HS256 keys should be at least as long as the hash output
++
++
++def _error(message: str) -> None:
++    print(f"loginapp: error: {message}", file=sys.stderr)
++
++
++def _read_password_line() -> str | None:
++    """Read one line from standard input, without its line ending.
++
++    The line is decoded as UTF-8 whatever the locale, to match how the login
++    form is decoded. At a terminal the password is not echoed. Returns None
++    if no valid UTF-8 line can be read.
++    """
++    stdin = sys.stdin
++    if stdin is None:
++        return None
++    try:
++        if stdin.isatty():
++            return getpass.getpass("Password: ")
++        raw = stdin.buffer.readline()
++        line = raw.decode("utf-8")
++    except (OSError, ValueError, EOFError, AttributeError):  # ValueError covers UnicodeDecodeError
++        return None
++    if line.endswith("\n"):
++        line = line[:-1]
++    if line.endswith("\r"):
++        line = line[:-1]
++    return line
++
++
++def cmd_adduser(args: argparse.Namespace) -> int:
++    if not users.is_valid_username(args.username):
++        _error("username must be 3 to 32 letters, digits or underscores")
++        return EXIT_INVALID
++    password=[REDACTED:assigned_secret]()
++    if password is None:
++        _error("could not read the password from standard input")
++        return EXIT_INVALID
++    if not users.is_valid_password(password):
++        _error(f"password must be at least {users.MIN_PASSWORD_LENGTH} characters")
++        return EXIT_INVALID
++    try:
++        users.add_user(args.users, args.username, password)
++    except users.UserExistsError:
++        _error(f"user {args.username!r} already exists")
++        return EXIT_EXISTS
++    except users.UsersFileError as exc:
++        _error(str(exc))
++        return EXIT_ERROR
++    print(f"added {args.username}", flush=True)
++    return EXIT_OK
++
++
++def cmd_serve(args: argparse.Namespace) -> int:
++    from . import server  # imported here so `adduser` stays light
++
++    secret=[REDACTED:assigned_secret](SECRET_ENV)
++    if not secret:
++        _error(f"the environment variable {SECRET_ENV} must be set to the session signing secret")
++        return EXIT_ERROR
++    if not 0 < args.port < 65536:
++        _error("--port must be between 1 and 65535")
++        return EXIT_INVALID
++    try:
++        accounts = users.load_users(args.users)
++    except users.UsersFileError as exc:
++        _error(str(exc))
++        return EXIT_ERROR
++    if not accounts:
++        print(f"loginapp: warning: no accounts in {args.users}", file=sys.stderr, flush=True)
++
++    secret_bytes = os.fsencode(secret)
++    if len(secret_bytes) < MIN_SECRET_BYTES:
++        print(f"loginapp: warning: {SECRET_ENV} is shorter than {MIN_SECRET_BYTES} bytes; "
++              "use a long random value", file=sys.stderr, flush=True)
++
++    try:
++        httpd = server.LoginServer((server.HOST, args.port), server.App(args.users, secret_bytes))
++    except OSError as exc:
++        _error(f"cannot listen on {server.HOST}:{args.port}: {exc.strerror or exc}")
++        return EXIT_ERROR
++    with httpd:
++        print(f"listening on {server.HOST}:{args.port}", flush=True)
++        try:
++            httpd.serve_forever()
++        except KeyboardInterrupt:
++            pass
++    return EXIT_OK
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(prog="python -m loginapp",
++                                     description="A small web application with a login page.")
++    commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
++
++    add = commands.add_parser("adduser", help="add an account; the password is read from standard input")
++    add.add_argument("username", metavar="USERNAME")
++    add.add_argument("--users", required=True, metavar="FILE", help="the users file")
++    add.set_defaults(handler=cmd_adduser)
++
++    serve = commands.add_parser("serve", help=f"run the web server (needs {SECRET_ENV})")
++    serve.add_argument("--port", required=True, type=int, metavar="PORT")
++    serve.add_argument("--users", required=True, metavar="FILE", help="the users file")
++    serve.set_defaults(handler=cmd_serve)
++    return parser
++
++
++def main(argv: list[str] | None = None) -> int:
++    args = build_parser().parse_args(argv)
++    return args.handler(args)
+diff --git a/src/loginapp/pages.py b/src/loginapp/pages.py
+new file mode 100644
+index 0000000..f0bf32f
+--- /dev/null
++++ b/src/loginapp/pages.py
+@@ -0,0 +1,79 @@
++"""HTML pages. Every dynamic value is escaped."""
++
++from __future__ import annotations
++
++import base64
++import hashlib
++from html import escape
++
++_STYLE = """
++body { font-family: system-ui, sans-serif; margin: 0; background: #f4f5f7; color: #1c1e21; }
++main { max-width: 22rem; margin: 4rem auto; padding: 2rem; background: #fff;
++       border-radius: 8px; box-shadow: 0 1px 4px rgba(0, 0, 0, .15); }
++h1 { font-size: 1.4rem; margin-top: 0; }
++label { display: block; margin-top: 1rem; font-weight: 600; }
++input { box-sizing: border-box; width: 100%; padding: .5rem; margin-top: .25rem; font-size: 1rem; }
++button { margin-top: 1.5rem; padding: .6rem 1.2rem; font-size: 1rem; cursor: pointer; }
++.error { color: #b00020; font-weight: 600; }
++"""
++
++_STYLE_HASH = base64.b64encode(hashlib.sha256(_STYLE.encode("utf-8")).digest()).decode("ascii")
++
++# Only the stylesheet above may load; forms may only post back to this site;
++# the pages may not be framed.
++CONTENT_SECURITY_POLICY = (
++    "default-src 'none'; "
++    f"style-src 'sha256-{_STYLE_HASH}'; "
++    "form-action 'self'; "
++    "frame-ancestors 'none'; "
++    "base-uri 'none'"
++)
++
++INVALID_CREDENTIALS = "Invalid username or password"
++
++
++def _layout(title: str, body: str) -> bytes:
++    return (
++        "<!DOCTYPE html>\n"
++        '<html lang="en">\n'
++        "<head>\n"
++        '<meta charset="utf-8">\n'
++        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
++        f"<title>{escape(title)}</title>\n"
++        f"<style>{_STYLE}</style>\n"
++        "</head>\n"
++        "<body>\n"
++        f"<main>\n{body}</main>\n"
++        "</body>\n"
++        "</html>\n"
++    ).encode("utf-8")
++
++
++def login_page(error: str | None = None) -> bytes:
++    message = f'<p class="error" role="alert">{escape(error)}</p>\n' if error else ""
++    return _layout(
++        "Log in",
++        "<h1>Log in</h1>\n"
++        f"{message}"
++        '<form method="post" action="/login">\n'
++        '<label for="username">Username</label>\n'
++        '<input id="username" name="username" type="text" autocomplete="username" required autofocus>\n'
++        '<label for="password">Password</label>\n'
++        '<input id="password" name="password" type="password" autocomplete="current-password" required>\n'
++        '<button type="submit">Log in</button>\n'
++        "</form>\n",
++    )
++
++
++def dashboard_page(username: str) -> bytes:
++    return _layout(
++        "Dashboard",
++        f"<h1>Welcome, {escape(username)}</h1>\n"
++        '<form method="post" action="/logout">\n'
++        '<button type="submit">Log out</button>\n'
++        "</form>\n",
++    )
++
++
++def error_page(status: int, reason: str) -> bytes:
++    return _layout(f"{status} {reason}", f"<h1>{status} {escape(reason)}</h1>\n")
+diff --git a/src/loginapp/server.py b/src/loginapp/server.py
+new file mode 100644
+index 0000000..cd12946
+--- /dev/null
++++ b/src/loginapp/server.py
+@@ -0,0 +1,377 @@
++"""The HTTP server: routing, sessions and the login flow."""
++
++from __future__ import annotations
++
++import collections
++import hashlib
++import secrets
++import threading
++import time
++import traceback
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from urllib.parse import parse_qs, urlsplit
++
++from . import pages, tokens, users
++
++HOST = "127.0.0.1"
++COOKIE_NAME = "session"
++MAX_BODY_BYTES = 8 * 1024
++MAX_FORM_FIELDS = 20
++
++# Failed-login throttling, per username: after MAX_FAILURES failed attempts
++# within FAILURE_WINDOW seconds, further attempts for that username get 429
++# until the oldest of those failures falls out of the window.
++MAX_FAILURES = 10
++FAILURE_WINDOW = 15 * 60
++MAX_TRACKED_USERNAMES = 10_000
++
++# scrypt needs 16 MiB per hash; cap how many run at once.
++MAX_CONCURRENT_HASHES = 4
++
++TOO_MANY_ATTEMPTS = "Too many failed login attempts. Try again later."
++
++_SECURITY_HEADERS = (
++    ("Content-Security-Policy", pages.CONTENT_SECURITY_POLICY),
++    ("X-Content-Type-Options", "nosniff"),
++    ("X-Frame-Options", "DENY"),
++    # Not "no-referrer": that would make browsers send `Origin: null` on our
++    # own form posts, which _reject_cross_site would then refuse.
++    ("Referrer-Policy", "same-origin"),
++    ("Cross-Origin-Opener-Policy", "same-origin"),
++    ("Cache-Control", "no-store"),
++)
++_HTML = "text/html; charset=utf-8"
++
++
++class FailedLoginTracker:
++    """Remembers recent failed logins per username (in memory)."""
++
++    def __init__(self, max_failures=MAX_FAILURES, window=FAILURE_WINDOW,
++                 max_tracked=MAX_TRACKED_USERNAMES, clock=time.monotonic):
++        self._max_failures = max_failures
++        self._window = window
++        self._max_tracked = max_tracked
++        self._clock = clock
++        self._failures: collections.OrderedDict[str, collections.deque] = collections.OrderedDict()
++        self._lock = threading.Lock()
++
++    def _recent(self, username: str, now: float) -> collections.deque | None:
++        times = self._failures.get(username)
++        if times is None:
++            return None
++        while times and times[0] <= now - self._window:
++            times.popleft()
++        if not times:
++            del self._failures[username]
++            return None
++        return times
++
++    def retry_after(self, username: str) -> int | None:
++        """Seconds until username may try again, or None if it may try now."""
++        with self._lock:
++            now = self._clock()
++            times = self._recent(username, now)
++            if times is None or len(times) < self._max_failures:
++                return None
++            return max(1, int(times[-self._max_failures] + self._window - now + 0.999))
++
++    def record_failure(self, username: str) -> None:
++        with self._lock:
++            now = self._clock()
++            times = self._recent(username, now)
++            if times is None:
++                while len(self._failures) >= self._max_tracked:
++                    self._failures.popitem(last=False)
++                times = self._failures[username] = collections.deque(maxlen=self._max_failures)
++            times.append(now)
++            self._failures.move_to_end(username)
++
++    def reset(self, username: str) -> None:
++        with self._lock:
++            self._failures.pop(username, None)
++
++
++class RevokedTokens:
++    """Tokens ended by logout, kept (in memory) until they would expire anyway."""
++
++    def __init__(self, clock=time.time):
++        self._clock = clock
++        self._expiry: dict[str, float] = {}
++        self._lock = threading.Lock()
++
++    @staticmethod
++    def _key(token: str) -> str:
++        return hashlib.sha256(token.encode("ascii")).hexdigest()
++
++    def revoke(self, token: str, exp: float) -> None:
++        with self._lock:
++            now = self._clock()
++            for key in [k for k, e in self._expiry.items() if e <= now]:
++                del self._expiry[key]
++            self._expiry[self._key(token)] = exp
++
++    def is_revoked(self, token: str) -> bool:
++        with self._lock:
++            return self._key(token) in self._expiry
++
++
++class App:
++    """State shared by all request handlers."""
++
++    def __init__(self, users_path, secret: bytes):
++        if not secret:
++            raise ValueError("secret must not be empty")
++        self.users_path = users_path
++        self.secret = secret
++        self.failed_logins = FailedLoginTracker()
++        self.revoked = RevokedTokens()
++        self.hash_slots = threading.BoundedSemaphore(MAX_CONCURRENT_HASHES)
++        # Checked against when the username is unknown, so that unknown and
++        # known usernames take the same time to reject.
++        self.dummy_hash = users.hash_password(secrets.token_urlsafe(16))
++
++    def check_credentials(self, username: str, password: str) -> bool:
++        with self.hash_slots:
++            accounts = users.load_users(self.users_path)
++            stored = accounts.get(username) if users.is_valid_username(username) else None
++            matches = users.verify_password(password, stored if stored is not None else self.dummy_hash)
++        return stored is not None and matches
++
++    def user_exists(self, username: str) -> bool:
++        return users.is_valid_username(username) and username in users.load_users(self.users_path)
++
++
++class LoginServer(ThreadingHTTPServer):
++    daemon_threads = True
++
++    def __init__(self, address, app: App):
++        self.app = app
++        super().__init__(address, Handler)
++
++
++class _HTTPError(Exception):
++    def __init__(self, status: int):
++        super().__init__(status)
++        self.status = status
++
++
++def _session_cookie(token: str) -> str:
++    return (f"{COOKIE_NAME}={token}; Path=/; Max-Age={tokens.SESSION_SECONDS}; "
++            "HttpOnly; SameSite=Strict")
++
++
++def _cleared_session_cookie() -> str:
++    return (f"{COOKIE_NAME}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; "
++            "HttpOnly; SameSite=Strict")
++
++
++class Handler(BaseHTTPRequestHandler):
++    server_version = "loginapp"
++    protocol_version = "HTTP/1.0"
++    timeout = 15  # seconds a client may stall before it is dropped
++
++    server: LoginServer
++
++    # -- dispatch ---------------------------------------------------------
++
++    _ROUTES = {
++        "/login": {"GET": "_get_login", "HEAD": "_get_login", "POST": "_post_login"},
++        "/dashboard": {"GET": "_get_dashboard", "HEAD": "_get_dashboard"},
++        "/logout": {"POST": "_post_logout"},
++    }
++
++    def do_GET(self):
++        self._dispatch()
++
++    do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = do_GET
++
++    def version_string(self):
++        return self.server_version
++
++    def _dispatch(self):
++        try:
++            try:
++                self._check_host()
++                body = self._read_body()
++                routes = self._ROUTES.get(urlsplit(self.path).path)
++                if routes is None:
++                    raise _HTTPError(404)
++                name = routes.get(self.command)
++                if name is None:
++                    self._send_error_page(405, [("Allow", ", ".join(routes))])
++                    return
++                getattr(self, name)(body)
++            except _HTTPError as exc:
++                self._send_error_page(exc.status)
++            except (ConnectionError, TimeoutError):
++                raise
++            except Exception:
++                self.log_error("internal error handling %r:\n%s", self.path, traceback.format_exc())
++                self._send_error_page(500)
++        except (ConnectionError, TimeoutError):
++            self.close_connection = True  # the client went away
++
++    def _check_host(self):
++        """Only answer requests addressed to this loopback server.
++
++        Rejecting other Host names defeats DNS-rebinding attacks, where a
++        hostile web page points its own domain at 127.0.0.1.
++        """
++        hosts = self.headers.get_all("Host") or []
++        if not hosts:
++            return  # HTTP/1.0 clients need not send one
++        port = self.server.server_address[1]
++        allowed = {name + suffix for name in ("127.0.0.1", "localhost") for suffix in ("", f":{port}")}
++        if len(hosts) != 1 or hosts[0].strip().lower() not in allowed:
++            self.close_connection = True
++            raise _HTTPError(421)
++
++    def _read_body(self) -> bytes:
++        if "Transfer-Encoding" in self.headers:
++            self.close_connection = True
++            raise _HTTPError(411)
++        lengths = self.headers.get_all("Content-Length") or []
++        if not lengths:
++            return b""
++        if len(lengths) != 1 or not lengths[0].strip().isdigit() or not lengths[0].strip().isascii():
++            self.close_connection = True
++            raise _HTTPError(400)
++        length = int(lengths[0])
++        if length > MAX_BODY_BYTES:
++            self.close_connection = True
++            raise _HTTPError(413)
++        body = self.rfile.read(length)
++        if len(body) != length:
++            self.close_connection = True
++            raise _HTTPError(400)
++        return body
++
++    # -- routes -----------------------------------------------------------
++
++    def _get_login(self, body: bytes):
++        self._send_html(200, pages.login_page())
++
++    def _post_login(self, body: bytes):
++        self._reject_cross_site()
++        username, password=[REDACTED:assigned_secret](body)
++        app = self.server.app
++        throttle_key = username if username is not None and users.is_valid_username(username) else None
++
++        if throttle_key is not None:
++            wait = app.failed_logins.retry_after(throttle_key)
++            if wait is not None:
++                self._send_html(429, pages.login_page(TOO_MANY_ATTEMPTS),
++                                [("Retry-After", str(wait))])
++                return
++
++        if username is not None and password is not None and app.check_credentials(username, password):
++            app.failed_logins.reset(username)
++            token=[REDACTED:assigned_secret](username, app.secret)
++            self._send_redirect("/dashboard", [("Set-Cookie", _session_cookie(token))])
++            return
++
++        if throttle_key is not None:
++            app.failed_logins.record_failure(throttle_key)
++        self._send_html(401, pages.login_page(pages.INVALID_CREDENTIALS))
++
++    def _get_dashboard(self, body: bytes):
++        token, username = self._session()
++        if username is None:
++            extra = [("Set-Cookie", _cleared_session_cookie())] if token is not None else []
++            self._send_redirect("/login", extra)
++            return
++        self._send_html(200, pages.dashboard_page(username))
++
++    def _post_logout(self, body: bytes):
++        self._reject_cross_site()
++        token=[REDACTED:assigned_secret]()
++        if token is not None:
++            try:
++                claims = tokens.verify(token, self.server.app.secret)
++            except tokens.InvalidToken:
++                pass
++            else:
++                self.server.app.revoked.revoke(token, claims["exp"])
++        self._send_redirect("/login", [("Set-Cookie", _cleared_session_cookie())])
++
++    # -- helpers ----------------------------------------------------------
++
++    def _reject_cross_site(self):
++        """Refuse form posts that a browser reports as coming from another site."""
++        fetch_site = self.headers.get("Sec-Fetch-Site")
++        if fetch_site is not None and fetch_site.strip().lower() not in ("same-origin", "none"):
++            raise _HTTPError(403)
++        origin = self.headers.get("Origin")
++        if origin is not None:
++            # The Host header has already been checked by _check_host.
++            host = (self.headers.get("Host") or "").strip().lower()
++            if not host or origin.strip().lower() != f"http://{host}":
++                raise _HTTPError(403)
++
++    def _login_form(self, body: bytes) -> tuple[str | None, str | None]:
++        content_type = self.headers.get("Content-Type")
++        if content_type is not None:
++            media_type = content_type.split(";", 1)[0].strip().lower()
++            if media_type != "application/x-www-form-urlencoded":
++                raise _HTTPError(415)
++        try:
++            fields = parse_qs(body.decode("utf-8"), keep_blank_values=True,
++                              errors="strict", max_num_fields=MAX_FORM_FIELDS)
++        except ValueError:  # includes UnicodeDecodeError
++            raise _HTTPError(400) from None
++
++        def single(name: str) -> str | None:
++            values = fields.get(name)
++            return values[0] if values is not None and len(values) == 1 else None
++
++        return single("username"), single("password")
++
++    def _session_token(self) -> str | None:
++        for header in self.headers.get_all("Cookie") or []:
++            for part in header.split(";"):
++                name, sep, value = part.strip().partition("=")
++                if sep and name.strip() == COOKIE_NAME:
++                    return value.strip()
++        return None
++
++    def _session(self) -> tuple[str | None, str | None]:
++        """Return (token, username); username is None unless the session is valid."""
++        token=[REDACTED:assigned_secret]()
++        if token is None:
++            return None, None
++        app = self.server.app
++        try:
++            claims = tokens.verify(token, app.secret)
++        except tokens.InvalidToken:
++            return token, None
++        if app.revoked.is_revoked(token) or not app.user_exists(claims["sub"]):
++            return token, None
++        return token, claims["sub"]
++
++    def _send(self, status: int, body: bytes, headers=()):
++        self.send_response(status)
++        for name, value in headers:
++            self.send_header(name, value)
++        for name, value in _SECURITY_HEADERS:
++            self.send_header(name, value)
++        self.send_header("Content-Length", str(len(body)))
++        self.end_headers()
++        if self.command != "HEAD" and status >= 200 and status not in (204, 304):
++            self.wfile.write(body)
++
++    def _send_html(self, status: int, body: bytes, headers=()):
++        self._send(status, body, [("Content-Type", _HTML), *headers])
++
++    def _send_redirect(self, location: str, headers=()):
++        self._send(303, b"", [("Location", location), *headers])
++
++    def _send_error_page(self, status: int, headers=()):
++        reason = self.responses.get(status, ("Error",))[0]
++        self._send_html(status, pages.error_page(status, reason), headers)
++
++    def send_error(self, code, message=None, explain=None):
++        # Used by the base class for malformed requests; keep its responses
++        # consistent with ours.
++        self.close_connection = True
++        self.log_error("code %d, message %s", code, message)
++        self._send_error_page(code)
+diff --git a/src/loginapp/tokens.py b/src/loginapp/tokens.py
+new file mode 100644
+index 0000000..457bdd2
+--- /dev/null
++++ b/src/loginapp/tokens.py
+@@ -0,0 +1,87 @@
++"""Session tokens: compact JWTs signed with HMAC-SHA256 (HS256)."""
++
++from __future__ import annotations
++
++import base64
++import hashlib
++import hmac
++import json
++import re
++import time
++
++SESSION_SECONDS = 1800
++MAX_TOKEN_LENGTH = 4096
++
++_HEADER = {"alg": "HS256", "typ": "JWT"}
++_SEGMENT_RE = re.compile(r"[A-Za-z0-9_-]+")
++
++
++class InvalidToken(Exception):
++    """The token is malformed, wrongly signed or expired."""
++
++
++def _b64url_encode(data: bytes) -> str:
++    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
++
++
++def _b64url_decode(segment: str) -> bytes:
++    if not _SEGMENT_RE.fullmatch(segment) or len(segment) % 4 == 1:
++        raise InvalidToken("malformed segment")
++    return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
++
++
++def _json_segment(value: dict) -> str:
++    return _b64url_encode(json.dumps(value, separators=(",", ":")).encode("utf-8"))
++
++
++def _signature(secret: bytes, signing_input: str) -> str:
++    digest = hmac.new(secret, signing_input.encode("ascii"), hashlib.sha256).digest()
++    return _b64url_encode(digest)
++
++
++def _is_int(value: object) -> bool:
++    return isinstance(value, int) and not isinstance(value, bool)
++
++
++def issue(username: str, secret: bytes, now: float | None = None) -> str:
++    """Create a session token for username, valid for SESSION_SECONDS."""
++    iat = int(time.time() if now is None else now)
++    claims = {"sub": username, "iat": iat, "exp": iat + SESSION_SECONDS}
++    signing_input = f"{_json_segment(_HEADER)}.{_json_segment(claims)}"
++    return f"{signing_input}.{_signature(secret, signing_input)}"
++
++
++def verify(token: str, secret: bytes, now: float | None = None) -> dict:
++    """Return the claims of a valid token, or raise InvalidToken.
++
++    The signature is checked before anything in the token is parsed, only
++    HS256 is accepted, and a token is rejected from its `exp` time onwards.
++    """
++    if not isinstance(token, str) or not token.isascii() or not 0 < len(token) <= MAX_TOKEN_LENGTH:
++        raise InvalidToken("malformed token")
++    parts = token.split(".")
++    if len(parts) != 3:
++        raise InvalidToken("malformed token")
++    header_seg, payload_seg, signature_seg = parts
++
++    expected = _signature(secret, f"{header_seg}.{payload_seg}")
++    if not hmac.compare_digest(expected.encode("ascii"), signature_seg.encode("ascii")):
++        raise InvalidToken("bad signature")
++
++    try:
++        header = json.loads(_b64url_decode(header_seg))
++        claims = json.loads(_b64url_decode(payload_seg))
++    except ValueError as exc:
++        raise InvalidToken("malformed token") from exc
++    if not isinstance(header, dict) or header.get("alg") != "HS256" or "crit" in header:
++        raise InvalidToken("unsupported header")
++    if not isinstance(claims, dict):
++        raise InvalidToken("malformed claims")
++
++    sub, iat, exp = claims.get("sub"), claims.get("iat"), claims.get("exp")
++    if not isinstance(sub, str) or not _is_int(iat) or not _is_int(exp):
++        raise InvalidToken("missing or malformed claims")
++    current = time.time() if now is None else now
++    if current >= exp:
++        raise InvalidToken("expired")
++    return claims
+diff --git a/src/loginapp/users.py b/src/loginapp/users.py
+new file mode 100644
+index 0000000..e7008cb
+--- /dev/null
++++ b/src/loginapp/users.py
+@@ -0,0 +1,164 @@
++"""User accounts: validation, password hashing and the JSON users file.
++
++The users file looks like::
++
++    {"users": {"alice": {"password": "scrypt$16384$8$5$<salt>$<key>"}}}
++
++Passwords are never stored. Each one is hashed with scrypt and a random
++per-user salt; the cost parameters are kept in the stored string so they can
++be raised later without invalidating existing accounts.
++"""
++
++from __future__ import annotations
++
++import base64
++import binascii
++import contextlib
++import hashlib
++import hmac
++import json
++import os
++import re
++import secrets
++import tempfile
++from pathlib import Path
++
++USERNAME_RE = re.compile(r"[A-Za-z0-9_]{3,32}")
++MIN_PASSWORD_LENGTH = 12
++
++# scrypt N=2^14, r=8, p=5: one of the OWASP-recommended equivalent settings
++# (16 MiB of memory per hash).
++SCRYPT_N = 2**14
++SCRYPT_R = 8
++SCRYPT_P = 5
++SALT_BYTES = 16
++KEY_BYTES = 32
++_SCRYPT_MAXMEM = 64 * 1024 * 1024
++
++
++class UsersFileError(Exception):
++    """The users file cannot be read, parsed or written."""
++
++
++class UserExistsError(Exception):
++    """An account with this username already exists."""
++
++
++def is_valid_username(username: object) -> bool:
++    """3 to 32 ASCII letters, digits or underscores."""
++    return isinstance(username, str) and USERNAME_RE.fullmatch(username) is not None
++
++
++def is_valid_password(password: str) -> bool:
++    return len(password) >= MIN_PASSWORD_LENGTH
++
++
++def _b64encode(data: bytes) -> str:
++    return base64.b64encode(data).decode("ascii")
++
++
++def _b64decode(text: str) -> bytes:
++    return base64.b64decode(text.encode("ascii"), validate=True)
++
++
++def hash_password(password: str) -> str:
++    """Hash a password with scrypt and a fresh random salt."""
++    salt = secrets.token_bytes(SALT_BYTES)
++    key = hashlib.scrypt(
++        password.encode("utf-8"),
++        salt=salt,
++        n=SCRYPT_N,
++        r=SCRYPT_R,
++        p=SCRYPT_P,
++        maxmem=_SCRYPT_MAXMEM,
++        dklen=KEY_BYTES,
++    )
++    return "$".join(
++        ["scrypt", str(SCRYPT_N), str(SCRYPT_R), str(SCRYPT_P), _b64encode(salt), _b64encode(key)]
++    )
++
++
++def verify_password(password: str, stored: str) -> bool:
++    """Check a password against a stored hash in constant time.
++
++    A malformed stored hash never matches.
++    """
++    try:
++        scheme, n, r, p, salt_b64, key_b64 = stored.split("$")
++        if scheme != "scrypt":
++            return False
++        salt = _b64decode(salt_b64)
++        expected = _b64decode(key_b64)
++        actual = hashlib.scrypt(
++            password.encode("utf-8"),
++            salt=salt,
++            n=int(n),
++            r=int(r),
++            p=int(p),
++            maxmem=_SCRYPT_MAXMEM,
++            dklen=len(expected),
++        )
++    except (ValueError, TypeError, AttributeError, binascii.Error, MemoryError):
++        return False
++    return hmac.compare_digest(actual, expected)
++
++
++def _read_document(path: Path) -> dict:
++    """Read and validate the users file. A missing file is an empty one."""
++    try:
++        text = path.read_text(encoding="utf-8")
++    except FileNotFoundError:
++        return {"users": {}}
++    except (OSError, ValueError) as exc:
++        raise UsersFileError(f"cannot read users file {path}: {exc}") from exc
++    try:
++        document = json.loads(text)
++    except ValueError as exc:
++        raise UsersFileError(f"users file {path} is not valid JSON: {exc}") from exc
++
++    users = document.get("users") if isinstance(document, dict) else None
++    if not isinstance(users, dict):
++        raise UsersFileError(f"users file {path} has no 'users' object")
++    for name, entry in users.items():
++        if not (isinstance(entry, dict) and isinstance(entry.get("password"), str)):
++            raise UsersFileError(f"users file {path} has a malformed entry for {name!r}")
++    return document
++
++
++def load_users(path: str | os.PathLike) -> dict[str, str]:
++    """Return a mapping of username to stored password hash."""
++    document = _read_document(Path(path))
++    return {name: entry["password"] for name, entry in document["users"].items()}
++
++
++def _write_document(path: Path, document: dict) -> None:
++    """Replace the users file atomically; the new file is readable by its owner only."""
++    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
++    try:
++        with os.fdopen(fd, "w", encoding="utf-8") as handle:
++            json.dump(document, handle, indent=2, sort_keys=True)
++            handle.write("\n")
++            handle.flush()
++            os.fsync(handle.fileno())
++        os.replace(tmp_name, path)
++    except BaseException:
++        with contextlib.suppress(OSError):
++            os.unlink(tmp_name)
++        raise
++
++
++def add_user(path: str | os.PathLike, username: str, password: str) -> None:
++    """Add an account to the users file, creating the file if needed.
++
++    The caller validates the username and password first.
++    Raises UserExistsError if the username is taken.
++    """
++    path = Path(path)
++    document = _read_document(path)
++    if username in document["users"]:
++        raise UserExistsError(username)
++    document["users"][username] = {"password": hash_password(password)}
++    try:
++        _write_document(path, document)
++    except OSError as exc:
++        raise UsersFileError(f"cannot write users file {path}: {exc}") from exc
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000..077d8c0
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,25 @@
++import os
++import sys
++from pathlib import Path
++
++import pytest
++
++SRC = Path(__file__).resolve().parent.parent / "src"
++sys.path.insert(0, str(SRC))
++
++from loginapp import users  # noqa: E402
++
++
++@pytest.fixture
++def fast_hashing(monkeypatch):
++    """Use a cheap scrypt cost so tests that hash many passwords stay quick."""
++    monkeypatch.setattr(users, "SCRYPT_N", 2**10)
++    monkeypatch.setattr(users, "SCRYPT_P", 1)
++
++
++@pytest.fixture
++def subprocess_env():
++    env = dict(os.environ)
++    env["PYTHONPATH"] = str(SRC) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
++    env.pop("LOGINAPP_SECRET", None)
++    return env
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+new file mode 100644
+index 0000000..988187d
+--- /dev/null
++++ b/tests/test_cli.py
+@@ -0,0 +1,140 @@
++"""The command line, run as `python -m loginapp` in a subprocess."""
++
++import json
++import socket
++import subprocess
++import sys
++import urllib.request
++
++import pytest
++
++
++def run(env, *args, stdin=""):
++    return subprocess.run([sys.executable, "-m", "loginapp", *args], input=stdin,
++                          capture_output=True, text=True, env=env, timeout=30)
++
++
++def test_adduser_creates_file_and_prints_added(tmp_path, subprocess_env):
++    path = tmp_path / "users.json"
++    result = run(subprocess_env, "adduser", "alice", "--users", str(path), stdin="correct-horse-battery\n")
++    assert result.returncode == 0, result.stderr
++    assert result.stdout == "added alice\n"
++    assert "alice" in json.loads(path.read_text())["users"]
++    assert "correct-horse-battery" not in path.read_text()
++
++
++def test_adduser_without_trailing_newline(tmp_path, subprocess_env):
++    path = tmp_path / "users.json"
++    result = run(subprocess_env, "adduser", "alice", "--users", str(path), stdin="correct-horse-battery")
++    assert result.returncode == 0, result.stderr
++
++
++def test_adduser_reads_only_the_first_line(tmp_path, subprocess_env):
++    path = tmp_path / "users.json"
++    result = run(subprocess_env, "adduser", "alice", "--users", str(path),
++                 stdin="correct-horse-battery\nsecond line\n")
++    assert result.returncode == 0, result.stderr
++
++    from loginapp import users
++    assert users.verify_password("correct-horse-battery", users.load_users(path)["alice"])
++
++
++def test_adduser_reads_password_as_utf8_whatever_the_locale(tmp_path, subprocess_env):
++    path = tmp_path / "users.json"
++    subprocess_env.update(LC_ALL="C", LANG="C", PYTHONIOENCODING="ascii", PYTHONUTF8="0")
++    password = "pässwörd-ünïcode"
++    result = subprocess.run([sys.executable, "-m", "loginapp", "adduser", "alice", "--users", str(path)],
++                            input=(password + "\n").encode("utf-8"), capture_output=True,
++                            env=subprocess_env, timeout=30)
++    assert result.returncode == 0, result.stderr
++
++    from loginapp import users
++    assert users.verify_password(password, users.load_users(path)["alice"])
++
++
++def test_adduser_rejects_non_utf8_password(tmp_path, subprocess_env):
++    path = tmp_path / "users.json"
++    result = subprocess.run([sys.executable, "-m", "loginapp", "adduser", "alice", "--users", str(path)],
++                            input=b"\xff\xfe-not-utf8-at-all\n", capture_output=True,
++                            env=subprocess_env, timeout=30)
++    assert result.returncode == 2
++    assert not path.exists()
++
++
++def test_existing_username_exits_3(tmp_path, subprocess_env):
++    path = tmp_path / "users.json"
++    assert run(subprocess_env, "adduser", "alice", "--users", str(path), stdin="correct-horse-battery\n").returncode == 0
++    result = run(subprocess_env, "adduser", "alice", "--users", str(path), stdin="another-password-1\n")
++    assert result.returncode == 3
++    assert result.stdout == ""
++
++
++@pytest.mark.parametrize("username", ["ab", "a" * 33, "bad-name", "with space", "émile"])
++def test_invalid_username_exits_2(tmp_path, subprocess_env, username):
++    path = tmp_path / "users.json"
++    result = run(subprocess_env, "adduser", username, "--users", str(path), stdin="correct-horse-battery\n")
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert not path.exists()
++
++
++@pytest.mark.parametrize("password", ["", "short", "x" * 11, "x" * 11 + "\n"])
++def test_short_password_exits_2(tmp_path, subprocess_env, password):
++    path = tmp_path / "users.json"
++    result = run(subprocess_env, "adduser", "alice", "--users", str(path), stdin=password + "\n")
++    assert result.returncode == 2
++    assert not path.exists()
++
++
++def test_invalid_username_wins_over_existing(tmp_path, subprocess_env):
++    path = tmp_path / "users.json"
++    assert run(subprocess_env, "adduser", "abc", "--users", str(path), stdin="correct-horse-battery\n").returncode == 0
++    assert run(subprocess_env, "adduser", "abc", "--users", str(path), stdin="short\n").returncode == 2
++
++
++def test_serve_without_secret_fails(tmp_path, subprocess_env):
++    result = run(subprocess_env, "serve", "--port", "8000", "--users", str(tmp_path / "users.json"))
++    assert result.returncode != 0
++    assert "LOGINAPP_SECRET" in result.stderr
++    assert "listening" not in result.stdout
++
++
++def test_serve_with_empty_secret_fails(tmp_path, subprocess_env):
++    subprocess_env["LOGINAPP_SECRET"] = ""
++    result = run(subprocess_env, "serve", "--port", "8000", "--users", str(tmp_path / "users.json"))
++    assert result.returncode != 0
++
++
++def free_port():
++    with socket.socket() as sock:
++        sock.bind(("127.0.0.1", 0))
++        return sock.getsockname()[1]
++
++
++def test_serve_prints_listening_and_serves(tmp_path, subprocess_env):
++    path = tmp_path / "users.json"
++    assert run(subprocess_env, "adduser", "alice", "--users", str(path), stdin="correct-horse-battery\n").returncode == 0
++    port = free_port()
++    subprocess_env["LOGINAPP_SECRET"] = "change-me"
++    proc = subprocess.Popen([sys.executable, "-m", "loginapp", "serve", "--port", str(port), "--users", str(path)],
++                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=subprocess_env)
++    try:
++        assert proc.stdout.readline() == f"listening on 127.0.0.1:{port}\n"
++        # Ready means ready: the very first request must succeed.
++        with urllib.request.urlopen(f"http://127.0.0.1:{port}/login", timeout=10) as response:
++            assert response.status == 200
++            assert response.headers["Content-Type"] == "text/html; charset=utf-8"
++    finally:
++        proc.terminate()
++        proc.wait(timeout=10)
++
++
++def test_serve_port_in_use_fails(tmp_path, subprocess_env):
++    subprocess_env["LOGINAPP_SECRET"] = "change-me"
++    with socket.socket() as sock:
++        sock.bind(("127.0.0.1", 0))
++        sock.listen()
++        port = sock.getsockname()[1]
++        result = run(subprocess_env, "serve", "--port", str(port), "--users", str(tmp_path / "users.json"))
++    assert result.returncode != 0
++    assert "listening" not in result.stdout
+diff --git a/tests/test_server.py b/tests/test_server.py
+new file mode 100644
+index 0000000..ce3baab
+--- /dev/null
++++ b/tests/test_server.py
+@@ -0,0 +1,403 @@
++"""The HTTP server, run in a background thread and driven with http.client."""
++
++import http.client
++import re
++import threading
++import time
++import urllib.parse
++
++import pytest
++
++from loginapp import pages, server, tokens, users
++
++SECRET = b"server-test-secret"
++PASSWORD=[REDACTED:assigned_secret]
++HTML = "text/html; charset=utf-8"
++
++
++@pytest.fixture
++def users_path(tmp_path, fast_hashing):
++    path = tmp_path / "users.json"
++    users.add_user(path, "alice", PASSWORD)
++    return path
++
++
++@pytest.fixture
++def app(users_path):
++    return server.App(users_path, SECRET)
++
++
++@pytest.fixture
++def port(app):
++    httpd = server.LoginServer(("127.0.0.1", 0), app)
++    thread = threading.Thread(target=httpd.serve_forever, args=(0.05,), daemon=True)
++    thread.start()
++    yield httpd.server_address[1]
++    httpd.shutdown()
++    httpd.server_close()
++    thread.join(timeout=10)
++
++
++class Response:
++    def __init__(self, raw: http.client.HTTPResponse):
++        self.status = raw.status
++        self.headers = raw.headers
++        self.body = raw.read().decode("utf-8")
++
++    @property
++    def cookie(self) -> str:
++        return self.headers["Set-Cookie"]
++
++    @property
++    def token(self) -> str:
++        match = re.match(r"session=([^;]*);", self.cookie)
++        assert match, self.cookie
++        return match.group(1)
++
++
++def request(port, method, path, body=None, headers=None, cookie=None):
++    headers = dict(headers or {})
++    if cookie is not None:
++        headers["Cookie"] = cookie
++    if isinstance(body, dict):
++        body = urllib.parse.urlencode(body)
++        headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
++    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
++    try:
++        conn.request(method, path, body=body, headers=headers)
++        return Response(conn.getresponse())
++    finally:
++        conn.close()
++
++
++def login(port, username="alice", password=[REDACTED:assigned_secret], **kwargs):
++    return request(port, "POST", "/login", {"username": username, "password": password}, **kwargs)
++
++
++# -- GET /login ---------------------------------------------------------------
++
++def test_login_page_has_form(port):
++    response = request(port, "GET", "/login")
++    assert response.status == 200
++    assert response.headers["Content-Type"] == HTML
++    assert re.search(r'<form[^>]*method="post"[^>]*action="/login"', response.body)
++    assert 'name="username"' in response.body
++    assert re.search(r'name="password"[^>]*type="password"|type="password"[^>]*name="password"', response.body)
++    assert pages.INVALID_CREDENTIALS not in response.body
++
++
++def test_security_headers(port):
++    response = request(port, "GET", "/login")
++    assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
++    assert response.headers["X-Frame-Options"] == "DENY"
++    assert response.headers["X-Content-Type-Options"] == "nosniff"
++    assert response.headers["Cache-Control"] == "no-store"
++    assert "Python" not in response.headers["Server"]
++
++
++def test_head_login_has_no_body(port):
++    response = request(port, "HEAD", "/login")
++    assert response.status == 200
++    assert response.body == ""
++
++
++# -- POST /login ----------------------------------------------------------------
++
++def test_successful_login_redirects_and_sets_session(port):
++    before = int(time.time())
++    response = login(port)
++    after = int(time.time())
++    assert response.status == 303
++    assert response.headers["Location"] == "/dashboard"
++    attributes = [part.strip().lower() for part in response.cookie.split(";")]
++    assert "httponly" in attributes
++    assert "samesite=strict" in attributes
++    assert "path=/" in attributes
++    claims = tokens.verify(response.token, SECRET)
++    assert claims["sub"] == "alice"
++    assert before <= claims["iat"] <= after
++    assert claims["exp"] == claims["iat"] + 1800
++
++
++@pytest.mark.parametrize("username,password", [
++    ("alice", "wrong-password-1"),
++    ("mallory", PASSWORD),
++    ("alice", ""),
++    ("", ""),
++    ("ALICE", PASSWORD),
++    ("bad-name!", PASSWORD),
++])
++def test_failed_login_is_401_with_message(port, username, password):
++    response = login(port, username, password)
++    assert response.status == 401
++    assert response.headers["Content-Type"] == HTML
++    assert pages.INVALID_CREDENTIALS in response.body
++    assert "<form" in response.body
++    assert "Set-Cookie" not in response.headers
++
++
++def test_missing_fields_is_401(port):
++    for body in ("", "username=alice", "password=" + PASSWORD):
++        response = request(port, "POST", "/login", body,
++                           {"Content-Type": "application/x-www-form-urlencoded"})
++        assert response.status == 401
++        assert pages.INVALID_CREDENTIALS in response.body
++
++
++def test_repeated_fields_are_not_accepted(port):
++    body = f"username=alice&username=bob&password={PASSWORD}"
++    response = request(port, "POST", "/login", body, {"Content-Type": "application/x-www-form-urlencoded"})
++    assert response.status == 401
++
++
++def test_login_without_content_type_is_accepted(port):
++    # e.g. `curl -d` always sends one, but other simple clients may not.
++    response = request(port, "POST", "/login", f"username=alice&password={PASSWORD}")
++    assert response.status == 303
++
++
++def test_login_with_json_body_is_rejected(port):
++    response = request(port, "POST", "/login", '{"username": "alice"}', {"Content-Type": "application/json"})
++    assert response.status == 415
++
++
++def test_oversized_body_is_rejected(port):
++    response = request(port, "POST", "/login", "a" * (server.MAX_BODY_BYTES + 1),
++                       {"Content-Type": "application/x-www-form-urlencoded"})
++    assert response.status == 413
++
++
++def test_password_with_special_characters(tmp_path, fast_hashing):
++    path = tmp_path / "users.json"
++    password = "p&ss=wörd +%20 ünïcode"
++    users.add_user(path, "bob", password)
++    httpd = server.LoginServer(("127.0.0.1", 0), server.App(path, SECRET))
++    thread = threading.Thread(target=httpd.serve_forever, args=(0.05,), daemon=True)
++    thread.start()
++    try:
++        assert login(httpd.server_address[1], "bob", password).status == 303
++        assert login(httpd.server_address[1], "bob", password[:-1]).status == 401
++    finally:
++        httpd.shutdown()
++        httpd.server_close()
++
++
++def test_user_added_while_running_can_log_in(port, users_path):
++    users.add_user(users_path, "carol", "carol-long-password")
++    assert login(port, "carol", "carol-long-password").status == 303
++
++
++def test_cross_site_login_post_is_rejected(port):
++    assert login(port, headers={"Origin": "http://evil.example"}).status == 403
++    assert login(port, headers={"Sec-Fetch-Site": "cross-site"}).status == 403
++    assert login(port, headers={"Origin": f"http://127.0.0.1:{port}",
++                                "Sec-Fetch-Site": "same-origin"}).status == 303
++
++
++def test_foreign_host_header_is_rejected(port):
++    response = request(port, "GET", "/login", headers={"Host": "attacker.example"})
++    assert response.status == 421
++    assert request(port, "GET", "/login", headers={"Host": f"localhost:{port}"}).status == 200
++
++
++def test_browser_form_post_from_the_login_page_is_accepted(port):
++    # What a browser sends when the form on /login is submitted.
++    headers = {
++        "Host": f"127.0.0.1:{port}",
++        "Origin": f"http://127.0.0.1:{port}",
++        "Referer": f"http://127.0.0.1:{port}/login",
++        "Sec-Fetch-Site": "same-origin",
++        "Sec-Fetch-Mode": "navigate",
++    }
++    response = login(port, headers=headers)
++    assert response.status == 303
++    assert request(port, "POST", "/logout", cookie=f"session={response.token}", headers=headers).status == 303
++
++
++def test_referrer_policy_keeps_origin_on_same_site_posts(port):
++    # With "no-referrer" browsers send `Origin: null`, which would be refused.
++    assert request(port, "GET", "/login").headers["Referrer-Policy"] != "no-referrer"
++
++
++def test_repeated_failures_are_throttled(port):
++    for _ in range(server.MAX_FAILURES):
++        assert login(port, "alice", "wrong-password-1").status == 401
++    response = login(port)  # even the right password
++    assert response.status == 429
++    assert int(response.headers["Retry-After"]) > 0
++    assert "Set-Cookie" not in response.headers
++    # Other accounts are unaffected.
++    assert login(port, "mallory", "wrong-password-1").status == 401
++
++
++def test_successful_login_resets_failures(port):
++    for _ in range(server.MAX_FAILURES - 1):
++        assert login(port, "alice", "wrong-password-1").status == 401
++    assert login(port).status == 303
++    for _ in range(server.MAX_FAILURES - 1):
++        assert login(port, "alice", "wrong-password-1").status == 401
++    assert login(port).status == 303
++
++
++def test_failure_tracker_window_expires():
++    now = [1000.0]
++    tracker = server.FailedLoginTracker(max_failures=3, window=60, clock=lambda: now[0])
++    for _ in range(3):
++        tracker.record_failure("alice")
++    assert tracker.retry_after("alice") == 60
++    now[0] += 30
++    assert tracker.retry_after("alice") == 30
++    now[0] += 30
++    assert tracker.retry_after("alice") is None
++
++
++def test_failure_tracker_is_bounded():
++    tracker = server.FailedLoginTracker(max_failures=3, window=60, max_tracked=5)
++    for i in range(100):
++        tracker.record_failure(f"user{i}")
++    assert len(tracker._failures) == 5
++
++
++# -- GET /dashboard -------------------------------------------------------------
++
++def test_dashboard_with_session(port):
++    token = login(port).token
++    response = request(port, "GET", "/dashboard", cookie=f"session={token}")
++    assert response.status == 200
++    assert response.headers["Content-Type"] == HTML
++    assert "Welcome, alice" in response.body
++    assert re.search(r'<form[^>]*method="post"[^>]*action="/logout"', response.body)
++
++
++def test_dashboard_finds_session_among_other_cookies(port):
++    token = login(port).token
++    response = request(port, "GET", "/dashboard", cookie=f"theme=dark; session={token}; x=y")
++    assert response.status == 200
++
++
++def test_dashboard_without_session_redirects(port):
++    response = request(port, "GET", "/dashboard")
++    assert response.status == 303
++    assert response.headers["Location"] == "/login"
++
++
++@pytest.mark.parametrize("cookie", [
++    "session=", "session=garbage", "session=a.b.c", "sessionx=whatever",
++])
++def test_dashboard_with_invalid_session_redirects(port, cookie):
++    response = request(port, "GET", "/dashboard", cookie=cookie)
++    assert response.status == 303
++    assert response.headers["Location"] == "/login"
++
++
++def test_dashboard_rejects_token_signed_with_another_secret(port):
++    token=[REDACTED:assigned_secret]("alice", b"some-other-secret")
++    assert request(port, "GET", "/dashboard", cookie=f"session={token}").status == 303
++
++
++def test_dashboard_rejects_expired_token(port):
++    token=[REDACTED:assigned_secret]("alice", SECRET, now=time.time() - 1801)
++    response = request(port, "GET", "/dashboard", cookie=f"session={token}")
++    assert response.status == 303
++    assert response.headers["Location"] == "/login"
++
++
++def test_dashboard_accepts_token_near_end_of_life(port):
++    token=[REDACTED:assigned_secret]("alice", SECRET, now=time.time() - 1700)
++    assert request(port, "GET", "/dashboard", cookie=f"session={token}").status == 200
++
++
++def test_dashboard_rejects_token_for_unknown_user(port):
++    token=[REDACTED:assigned_secret]("ghost", SECRET)
++    assert request(port, "GET", "/dashboard", cookie=f"session={token}").status == 303
++
++
++def test_dashboard_escapes_username(tmp_path):
++    # Usernames are restricted, but the page must escape regardless.
++    assert b"<script>" not in pages.dashboard_page("<script>alert(1)</script>")
++    assert b"&lt;script&gt;" in pages.dashboard_page("<script>alert(1)</script>")
++
++
++# -- POST /logout ---------------------------------------------------------------
++
++def test_logout_clears_cookie_and_redirects(port):
++    token = login(port).token
++    response = request(port, "POST", "/logout", cookie=f"session={token}")
++    assert response.status == 303
++    assert response.headers["Location"] == "/login"
++    cookie = response.cookie
++    assert cookie.startswith("session=;")
++    assert "max-age=0" in cookie.lower()
++
++
++def test_logout_revokes_token(port):
++    token = login(port).token
++    assert request(port, "GET", "/dashboard", cookie=f"session={token}").status == 200
++    request(port, "POST", "/logout", cookie=f"session={token}")
++    # Even a client that keeps the old cookie is logged out.
++    assert request(port, "GET", "/dashboard", cookie=f"session={token}").status == 303
++
++
++def test_logout_only_ends_that_session(port):
++    first = login(port).token
++    time.sleep(1.05)  # a different iat makes a different token
++    second = login(port).token
++    assert first != second
++    request(port, "POST", "/logout", cookie=f"session={first}")
++    assert request(port, "GET", "/dashboard", cookie=f"session={second}").status == 200
++
++
++def test_logout_without_session(port):
++    response = request(port, "POST", "/logout")
++    assert response.status == 303
++    assert response.headers["Location"] == "/login"
++    assert response.cookie.startswith("session=;")
++
++
++def test_cross_site_logout_is_rejected(port):
++    token = login(port).token
++    response = request(port, "POST", "/logout", cookie=f"session={token}",
++                       headers={"Origin": "http://evil.example"})
++    assert response.status == 403
++    assert request(port, "GET", "/dashboard", cookie=f"session={token}").status == 200
++
++
++# -- other paths and methods -----------------------------------------------------
++
++@pytest.mark.parametrize("method,path", [
++    ("GET", "/"), ("GET", "/nope"), ("GET", "/login/"), ("GET", "/dashboard/x"),
++    ("POST", "/"), ("GET", "/users.json"), ("GET", "/../users.json"), ("DELETE", "/whatever"),
++])
++def test_unknown_paths_are_404(port, method, path):
++    response = request(port, method, path)
++    assert response.status == 404
++    assert response.headers["Content-Type"] == HTML
++
++
++def test_query_string_is_ignored_for_routing(port):
++    assert request(port, "GET", "/login?next=/x").status == 200
++
++
++@pytest.mark.parametrize("method,path", [
++    ("GET", "/logout"), ("PUT", "/login"), ("POST", "/dashboard"), ("DELETE", "/dashboard"),
++])
++def test_wrong_method_on_known_path_is_405(port, method, path):
++    response = request(port, method, path)
++    assert response.status == 405
++    assert "Allow" in response.headers
++
++
++def test_malformed_request_line_gets_html_error(port):
++    import socket
++    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
++        sock.sendall(b"NONSENSE\r\n\r\n")
++        data = b""
++        while chunk := sock.recv(4096):
++            data += chunk
++    assert data.startswith(b"HTTP/1.0 400")
++    assert b"text/html; charset=utf-8" in data
++
++
++def test_app_requires_secret(users_path):
++    with pytest.raises(ValueError):
++        server.App(users_path, b"")
+diff --git a/tests/test_tokens.py b/tests/test_tokens.py
+new file mode 100644
+index 0000000..53ec845
+--- /dev/null
++++ b/tests/test_tokens.py
+@@ -0,0 +1,108 @@
++import base64
++import hashlib
++import hmac
++import json
++
++import pytest
++
++from loginapp import tokens
++
++SECRET = b"test-secret"
++NOW = 1_800_000_000
++
++
++def b64url(data: bytes) -> str:
++    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
++
++
++def decode_segment(segment: str):
++    return json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
++
++
++def forge(header: dict, claims: dict, secret: bytes = SECRET) -> str:
++    signing_input = f"{b64url(json.dumps(header).encode())}.{b64url(json.dumps(claims).encode())}"
++    signature = hmac.new(secret, signing_input.encode(), hashlib.sha256).digest()
++    return f"{signing_input}.{b64url(signature)}"
++
++
++def test_issued_token_is_hs256_jwt_with_required_claims():
++    token=[REDACTED:assigned_secret]("alice", SECRET, now=NOW)
++    header_seg, payload_seg, signature_seg = token.split(".")
++    assert decode_segment(header_seg) == {"alg": "HS256", "typ": "JWT"}
++    assert decode_segment(payload_seg) == {"sub": "alice", "iat": NOW, "exp": NOW + 1800}
++    expected = hmac.new(SECRET, f"{header_seg}.{payload_seg}".encode(), hashlib.sha256).digest()
++    assert signature_seg == b64url(expected)
++
++
++def test_round_trip():
++    token=[REDACTED:assigned_secret]("alice", SECRET, now=NOW)
++    assert tokens.verify(token, SECRET, now=NOW + 1)["sub"] == "alice"
++
++
++def test_valid_until_just_before_exp_and_rejected_from_exp():
++    token=[REDACTED:assigned_secret]("alice", SECRET, now=NOW)
++    tokens.verify(token, SECRET, now=NOW + 1799.9)
++    with pytest.raises(tokens.InvalidToken):
++        tokens.verify(token, SECRET, now=NOW + 1800)
++    with pytest.raises(tokens.InvalidToken):
++        tokens.verify(token, SECRET, now=NOW + 10_000)
++
++
++def test_wrong_secret_rejected():
++    token=[REDACTED:assigned_secret]("alice", SECRET, now=NOW)
++    with pytest.raises(tokens.InvalidToken):
++        tokens.verify(token, b"other-secret", now=NOW)
++
++
++def test_tampered_payload_rejected():
++    token=[REDACTED:assigned_secret]("alice", SECRET, now=NOW)
++    header_seg, _, signature_seg = token.split(".")
++    payload = b64url(json.dumps({"sub": "admin", "iat": NOW, "exp": NOW + 1800}).encode())
++    with pytest.raises(tokens.InvalidToken):
++        tokens.verify(f"{header_seg}.{payload}.{signature_seg}", SECRET, now=NOW)
++
++
++def test_alg_none_rejected():
++    header = b64url(json.dumps({"alg": "none", "typ": "JWT"}).encode())
++    payload = b64url(json.dumps({"sub": "alice", "iat": NOW, "exp": NOW + 1800}).encode())
++    for token in (f"{header}.{payload}.", f"{header}.{payload}"):
++        with pytest.raises(tokens.InvalidToken):
++            tokens.verify(token, SECRET, now=NOW)
++
++
++def test_correctly_signed_but_wrong_alg_header_rejected():
++    claims = {"sub": "alice", "iat": NOW, "exp": NOW + 1800}
++    with pytest.raises(tokens.InvalidToken):
++        tokens.verify(forge({"alg": "HS512", "typ": "JWT"}, claims), SECRET, now=NOW)
++    with pytest.raises(tokens.InvalidToken):
++        tokens.verify(forge({"alg": "HS256", "crit": ["x"]}, claims), SECRET, now=NOW)
++
++
++@pytest.mark.parametrize("claims", [
++    {"iat": NOW, "exp": NOW + 1800},                       # no sub
++    {"sub": "alice", "iat": NOW},                          # no exp
++    {"sub": "alice", "exp": NOW + 1800},                   # no iat
++    {"sub": "alice", "iat": NOW, "exp": "never"},
++    {"sub": "alice", "iat": NOW, "exp": True},
++    {"sub": "alice", "iat": NOW, "exp": float("inf")},
++    {"sub": 7, "iat": NOW, "exp": NOW + 1800},
++])
++def test_correctly_signed_but_bad_claims_rejected(claims):
++    with pytest.raises(tokens.InvalidToken):
++        tokens.verify(forge({"alg": "HS256", "typ": "JWT"}, claims), SECRET, now=NOW)
++
++
++def test_correctly_signed_non_object_payload_rejected():
++    header = b64url(json.dumps({"alg": "HS256"}).encode())
++    payload = b64url(b"[1, 2, 3]")
++    signature = b64url(hmac.new(SECRET, f"{header}.{payload}".encode(), hashlib.sha256).digest())
++    with pytest.raises(tokens.InvalidToken):
++        tokens.verify(f"{header}.{payload}.{signature}", SECRET, now=NOW)
++
++
++@pytest.mark.parametrize("token", [
++    "", "abc", "a.b", "a.b.c.d", "é.é.é", "x" * 5000, "...",
++])
++def test_malformed_tokens_rejected(token):
++    with pytest.raises(tokens.InvalidToken):
++        tokens.verify(token, SECRET, now=NOW)
+diff --git a/tests/test_users.py b/tests/test_users.py
+new file mode 100644
+index 0000000..8b955ce
+--- /dev/null
++++ b/tests/test_users.py
+@@ -0,0 +1,81 @@
++import json
++import os
++import stat
++
++import pytest
++
++from loginapp import users
++
++
++@pytest.mark.parametrize("name", ["abc", "a" * 32, "Alice_99", "___", "A1b"])
++def test_valid_usernames(name):
++    assert users.is_valid_username(name)
++
++
++@pytest.mark.parametrize("name", [
++    "", "ab", "a" * 33, "bad-name", "has space", "dot.ted", "émile", "abc\n", "１２３", None, 123,
++])
++def test_invalid_usernames(name):
++    assert not users.is_valid_username(name)
++
++
++def test_password_length():
++    assert not users.is_valid_password("x" * 11)
++    assert users.is_valid_password("x" * 12)
++
++
++def test_hash_is_salted_and_verifies():
++    first = users.hash_password("correct-horse-battery")
++    second = users.hash_password("correct-horse-battery")
++    assert first != second
++    assert first.startswith("scrypt$")
++    assert "correct-horse-battery" not in first
++    assert users.verify_password("correct-horse-battery", first)
++    assert users.verify_password("correct-horse-battery", second)
++    assert not users.verify_password("correct-horse-batterz", first)
++
++
++@pytest.mark.parametrize("stored", [
++    "", "garbage", "plain-text-password", "md5$abc", "scrypt$1$8$1$AAAA$AAAA",
++    "scrypt$16384$8$1$not base64$AAAA", "scrypt$1048576$64$64$AAAA$AAAA",
++])
++def test_malformed_stored_hash_never_matches(stored):
++    assert not users.verify_password("anything-at-all", stored)
++
++
++def test_add_user_creates_private_file(tmp_path, fast_hashing):
++    path = tmp_path / "users.json"
++    users.add_user(path, "alice", "correct-horse-battery")
++    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
++    document = json.loads(path.read_text())
++    assert set(document["users"]) == {"alice"}
++    assert "correct-horse-battery" not in path.read_text()
++    assert users.verify_password("correct-horse-battery", users.load_users(path)["alice"])
++
++
++def test_add_user_keeps_existing_accounts(tmp_path, fast_hashing):
++    path = tmp_path / "users.json"
++    users.add_user(path, "alice", "correct-horse-battery")
++    users.add_user(path, "bob", "another-long-password")
++    assert set(users.load_users(path)) == {"alice", "bob"}
++
++
++def test_add_existing_user_raises_and_leaves_file_unchanged(tmp_path, fast_hashing):
++    path = tmp_path / "users.json"
++    users.add_user(path, "alice", "correct-horse-battery")
++    before = path.read_bytes()
++    with pytest.raises(users.UserExistsError):
++        users.add_user(path, "alice", "a-different-password")
++    assert path.read_bytes() == before
++
++
++def test_missing_file_is_empty(tmp_path):
++    assert users.load_users(tmp_path / "nope.json") == {}
++
++
++@pytest.mark.parametrize("content", ["not json", "[]", '{"users": []}', '{"users": {"a": "x"}}', "\xff"])
++def test_malformed_file_raises(tmp_path, content):
++    path = tmp_path / "users.json"
++    path.write_text(content, encoding="latin-1")
++    with pytest.raises(users.UsersFileError):
++        users.load_users(path)

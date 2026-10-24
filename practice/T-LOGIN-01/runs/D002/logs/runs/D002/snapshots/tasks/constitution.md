@@ -1,0 +1,138 @@
+<!--
+Sync Impact Report
+==================
+Version change: (unversioned template) → 1.0.0
+Bump rationale: first ratification; every placeholder replaced with concrete governance.
+
+Modified principles (template placeholder → new title):
+- [PRINCIPLE_1_NAME] → I. Standard Library Only
+- [PRINCIPLE_2_NAME] → II. Fail Loudly
+- [PRINCIPLE_3_NAME] → III. Every Requirement Is Testable
+- [PRINCIPLE_4_NAME] → IV. Simplicity
+
+Added sections:
+- Technical Constraints (template [SECTION_2_NAME])
+- Development Workflow & Quality Gates (template [SECTION_3_NAME])
+- Governance rules (amendment procedure, versioning policy, compliance review)
+
+Removed sections:
+- Template fifth principle slot ([PRINCIPLE_5_NAME]); the user set four principles.
+
+Dependent templates (read the constitution at runtime; none modified by this command):
+- .specify/templates/plan-template.md: no change needed. The "Constitution Check" gates come
+  from this file, and "Complexity Tracking" is the record Principle IV requires.
+- .specify/templates/spec-template.md: no change needed. FR-### IDs are the traceability keys
+  that Principle III uses.
+- .specify/templates/tasks-template.md: no change made. It labels tests "OPTIONAL", but
+  Principle III makes them mandatory for this project, and the constitution takes precedence.
+
+Deferred TODOs: none.
+Notes: no project name was given, so the title is generic. Renaming is a PATCH amendment.
+-->
+
+# Project Constitution
+
+## Core Principles
+
+### I. Standard Library Only
+
+- Runtime code MUST import only Python standard library modules and the project's own modules.
+  A top-level import passes this check only if it appears in `sys.stdlib_module_names` or
+  names a project module.
+- The project MUST NOT declare, vendor, or download any third-party package that is needed at
+  runtime. The program MUST run on a plain Python install with nothing else installed.
+- Development and test tools (pytest) are allowed, but runtime code MUST NOT import them.
+
+Rationale: no install step and no supply-chain exposure. The program behaves the same anywhere
+the target Python runs.
+
+### II. Fail Loudly
+
+- Invalid input MUST be rejected. The program MUST NOT guess, silently coerce, truncate, or fill
+  in defaults to produce an answer the input does not support.
+- Command-line interfaces: an error MUST write a clear message to stderr, naming the bad input
+  and what was expected, and MUST exit with a non-zero status. Nothing that could pass for a
+  valid result (including a partial result) may be written to stdout.
+- Programmatic interfaces (functions or services): an error MUST raise an exception or return
+  an explicit error response that cannot be mistaken for success. Returning `None`, `0`, an
+  empty value, or another sentinel in place of an answer is forbidden.
+- Expected invalid input MUST produce a written message, not a raw traceback.
+- Exceptions MUST NOT be swallowed. A handler may only re-raise, or convert the error into a
+  clear message plus a non-zero exit or an error response.
+
+Rationale: a wrong answer that looks right is the most expensive failure. A loud failure costs
+little to diagnose and fix.
+
+### III. Every Requirement Is Testable
+
+- Each functional requirement (FR-###) in a specification MUST be stated so that an automated
+  test can verify it. An untestable requirement MUST be rewritten or clarified before planning.
+- Each functional requirement MUST map to at least one automated pytest test. The test's name
+  or docstring MUST cite the FR ID (for example `FR-003`), so coverage can be checked by
+  searching the test suite.
+- Every invalid-input case the specification defines MUST have a test that checks the error
+  message and the non-zero exit status or error response (Principle II).
+- Tests are mandatory for this project. Task lists MUST include test tasks for every functional
+  requirement. A requirement whose only tests are skipped or xfailed counts as untested, and
+  manual checks do not count.
+
+Rationale: a requirement without a test is only a claim. Mapping FR IDs to tests makes
+"done" something a machine can check.
+
+### IV. Simplicity
+
+- Build the smallest design that meets the specification. Do not add features, options,
+  configuration, abstraction layers, or extension points the specification does not require.
+- Use plain functions and built-in or standard library data types by default. Add a class,
+  module, package, or layer only when a requirement needs it.
+- All code MUST serve a stated requirement or directly support one (tests, input validation,
+  error reporting). Speculative code MUST be removed.
+- Any added complexity MUST be recorded in the plan's Complexity Tracking table, naming the
+  requirement that needs it and the simpler alternative that was rejected.
+
+Rationale: less code means fewer defects, faster review, and a design small enough to test
+completely.
+
+## Technical Constraints
+
+- Language and runtime: CPython 3.13. This also defines which standard library Principle I
+  allows.
+- Runtime dependencies: none outside the standard library (Principle I).
+- Test framework: pytest. It is the only development dependency the test suite needs.
+- The full test suite MUST run with `python3 -m pytest` from the repository root, with nothing
+  set up beyond Python and pytest.
+
+## Development Workflow & Quality Gates
+
+Work follows the Spec Kit sequence: specify, then clarify (as needed), plan, tasks, implement.
+Each step has a gate that MUST pass before the next step starts.
+
+1. **Specification gate**: every functional requirement has an FR-### ID and is testable, and
+   no `[NEEDS CLARIFICATION]` markers remain before planning.
+2. **Plan gate (Constitution Check)**: the plan confirms stdlib-only runtime code, defines the
+   error behaviour for invalid input (messages and exit statuses or error responses), names the
+   planned test or tests for each FR, and records any added complexity in Complexity Tracking.
+3. **Tasks gate**: every FR has at least one test task.
+4. **Done gate**: `python3 -m pytest` passes, every FR ID is cited by at least one passing test,
+   and runtime code imports nothing outside the standard library and the project.
+
+## Governance
+
+- This constitution overrides all other project practices and guidance. If an artifact
+  conflicts with it, fix the artifact or amend the constitution. Do not ignore the conflict.
+- Principles I, II, and III have no per-feature exceptions; changing them requires an
+  amendment. A Principle IV deviation is allowed only when recorded in the plan's Complexity
+  Tracking table.
+- Amendment procedure: propose the change with `/speckit-constitution`. The product owner
+  approves it. The amendment updates the version and the Last Amended date, and lists its
+  effects in a Sync Impact Report. Artifacts already in progress that the change affects MUST
+  be updated to comply.
+- Versioning policy (semantic versioning):
+  - MAJOR: a principle or governance rule is removed or redefined incompatibly.
+  - MINOR: a principle or section is added, or guidance is materially expanded.
+  - PATCH: clarifications, wording, and typo fixes that do not change meaning.
+- Compliance review: every plan runs the Constitution Check, and every review of a spec, plan,
+  task list, or implementation confirms the quality gates above. A violation is either fixed or,
+  for Principle IV only, justified in Complexity Tracking.
+
+**Version**: 1.0.0 | **Ratified**: 2026-10-23 | **Last Amended**: 2026-10-23
