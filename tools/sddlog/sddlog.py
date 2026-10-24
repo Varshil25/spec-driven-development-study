@@ -58,7 +58,18 @@ EVENT_TYPES = {
     "note",
 }
 
-CONDITIONS = {"sdd", "unstructured"}
+CONDITIONS = {"sdd", "sdd_clarify", "unstructured"}
+
+# Phases each condition must complete for a run to be treated as a faithful
+# instance of that condition. `sdd_clarify` (added for the Weeks 5-7 study,
+# protocol v1.1) is the default Spec Kit sequence plus /speckit-clarify run
+# between specify and plan, so that the clarify stage is a manipulated factor
+# rather than an optional extra (Pilot Report section 3.2).
+REQUIRED_PHASES = {
+    "sdd": ["constitution", "specify", "plan", "tasks", "implement"],
+    "sdd_clarify": ["constitution", "specify", "clarify", "plan", "tasks", "implement"],
+    "unstructured": ["implement"],
+}
 
 # Marker-to-marker wall clock is only as good as the operator's discipline in
 # closing a phase. If the gap between the last observed agent activity and the
@@ -776,12 +787,7 @@ def verify_run(store, run_id):
         warnings.append("phases still open: %s" % ", ".join(open_phases))
 
     # condition-specific expectations
-    if manifest.get("condition") == "sdd":
-        seen = {e.get("phase") for e in events if e.get("type") == "phase_end"}
-        required = {"constitution", "specify", "plan", "tasks", "implement"}
-        missing = required - seen
-        if missing:
-            warnings.append("SDD run missing completed phases: %s" % ", ".join(sorted(missing)))
+    warnings.extend(_condition_warnings(manifest.get("condition"), events))
 
     for warning in compute_metrics(store, run_id).get("timing_warnings", []):
         warnings.append(warning)
@@ -795,6 +801,50 @@ def verify_run(store, run_id):
         warnings.append("no file edits captured - check capture-edits calls")
 
     return problems, warnings
+
+
+def _condition_warnings(condition, events):
+    """Check that the phases actually run match the condition's definition.
+
+    A mismatch does not corrupt the log, so it is a warning rather than a
+    failure, but it means the run may not be a faithful instance of its
+    condition and needs an explanatory note before it enters the dataset.
+    """
+    required = REQUIRED_PHASES.get(condition)
+    if not required:
+        return []
+    warnings = []
+    completed = [e.get("phase") for e in events if e.get("type") == "phase_end"]
+    seen = set(completed)
+
+    missing = [p for p in required if p not in seen]
+    if missing:
+        label = {"sdd": "SDD", "sdd_clarify": "SDD+clarify"}.get(condition, condition)
+        warnings.append("%s run missing completed phases: %s" % (label, ", ".join(missing)))
+
+    extra = sorted(seen - set(required) - {None})
+    if extra:
+        if condition == "sdd" and extra == ["clarify"]:
+            warnings.append(
+                "sdd run contains a clarify phase; condition should be sdd_clarify")
+        else:
+            warnings.append(
+                "%s run contains phases outside its condition: %s"
+                % (condition, ", ".join(extra)))
+
+    # Required phases must have been completed in workflow order. Only the
+    # first completion of each phase counts, so a re-opened phase does not
+    # trigger a false ordering warning.
+    first = []
+    for phase in completed:
+        if phase in required and phase not in first:
+            first.append(phase)
+    expected = [p for p in required if p in first]
+    if first != expected:
+        warnings.append(
+            "%s phases completed out of order: %s (expected %s)"
+            % (condition, " -> ".join(first), " -> ".join(expected)))
+    return warnings
 
 
 # --------------------------------------------------------------------------
