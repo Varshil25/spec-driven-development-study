@@ -762,3 +762,105 @@ class TestInstrumentExclusion:
         assert metrics["totals"]["lines_removed"] == 2
         assert metrics["totals"]["distinct_files_touched"] == 1
         assert metrics["per_phase"]["implement"]["files_touched"] == 1
+
+
+# ---------------------------------------------------------------------------
+# three-condition design (protocol v1.1)
+#
+# Added for the Weeks 5-7 study, which runs every task under unstructured,
+# sdd and sdd_clarify. The verification gate must recognise each condition's
+# required phases so that a mislabelled or incomplete run cannot slip into
+# the dataset unnoticed.
+# ---------------------------------------------------------------------------
+
+
+def _run_phases(repo, phases):
+    run_cli(repo, "capture-edits", "--label", "baseline")
+    for phase in phases:
+        run_cli(repo, "phase", phase, "--start")
+        run_cli(repo, "log-prompt", "--text", "do %s" % phase)
+        (repo / ("%s.txt" % phase)).write_text("work\n")
+        run_cli(repo, "phase", phase, "--end")
+    run_cli(repo, "run-end")
+    return run_cli(repo, "verify")
+
+
+SDD = ["constitution", "specify", "plan", "tasks", "implement"]
+SDD_CLARIFY = ["constitution", "specify", "clarify", "plan", "tasks", "implement"]
+
+CONDITION_WARNING_MARKERS = (
+    "missing completed phases",
+    "outside its condition",
+    "out of order",
+    "should be sdd_clarify",
+)
+
+
+def condition_warnings(stdout):
+    """Only the phase/condition warnings; synthetic runs also raise timing
+    warnings (no hook events), which are covered by TestPhaseTiming."""
+    return [line for line in stdout.splitlines()
+            if line.startswith("WARN") and any(m in line for m in CONDITION_WARNING_MARKERS)]
+
+
+class TestThreeConditions:
+    def test_sdd_clarify_is_an_accepted_condition(self, repo):
+        run_id = start_run(repo, condition="sdd_clarify")
+        manifest = json.loads((repo / "logs" / "runs" / run_id / "manifest.json").read_text())
+        assert manifest["condition"] == "sdd_clarify"
+
+    def test_clean_sdd_clarify_run_passes_without_phase_warnings(self, repo):
+        start_run(repo, condition="sdd_clarify")
+        proc = _run_phases(repo, SDD_CLARIFY)
+        assert proc.returncode == 0, proc.stdout
+        assert condition_warnings(proc.stdout) == []
+
+    def test_sdd_clarify_without_clarify_phase_warns(self, repo):
+        start_run(repo, condition="sdd_clarify")
+        proc = _run_phases(repo, SDD)
+        assert "SDD+clarify run missing completed phases: clarify" in proc.stdout
+
+    def test_sdd_run_containing_clarify_is_flagged_as_mislabelled(self, repo):
+        start_run(repo, condition="sdd")
+        proc = _run_phases(repo, SDD_CLARIFY)
+        assert "condition should be sdd_clarify" in proc.stdout
+
+    def test_clean_sdd_run_has_no_condition_warnings(self, repo):
+        start_run(repo, condition="sdd")
+        proc = _run_phases(repo, SDD)
+        assert proc.returncode == 0, proc.stdout
+        assert condition_warnings(proc.stdout) == []
+
+    def test_clarify_after_plan_is_out_of_order(self, repo):
+        start_run(repo, condition="sdd_clarify")
+        proc = _run_phases(
+            repo, ["constitution", "specify", "plan", "clarify", "tasks", "implement"])
+        assert "out of order" in proc.stdout
+
+    def test_unstructured_run_uses_only_the_implement_phase(self, repo):
+        start_run(repo, condition="unstructured")
+        proc = _run_phases(repo, ["implement"])
+        assert proc.returncode == 0, proc.stdout
+        assert condition_warnings(proc.stdout) == []
+
+    def test_unstructured_run_with_spec_phases_warns(self, repo):
+        start_run(repo, condition="unstructured")
+        proc = _run_phases(repo, ["specify", "implement"])
+        assert "unstructured run contains phases outside its condition: specify" in proc.stdout
+
+    def test_unknown_condition_still_rejected(self, repo):
+        proc = run_cli(repo, "run-start", "--task", "T", "--condition", "sdd-clarify",
+                       "--model", "m")
+        assert proc.returncode != 0
+
+    def test_preassigned_run_id_is_used_and_cannot_be_reused(self, repo):
+        """The schedule assigns run IDs up front so that runs done in separate
+        clones of the base repository never collide."""
+        proc = run_cli(repo, "run-start", "--task", "T", "--condition", "sdd",
+                       "--model", "m", "--run-id", "R007")
+        assert proc.stdout.strip() == "R007"
+        run_cli(repo, "run-end")
+        again = run_cli(repo, "run-start", "--task", "T", "--condition", "sdd",
+                        "--model", "m", "--run-id", "R007")
+        assert again.returncode != 0
+        assert "already exists" in again.stderr
