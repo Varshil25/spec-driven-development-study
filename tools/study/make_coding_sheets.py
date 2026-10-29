@@ -6,8 +6,10 @@ and the run's score file, ready for manual coding:
 
   coding/runs/<RUN>-traceability.csv   one row per stated and intent requirement
   coding/runs/<RUN>-security.csv       one row per failed security probe and
-                                       per Bandit finding; manual-review rows
-                                       are added by hand
+                                       per SAST finding (Bandit for Python
+                                       tasks, SpotBugs + FindSecBugs for the
+                                       Java tasks); manual-review rows are
+                                       added by hand
 
 Usage: python3 tools/study/make_coding_sheets.py R004 --score scores/R004.json
 The coding rules are in docs/PREREGISTRATION.md, section 7.
@@ -85,13 +87,15 @@ def main(argv=None):
                              "condition": run["condition"], "finding_id": "F%02d" % number,
                              "source": "probe:%s" % test["test"], "cwe": cwe_of.get(req_id, ""),
                              "notes": test["message"][:200]})
-        for finding in (score.get("sast") or {}).get("findings", []):
+        sast = score.get("sast") or {}
+        tool = "spotbugs" if str(sast.get("tool", "")).startswith("spotbugs") else "bandit"
+        for finding in sast.get("findings", []):
             number += 1
             writer.writerow({"run_id": args.run_id, "task_id": run["task_id"],
                              "condition": run["condition"], "finding_id": "F%02d" % number,
-                             "source": "bandit:%s" % finding["test_id"], "cwe": finding["cwe"] or "",
+                             "source": "%s:%s" % (tool, finding["test_id"]), "cwe": finding["cwe"] or "",
                              "location": "%s:%s" % (finding["file"], finding["line"]),
-                             "notes": "bandit severity %s: %s" % (finding["severity"], finding["message"])})
+                             "notes": "%s severity %s: %s" % (tool, finding["severity"], finding["message"])})
     print("wrote %s\nwrote %s" % (trace_path, sec_path))
     return 0
 
