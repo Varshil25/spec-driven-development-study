@@ -27,3 +27,34 @@ python3 tools/study/score_run.py --hash-only --heldout sealed/heldout
 
 OpenSSL asks for the passphrase. Then commit the unpacked `sealed/` folder,
 so the tests become public alongside the results they produced.
+
+## Java/Quarkus suite (`sealed-heldout-java-v1.zip.enc`)
+
+The Java extension (`docs/PREREGISTRATION-JAVA.md`) has its own sealed
+archive: 157 held-out test cases for T-QNOTES-01 and T-QIMPORT-01 under
+`heldout-java/`, the two Quarkus reference implementations (`reference-java/`),
+and the validation evidence (`validation-java/`). The folder names differ from
+the Python archive's, so both unpack side by side into `sealed/`. It is sealed the same way, with the author's passphrase,
+and its hashes go in section 9 of the addendum.
+
+**Sealing (author, once, after reviewing the suite and before R024):**
+
+```bash
+sha256sum sealed-heldout-java-v1.zip                     # -> addendum section 9
+openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 \
+    -in sealed-heldout-java-v1.zip -out sealed/sealed-heldout-java-v1.zip.enc
+sha256sum sealed/sealed-heldout-java-v1.zip.enc          # -> addendum section 9
+```
+
+Keep the plaintext zip outside every repository and every run directory.
+
+**Unsealing (after the last study run):**
+
+```bash
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
+    -in sealed/sealed-heldout-java-v1.zip.enc -out sealed-heldout-java-v1.zip
+sha256sum sealed-heldout-java-v1.zip      # must equal addendum section 9
+unzip -n sealed-heldout-java-v1.zip -d sealed/
+python3 tools/study/score_run.py --hash-only --heldout sealed/heldout-java
+                                          # must equal the tree hash in section 9
+```

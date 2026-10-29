@@ -17,6 +17,10 @@ its collected data. It contains:
   the task set, the scoring tools, and one practice comparison on a login task.
   The 15 study runs have not been carried out yet. See the
   [Weeks 5–9 report](docs/WEEKS-5-9-REPORT.md).
+- **Week 7:** a Java/Quarkus extension (2 tasks × 3 conditions = 6 more runs,
+  R024–R033), added before freezing and analysed separately from the Python
+  runs, and the [week-by-week plan to the Dec 5 report](docs/WEEKLY-PLAN.md).
+  See the [Java addendum](docs/PREREGISTRATION-JAVA.md).
 
 Study runs (R002 onwards) land in `logs/runs/` alongside the pilot run, under
 protocol 1.1.
@@ -32,6 +36,8 @@ published suites are the ones frozen before any data existed.
 
 | Path | What it is |
 | --- | --- |
+| [docs/WEEKLY-PLAN.md](docs/WEEKLY-PLAN.md) | **Plan.** Weeks 7–12, from now to the Dec 5 report: who does what each week, gates, and what gets cut first if time runs short |
+| [docs/PREREGISTRATION-JAVA.md](docs/PREREGISTRATION-JAVA.md) | **Deliverable.** Addendum for the Java/Quarkus extension: tasks, environment, prompts, measures, analysis, sealing record |
 | [docs/WEEKS-5-9-REPORT.md](docs/WEEKS-5-9-REPORT.md) | **Deliverable.** Weeks 5–9 progress report: study design, validation, practice comparison, revised schedule |
 | [docs/PREREGISTRATION.md](docs/PREREGISTRATION.md) | **Deliverable.** Design, conditions, fixed prompts, stopping rule, measures, rubrics, analysis plan, sealing record, deviations log |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Operator checklist for every study run |
@@ -39,13 +45,13 @@ published suites are the ones frozen before any data existed.
 | [docs/PILOT-REPORT.md](docs/PILOT-REPORT.md) | **Deliverable.** What the pilot run showed, and what it changed about the study design |
 | [tools/sddlog/sddlog.py](tools/sddlog/sddlog.py) | The instrument: run lifecycle, hook capture, git edit capture, transcript ingest, metrics, verification |
 | [tools/sddlog/tests/](tools/sddlog/tests/) | 67 tests covering redaction, event invariants, hook payloads, edit capture, metrics, verification, and the three study conditions |
-| [tools/study/](tools/study/) | Study tools: base-repository builder, stopping-rule checker, scorer, coding-sheet generator, schedule generator |
-| [tasks/](tasks/) | Task texts and stopping-rule examples: 5 study tasks, the pilot task T-SPLIT-01, and the practice task T-LOGIN-01 |
+| [tools/study/](tools/study/) | Study tools: base-repository builders (Python and Java), the Quarkus skeleton, stopping-rule checker, scorer (with Java build and SpotBugs support), coding-sheet generator, schedule generator |
+| [tasks/](tasks/) | Task texts and stopping-rule examples: 5 Python study tasks, 2 Java/Quarkus study tasks (T-QNOTES-01, T-QIMPORT-01), the pilot task T-SPLIT-01, the Java mechanics task T-QCOUNT-01, and the practice task T-LOGIN-01 |
 | [operator/answer-sheets/](operator/answer-sheets/) | Product-owner answers to each task's open points, and the rules for answering |
-| [prompts/](prompts/) | The fixed constitution and plan prompts, and what is typed in each phase |
+| [prompts/](prompts/) | The fixed constitution and plan prompts (Python and Java versions), and what is typed in each phase |
 | [schedule/](schedule/) | Counterbalanced run order (seed 20261023) and the run log |
 | [coding/](coding/) | Requirement register for the Part III traceability and security coding |
-| [sealed/](sealed/) | The sealed held-out suite for the five study tasks, encrypted until the last study run |
+| [sealed/](sealed/) | The sealed held-out suites (Python, and Java once sealed), encrypted until the last study run |
 | [practice/T-LOGIN-01/](practice/T-LOGIN-01/) | Practice comparison, excluded from analysis: both builds, their scores, and the task's held-out tests |
 | [specs/001-expense-splitter/](specs/001-expense-splitter/) | Spec Kit artifacts produced by the pilot run |
 | [.specify/memory/constitution.md](.specify/memory/constitution.md) | Project constitution produced by `/speckit-constitution` in the pilot |

@@ -14,6 +14,17 @@ Usage:
       --heldout ../sealed/heldout --out scores/R004.json
   python3 tools/study/score_run.py --hash-only --heldout ../sealed/heldout
 
+Java/Quarkus runs (a pom.xml at the repository root) are scored the same way
+against the Java suites (`--heldout sealed/heldout-java`), with three
+differences:
+  * the repository is built once first (`./mvnw -q -B -DskipTests clean
+    package`); a failed build scores 0 on every tier;
+  * source size counts .java lines (product under src/main, tests under
+    src/test);
+  * `--sast` runs SpotBugs with the FindSecBugs plugin over the compiled
+    classes (`--spotbugs-lib tools/study/java-sast/lib`, fetched by
+    tools/study/java-sast/fetch.sh) and keeps the SECURITY category only.
+
 Standard library only, apart from pytest itself (needed to run the suites).
 """
 
@@ -26,6 +37,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -33,6 +45,10 @@ TIERS = [("stated", "test_stated.py"), ("intent", "test_intent.py"), ("security"
 TIER_TIMEOUT = 900  # seconds per tier; a hung SUT is killed by the per-test timeouts first
 # Paths in a run's repository that are not the agent's product code.
 SAST_EXCLUDES = ["tests", "test", "logs", "tools", ".specify", ".claude", "specs", ".venv", "venv"]
+JAVA_BUILD_TIMEOUT = 1200
+JAVA_JAR = Path("target") / "quarkus-app" / "quarkus-run.jar"
+JAVA_SAST_CATEGORIES = ["SECURITY"]
+JAVA_SKIP_DIRS = {"target", "logs", "tools", "specs", "node_modules"}
 
 
 def tree_hash(root):
@@ -92,6 +108,143 @@ def code_size(repo):
             "product_files": files["product"], "test_files": files["test"]}
 
 
+def java_sloc(path):
+    """Non-blank lines that are not wholly comments (// and /* ... */)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return 0
+    count, in_block = 0, False
+    for raw in text.splitlines():
+        line = raw.strip()
+        while line:
+            if in_block:
+                end = line.find("*/")
+                if end < 0:
+                    line = ""
+                    break
+                line = line[end + 2:].strip()
+                in_block = False
+                continue
+            if line.startswith("//"):
+                line = ""
+            elif line.startswith("/*"):
+                in_block = True
+                line = line[2:]
+                continue
+            break
+        if line:
+            count += 1
+    return count
+
+
+def java_code_size(repo):
+    """Product vs. test Java source size in the run's final repository state."""
+    product = tests = 0
+    files = {"product": 0, "test": 0}
+    for path in repo.rglob("*.java"):
+        parts = path.relative_to(repo).parts
+        if any(p.startswith(".") or p in JAVA_SKIP_DIRS for p in parts[:-1]):
+            continue
+        is_test = "test" in parts[:-1] and "src" in parts[:-1] or parts[-1].endswith(("Test.java", "IT.java"))
+        if is_test:
+            tests += java_sloc(path)
+            files["test"] += 1
+        else:
+            product += java_sloc(path)
+            files["product"] += 1
+    return {"product_sloc": product, "test_sloc": tests,
+            "product_files": files["product"], "test_files": files["test"]}
+
+
+def is_java(repo):
+    return (repo / "pom.xml").is_file()
+
+
+def java_version(java):
+    try:
+        out = subprocess.run([java, "-version"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    lines = [l for l in (out.stderr + out.stdout).splitlines() if "version" in l]
+    return lines[0].strip() if lines else None
+
+
+def build_java(repo):
+    """One clean build per scored run; every tier then tests the same artefact."""
+    wrapper = repo / "mvnw"
+    command, shown = (["sh", str(wrapper)], "./mvnw") if wrapper.is_file() else (["mvn"], "mvn")
+    args = ["-q", "-B", "-DskipTests", "clean", "package"]
+    started = time.time()
+    try:
+        proc = subprocess.run(command + args, cwd=str(repo), capture_output=True, text=True,
+                              timeout=JAVA_BUILD_TIMEOUT)
+        code, output = proc.returncode, proc.stdout + proc.stderr
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        code, output = None, str(exc)
+    ok = code == 0 and (repo / JAVA_JAR).is_file()
+    errors = [l.strip() for l in output.splitlines() if l.strip().startswith("[ERROR]")]
+    return {"ok": ok, "command": "%s %s" % (shown, " ".join(args)), "exit": code,
+            "seconds": round(time.time() - started, 1),
+            "error": None if ok else (errors[0] if errors else output.strip()[-500:])}
+
+
+def collected(heldout, task, filename):
+    """Number of test cases in a tier (used when a build failure means none can run)."""
+    proc = subprocess.run([sys.executable, "-m", "pytest", str(Path(heldout) / task / filename),
+                           "--collect-only", "-q"], cwd=str(heldout), capture_output=True, text=True)
+    return sum(1 for line in proc.stdout.splitlines() if "::" in line)
+
+
+def run_spotbugs(repo, lib_dir, java):
+    """SpotBugs + FindSecBugs over the run's compiled product classes (pre-registered Java SAST)."""
+    lib = Path(lib_dir) if lib_dir else None
+    if not lib or not lib.is_dir():
+        return {"error": "no SpotBugs jars at %s (run tools/study/java-sast/fetch.sh)" % lib_dir}
+    jars = sorted(lib.glob("*.jar"))
+    plugins = [j for j in jars if j.name.startswith("findsecbugs-plugin-")]
+    engine = [j for j in jars if j.name.startswith("spotbugs-")]
+    if not plugins or not engine:
+        return {"error": "SpotBugs or FindSecBugs jar missing from %s" % lib}
+    classes = repo / "target" / "classes"
+    if not classes.is_dir():
+        return {"error": "no compiled classes at %s" % classes}
+    aux = sorted((repo / "target" / "quarkus-app" / "lib" / "main").glob("*.jar"))
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "spotbugs.xml"
+        cmd = [java, "-cp", os.pathsep.join(str(j) for j in jars if j not in plugins),
+               "edu.umd.cs.findbugs.FindBugs2", "-xml:withMessages", "-output", str(out),
+               "-effort:max", "-low", "-pluginList", str(plugins[0])]
+        if aux:
+            cmd += ["-auxclasspath", os.pathsep.join(str(j) for j in aux)]
+        cmd.append(str(classes))
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"error": str(exc)}
+        if not out.is_file():
+            return {"error": (proc.stderr or proc.stdout)[-1000:] or "SpotBugs wrote no report"}
+        root = ET.parse(out).getroot()
+    severity = {"1": "HIGH", "2": "MEDIUM", "3": "LOW"}
+    findings = []
+    for bug in root.iter("BugInstance"):
+        if bug.get("category") not in JAVA_SAST_CATEGORIES:
+            continue
+        line = bug.find("SourceLine")
+        cwe = bug.get("cweid")
+        findings.append({
+            "test_id": bug.get("type"),
+            "severity": severity.get(bug.get("priority"), bug.get("priority")),
+            "confidence": bug.get("rank"),
+            "cwe": "CWE-%s" % cwe if cwe and cwe != "0" else None,
+            "file": line.get("sourcepath") if line is not None else None,
+            "line": line.get("start") if line is not None else None,
+            "message": (bug.findtext("ShortMessage") or "").strip(),
+        })
+    return {"tool": "spotbugs+findsecbugs", "version": root.get("version"),
+            "plugin": plugins[0].name, "categories": JAVA_SAST_CATEGORIES, "findings": findings}
+
+
 def interpreter_version(python):
     out = subprocess.run([python, "-c", "import sys; print(sys.version.split()[0])"],
                          capture_output=True, text=True)
@@ -116,11 +269,11 @@ def parse_junit(path):
     return tests
 
 
-def run_tier(heldout, task, filename, repo, python):
+def run_tier(heldout, task, filename, repo, python, java="java"):
     suite = Path(heldout) / task / filename
     with tempfile.TemporaryDirectory() as tmp:
         xml_path = Path(tmp) / "junit.xml"
-        env = dict(os.environ, SUT_REPO=str(repo), SUT_PYTHON=python)
+        env = dict(os.environ, SUT_REPO=str(repo), SUT_PYTHON=python, SUT_JAVA=java)
         cmd = [sys.executable, "-m", "pytest", str(suite), "-q", "-rN",
                "--junitxml", str(xml_path), "-o", "junit_family=xunit2"]
         try:
@@ -183,7 +336,10 @@ def main(argv=None):
                         help="interpreter used to run the SUT (pre-registered: 3.13.x)")
     parser.add_argument("--hash-only", action="store_true", help="print the suite's tree hash and exit")
     parser.add_argument("--sast", action="store_true",
-                        help="also run Bandit over the product code and record its findings")
+                        help="also run static analysis (Bandit, or SpotBugs for Java runs) and record its findings")
+    parser.add_argument("--java", default="java", help="java launcher for Java runs (default: java)")
+    parser.add_argument("--spotbugs-lib", default=str(Path(__file__).resolve().parent / "java-sast" / "lib"),
+                        help="directory holding the SpotBugs and FindSecBugs jars (Java runs)")
     args = parser.parse_args(argv)
 
     heldout = Path(args.heldout).resolve()
@@ -196,20 +352,35 @@ def main(argv=None):
         parser.error("no held-out suite for %s under %s" % (args.task, heldout))
 
     repo = Path(args.repo).resolve()
+    java = is_java(repo)
     result = {
         "run_id": args.run_id,
         "task_id": args.task,
         "repo": str(repo),
         "scored_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "heldout_tree_sha256": tree_hash(heldout),
-        "sut_python": interpreter_version(args.python),
-        "code_size": code_size(repo),
+        "sut_python": None if java else interpreter_version(args.python),
+        "code_size": java_code_size(repo) if java else code_size(repo),
         "tiers": {},
     }
+    if java:
+        result["sut_java"] = java_version(args.java)
+        result["build"] = build_java(repo)
     for tier, filename in TIERS:
-        result["tiers"][tier] = run_tier(heldout, args.task, filename, repo, args.python)
+        if java and not result["build"]["ok"]:
+            total = collected(heldout, args.task, filename)
+            result["tiers"][tier] = {"passed": 0, "total": total, "skipped": 0,
+                                     "pass_rate": 0.0 if total else None,
+                                     "harness_note": "build failed; every test counts as failed",
+                                     "tests": []}
+            continue
+        result["tiers"][tier] = run_tier(heldout, args.task, filename, repo, args.python, args.java)
     if args.sast:
-        result["sast"] = run_bandit(repo)
+        if java:
+            result["sast"] = (run_spotbugs(repo, args.spotbugs_lib, args.java) if result["build"]["ok"]
+                              else {"error": "build failed; nothing to analyse"})
+        else:
+            result["sast"] = run_bandit(repo)
 
     text = json.dumps(result, indent=2) + "\n"
     if args.out:
@@ -217,8 +388,13 @@ def main(argv=None):
         Path(args.out).write_text(text)
     width = max(len(t) for t, _ in TIERS)
     size = result["code_size"]
-    print("%s  %s  (python %s; %d product / %d test lines)" % (
-        args.run_id or "-", args.task, result["sut_python"], size["product_sloc"], size["test_sloc"]))
+    runtime = ("java %s" % result.get("sut_java")) if java else ("python %s" % result["sut_python"])
+    print("%s  %s  (%s; %d product / %d test lines)" % (
+        args.run_id or "-", args.task, runtime, size["product_sloc"], size["test_sloc"]))
+    if java:
+        build = result["build"]
+        print("  build     %s in %ss%s" % ("ok" if build["ok"] else "FAILED", build["seconds"],
+                                          "" if build["ok"] else ": %s" % (build["error"] or "")[:200]))
     for tier, _ in TIERS:
         data = result["tiers"][tier]
         rate = "-" if data["pass_rate"] is None else "%.0f%%" % (100 * data["pass_rate"])
@@ -232,7 +408,8 @@ def main(argv=None):
         if "error" in sast:
             print("  sast      ERROR: %s" % sast["error"][:200])
         else:
-            print("  sast      %d Bandit finding(s)" % len(sast["findings"]))
+            print("  sast      %d %s finding(s)" % (len(sast["findings"]),
+                                            "SpotBugs" if java else "Bandit"))
             for f in sast["findings"]:
                 print("      ! %s %s %s %s:%s" % (f["test_id"], f["severity"], f["cwe"], f["file"], f["line"]))
     return 0

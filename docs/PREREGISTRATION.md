@@ -276,6 +276,16 @@ Otherwise the result is **"no consistent difference"**. Minimum differences: pas
 | --- | --- | --- | --- | --- |
 | | | | | |
 
+## 13. Java/Quarkus extension (added in Week 7, before freezing)
+
+Two Java 21/Quarkus tasks (T-QNOTES-01, T-QIMPORT-01) are added under all three
+conditions as runs R026–R031, with mechanics checks R024–R025 on T-QCOUNT-01 and
+spare IDs R032–R033. Their design, prompts, measures and sealing record are in
+`PREREGISTRATION-JAVA.md`. They are analysed separately and are **never pooled**
+into the comparisons in section 8, which stay exactly as registered above. The
+Python rows of `schedule/schedule.csv` are unchanged: the Java draw uses its own
+random stream, and Java runs follow each Python round.
+
 ---
 
 ## Appendix A. Validation of the held-out suites (before freezing)

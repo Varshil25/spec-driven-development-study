@@ -172,3 +172,62 @@ Every one of these also goes into the deviations log, section 12 of `PREREGISTRA
    ```bash
    python3 $KIT/tools/study/make_coding_sheets.py $RUN --score $PILOT/scores/$RUN.json
    ```
+
+---
+
+## 7. Java/Quarkus runs (R024–R033)
+
+Everything above applies, with these differences. The design is in
+`PREREGISTRATION-JAVA.md`.
+
+**7.0 One-time setup (before R024).**
+
+1. Install a Java 21 JDK and check `java -version`. Record the full version in
+   section 9 of `PREREGISTRATION-JAVA.md`, and keep it for every Java run and for scoring.
+2. Build the Java base next to the Python one:
+   ```bash
+   bash $KIT/tools/study/make_base_java.sh $PILOT $KIT ~/sdd-study/base-java
+   (cd ~/sdd-study/base-java && ./mvnw -q -B -DskipTests package && ls target/quarkus-app/quarkus-run.jar)
+   (cd ~/sdd-study/base-java && git clean -qfdx)    # remove the test build output again
+   ```
+   Record the printed `base-java-v1` commit in section 9 of `PREREGISTRATION-JAVA.md`.
+   The first build downloads Maven and Quarkus into `~/.m2`; later builds reuse that cache.
+3. Fetch the static-analysis jars used in scoring: `bash $KIT/tools/study/java-sast/fetch.sh`.
+
+**7.1 Start a run.** As in step 1, but clone the Java base and check out its tag:
+```bash
+RUN=R026 TASK=T-QNOTES-01 COND=unstructured     # from the schedule
+git clone -q ~/sdd-study/base-java ~/sdd-study/runs/$RUN
+cd ~/sdd-study/runs/$RUN
+git checkout -q -b run/$RUN base-java-v1
+```
+The Spec Kit setup commit (SDD conditions) and `run-start` are exactly as in step 1.
+Add the JDK to the environment note:
+`$L note --text "env: claude $(claude --version) | $(specify --version 2>/dev/null || echo 'no spec kit') | $(java -version 2>&1 | head -1) | permission mode: <same as R001>"`
+
+**7.2 Prompts.** In the SDD conditions, send `prompts/constitution-java.txt` and
+`prompts/plan-java.txt` instead of the Python versions. Every other message is
+as in steps 2a, 2b and 3 (the task's `prompt.md`, `/speckit-*` commands, checker
+follow-ups, answer-sheet replies, `Yes, go ahead.`).
+
+**7.3 Stopping rule.** Run the checker exactly as before:
+```bash
+python3 $KIT/tools/study/check_examples.py $TASK --repo .
+```
+For a Quarkus task it first builds the repository (`./mvnw -q -B -DskipTests clean package`,
+up to a few minutes) and then starts the service on a free port. A failed build
+prints a follow-up starting "the build failed"; paste it verbatim like any other.
+The caps (5 follow-ups, 90 minutes) are unchanged.
+
+**7.4 Close and archive.** As in step 4. `target/` is git-ignored, so it is not
+in the bundle; Part III rebuilds every run from its committed sources.
+
+**7.5 Scoring (Part III).** Unseal `sealed-heldout-java-v1.zip.enc` the same way
+as the Python archive (`sealed/README.md`), then:
+```bash
+python3.13 $KIT/tools/study/score_run.py --task $TASK --repo ~/sdd-study/runs/$RUN \
+    --run-id $RUN --heldout sealed/heldout-java --sast --out $PILOT/scores/$RUN.json
+python3 $KIT/tools/study/make_coding_sheets.py $RUN --score $PILOT/scores/$RUN.json
+```
+The scorer runs `./mvnw -q -B -DskipTests clean package` once, then the three
+tiers, then SpotBugs + FindSecBugs over `target/classes`.
