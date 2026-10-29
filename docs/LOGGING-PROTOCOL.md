@@ -1,9 +1,9 @@
 # Logging Protocol
 
 **Study**: Evaluating and Extending Spec-Driven Development (Parts II–III)
-**Protocol version**: 1.1
-**Status**: 1.0 ratified at Milestone 2; 1.1 governs data collection in Weeks 5–7
-**Instrument**: `tools/sddlog/sddlog.py` (stdlib-only Python, 67 automated tests)
+**Protocol version**: 1.2
+**Status**: 1.0 ratified at Milestone 2; 1.2 governs data collection from Week 7
+**Instrument**: `tools/sddlog/sddlog.py` (stdlib-only Python, 73 automated tests)
 
 ---
 
@@ -54,7 +54,7 @@ misconfiguration can silently produce an empty or misleading dataset entry.
 | --- | --- | --- | --- | --- |
 | 1 | Agent hooks | Claude Code `SessionStart` / `UserPromptSubmit` / `PostToolUse` / `Stop` → `sddlog hook` | Prompt text, tool calls, per-edit line deltas, session boundaries | Primary for **prompts** and **turns** |
 | 2 | Git phase capture | `sddlog phase … --end` → `git add -A` + commit + `git diff --numstat` | Files changed, lines added/removed, full unified diffs | **Authoritative** for edits |
-| 3 | Transcript ingest | `sddlog ingest-transcript` over the agent's session JSONL | Prompts and full agent outputs | Backfill / recovery only |
+| 3 | Transcript read | Every `Stop` hook reads the session JSONL named in its payload (`transcript_path`), plus `<session>/subagents/*.jsonl`; `sddlog ingest-transcript` does the same after the fact | Token usage per model message; prompts and full agent outputs (ingest) | **Only source of token counts**; backfill / recovery for text |
 
 **Why three.** Path 1 is real-time but depends on hook configuration and only
 sees line deltas the tool call itself reports. Path 2 cannot see individual
@@ -62,6 +62,10 @@ turns but is exact about what changed on disk. Path 3 is the richest record of
 agent *output* text but is written in a format controlled by the agent host,
 so it is treated as secondary evidence. Path 3 deduplicates against paths 1–2
 by SHA-256 of the message text, so backfilling never double-counts a turn.
+Token usage is deduplicated by API message id: Claude Code writes one line per
+content block, so the same message repeats in the transcript, and a resumed
+session can repeat earlier messages. Each message is credited to the phase whose
+window contains its timestamp.
 
 ## 4. Storage layout
 
@@ -123,6 +127,7 @@ payload change, so `schema_version` stays `1.0.0`.
 | `run_start` / `run_end` | `run-start` / `run-end` | `task_id`, `condition`, `model`; `status` |
 | `phase_start` / `phase_end` | `phase … --start/--end` | `phase` |
 | `prompt` | Hook, transcript, or `log-prompt` | `text`, `chars`, `words`, `sha256`, `source` |
+| `token_usage` | `Stop` hook or `ingest-transcript` (1.2) | the four token fields, `messages`, `subagent_messages`, `models`, `message_ids`, `source: transcript_usage` |
 | `agent_output` | Transcript or `log-output` | `text`, `chars`, `words`, `sha256`, `model` |
 | `file_edit` | Hook (per edit) or git capture (per phase) | `path`, `lines_added`, `lines_removed`, `capture_label`, `base_commit`, `head_commit`, `diff_file` |
 | `tool_call` | Hook | `tool`, `args_summary`, `ok` |
@@ -174,7 +179,7 @@ implements.
 ### 7.1 Before any run
 
 1. The run's clone is fresh from the base repository, on the starting commit (plus the Spec Kit setup commit for SDD conditions), with a clean working tree.
-2. `python3 -m pytest tools/sddlog/tests/ -q` passes (67 tests).
+2. `python3 -m pytest tools/sddlog/tests/ -q` passes (73 tests).
 3. `.claude/settings.json` hooks present.
 
 ### 7.2 SDD conditions (`sdd`, `sdd_clarify`)
@@ -265,7 +270,7 @@ data beyond the single operator's own prompts.
 
 1. **Hook line deltas are approximations.** They are computed from the tool call's own strings, not from disk. Git capture is authoritative; the two will disagree and that is expected.
 2. **Wall-clock timing depends on operator discipline.** Mitigated, not eliminated, by `active_seconds` and idle flagging.
-3. **Agent-internal behaviour is invisible.** Reasoning tokens, retries, and context management are not observable through hooks.
+3. **Agent-internal behaviour is mostly invisible.** Retries and context management are not observable through hooks. Token counts are read from the transcript's per-message usage records (path 3), so they depend on the host's transcript format; `verify` warns when an agent phase has no token usage.
 4. **The transcript format is host-controlled.** A Claude Code update could change it; ingestion is therefore a recovery path, never the primary one. Backfilled events are also stamped with the *ingest* time, not the original turn time (the original is preserved in `payload.transcript_ts`), which is why they are excluded from timing.
 5. **Single operator, single agent.** Within-subject design; no inter-rater reliability is available for the capture step itself.
 6. **`turns` counts human prompts only.** A long autonomous agent run counts as one turn regardless of internal work, which understates agent effort and is the intended reading for RQ3 (human cost).
@@ -290,6 +295,12 @@ Valid conditions: `unstructured`, `sdd`, `sdd_clarify`. Valid phases:
 `constitution`, `specify`, `clarify`, `plan`, `tasks`, `analyze`, `implement`.
 
 ## 12. Changelog
+
+**1.2 (Week 7)**: before the pre-registration is frozen and before any study run.
+
+- Token usage: every `Stop` hook reads per-message usage (`input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`) from the session transcript and its subagent transcripts, and records new messages in a `token_usage` event. Messages are deduplicated by message id and credited to the phase that contains their timestamp. `metrics.json` reports tokens per phase and in totals (`input_tokens_all`, `output_tokens`, `model_messages`); `verify` warns when an agent phase has none.
+- The `PostToolUse` hook now also matches `Agent` and `Skill`, so subagent launches and skill invocations appear in the tool-call log (`Task` stays for older Claude Code versions).
+- Six new tests (73 in total).
 
 **1.1 (Weeks 5–7)**: prepared for the controlled study, before any study run.
 

@@ -14,6 +14,7 @@ them exactly. Nothing else is typed into the agent during a run.
 | implement | sdd, sdd_clarify | `/speckit-implement` |
 | implement | unstructured | the task's `prompt.md`, as one message |
 | any | all | follow-ups printed by `check_examples.py`; answers from the answer sheet; `Yes, go ahead.` for permission-to-proceed questions |
+| any | all | `Please continue from where you stopped.` only when resuming a session that stopped mid-turn (usage limit, crash, outage); log `RESUME: <reason>` |
 
 The constitution prompt is generic and identical for every task. It does not
 mention security, and it has no "deterministic output" principle (which

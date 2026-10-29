@@ -1,8 +1,8 @@
 # Pre-registration: Weeks 5–7 controlled comparison
 
 **Study**: Evaluating and Extending Spec-Driven Development (Parts II–III)
-**Covers**: data collection (Weeks 5–7) and its analysis (Weeks 8–11, RQ1–RQ4)
-**Instrument**: `sddlog` 1.1 · logging protocol 1.1 · Spec Kit 1.0.6 · Claude Code
+**Covers**: data collection (Weeks 8–10) and its analysis (Week 11, RQ1–RQ4); schedule in `WEEKLY-PLAN.md`
+**Instrument**: `sddlog` 1.2 · logging protocol 1.2 · Spec Kit 1.0.6 · Claude Code
 **Status**: frozen at the `$PILOT` commit that adds this file, before run R004
 **Sealed held-out suite**: see section 11 for the hashes
 
@@ -21,14 +21,46 @@ whole procedure.
 Anything changed after freezing is recorded in the deviations log
 (section 12) with the date and reason, and the analysis reports it.
 
+**Changes made in Week 7, before freezing.** A check of the draft registered
+report against this document found gaps, now closed:
+
+- The research questions are stated in full, RQ4 is split into RQ4a–c, and the expected directions (H1a–H4c) are registered (section 2).
+- The primary time measure is `active_seconds`, with the reliable-phases-only total as a check (section 7.4).
+- Token usage is measured, from the session transcripts (section 7.4; `sddlog` 1.2).
+- What counts as a question is defined (section 6.2), and interrupted sessions get one fixed resume message (section 6.1).
+- Constitution principles are coded with fixed checks (section 7.7), and coding reliability is checked by re-coding (section 7.3).
+
 ## 2. Research questions and measures
+
+- **RQ1 (outcomes).** Does an SDD workflow change the functional correctness and security of an agent's code, compared with plain prompting of the same agent on the same task?
+- **RQ2 (traceability).** Does an SDD workflow change how far the agent's code and tests can be traced to individual requirements?
+- **RQ3 (effort).** How do agent time, tokens and human turns differ between workflows, where in the SDD workflow is the effort spent, and how does this change with task size?
+- **RQ4 (which stages matter: behaviour under specifications).**
+  - **RQ4a, open requirements:** when a requirement is left open, does the agent ask, or decide for itself? Does Spec Kit's clarification stage change this, and the resulting code?
+  - **RQ4b, specification evolution:** when implementation reveals a problem, does the agent revise the specification or only the code?
+  - **RQ4c, principle adherence:** are the constitution's principles visible in the final code?
 
 | RQ | Primary measure | Secondary measures | Source |
 | --- | --- | --- | --- |
-| **RQ1** correctness and defects | Tier A (stated) held-out pass rate | Tier C (security) probe pass rate; confirmed security findings by severity (probes + Bandit + manual review) | `score_run.py`; security coding sheet |
-| **RQ2** traceability | Traceability coverage: mean requirement score (0–2), divided by 2 | Explicit-link rate: share of requirements whose code or tests cite a requirement or spec ID | traceability coding sheet |
-| **RQ3** time and effort | Active time (`active_seconds_reliable_phases_only`); human turns | Human prompt words; share of active time spent before `implement` (SDD conditions); artifact words; product and test source lines; change of each with task complexity | `sddlog` metrics; `score_run.py` |
-| **RQ4** which stages matter | Tier B (intent) pass rate, `sdd_clarify` vs. `sdd` | Questions asked and answer-sheet entries elicited; spec revisions after `plan`; constitution principles visible in code | `sddlog` notes and snapshots; scores; coding |
+| **RQ1** | Tier A (stated) held-out pass rate | Tier C (security) probe pass rate; confirmed security findings by severity (probes + Bandit + manual review) | `score_run.py`; security coding sheet |
+| **RQ2** | Traceability coverage: mean requirement score (0–2), divided by 2 | Explicit-link rate: share of requirements whose code or tests cite a requirement or spec ID | traceability coding sheet |
+| **RQ3** | Active time (`totals.active_seconds`, section 7.4); human turns | Tokens (output tokens; all input tokens); active time with late-closed phases left out (`active_seconds_reliable_phases_only`); human prompt words; share of active time spent before `implement` (SDD conditions); artifact words; product and test source lines; change of each with task complexity | `sddlog` metrics; `score_run.py` |
+| **RQ4a** | Tier B (intent) pass rate, `sdd_clarify` vs. `sdd` | Questions asked (section 6.2); answer-sheet entries elicited; fallback replies given; clarification markers left unasked | `sddlog` notes and snapshots; scores |
+| **RQ4b** | Post-plan revisions of upstream artifacts (section 7.5) | Spec edits made during `clarify` | `sddlog` snapshots |
+| **RQ4c** | Constitution principles met in the final code (section 7.7) | — | principles sheet |
+
+**Expected directions.** Registered now, informed by the pilot runs (R001, and the excluded practice runs D001/D002), so that the results can be read against them. They do not change the decision rule (section 8.4).
+
+| | Expectation | Basis |
+| --- | --- | --- |
+| H1a | No consistent difference in stated behaviour (tier A) between conditions | Every condition must meet the same stopping rule, and plausible naive code already passes 96–100% of tier A (Appendix A) |
+| H1b | No directional prediction for security (tier C) | The practice runs showed no difference, but their task text mentioned security and the study tasks do not |
+| H2 | SDD runs score higher on traceability than unstructured runs | The practice SDD build cited a requirement in every test function, the unstructured build in none. Partly built in: the constitution prompt asks for testable requirements and the plan prompt for pytest |
+| H3a | SDD runs cost at least 1.25 times the active time and human turns of unstructured runs | The practice SDD build took about 7 times the agent time |
+| H3b | In every SDD run, most active time is spent before implementation | 74% (R001) and 82% (D002) |
+| H4a | `sdd_clarify` resolves more open points as the product owner intended (tier B) than `sdd` | The practice SDD build's only extra correct point came from a question it asked |
+| H4b | Without a clarification stage, agents resolve most open points by assumption rather than by asking | Two of the three pilot and practice runs asked nothing |
+| H4c | Upstream artifacts are rarely revised after planning | No pilot or practice run revised any upstream artifact |
 
 ## 3. Design
 
@@ -117,9 +149,13 @@ Every message the operator sends is fixed in advance (`prompts/`):
 
 The full checklist is `RUNBOOK.md`.
 
-**6.1 What the operator may type.** Only the messages in section 5, the follow-ups printed by the stopping-rule checker, replies from the answer sheet, and `Yes, go ahead.` in reply to a request for permission to continue. Nothing else.
+**6.1 What the operator may type.** Only the messages in section 5, the follow-ups printed by the stopping-rule checker, replies from the answer sheet, `Yes, go ahead.` in reply to a request for permission to continue, and the resume message below. Nothing else.
 
-**6.2 Answering the agent's questions** (`operator/answer-sheets/README.md`). The same rules apply in every condition:
+**Resuming an interrupted session.** If a session stops before the agent has finished its turn (usage limit, crash, network outage) and the same session can be resumed, the operator resumes it and sends exactly `Please continue from where you stopped.`, then logs `note --text "RESUME: <reason>"`. `sddlog` records it as a human turn; each run's resumes are reported, and RQ3's turn counts are also given without them. Interruptions that cannot be resumed follow section 9.
+
+**6.2 Answering the agent's questions** (`operator/answer-sheets/README.md`). The same rules apply in every condition.
+
+**What counts as a question.** An agent turn counts as a question when it ends by asking the operator for information or for a decision, including clarification markers or `/speckit-clarify` questions that it puts to the operator. A list of assumptions, decisions or review items that asks for nothing is not a question: it gets no reply and is logged as `note --text "LISTED: <what was listed>"`. A request for permission to continue is not a question either (rule 7 of the answer-sheet rules). `[NEEDS CLARIFICATION]` markers left in `spec.md` without being put to the operator are counted separately, from the snapshots, as unasked markers.
 
 - Answer only what is asked, and never volunteer.
 - Reply with the covering entry's answer verbatim.
@@ -189,9 +225,13 @@ Manual-review checklist, covering what the probes cannot see:
 
 The coder cannot be blind to condition, because `specs/` reveals it. To limit drift, all runs of one task are coded in one sitting, in an order drawn with seed 20261023.
 
+**Coding reliability.** A random 30% of traceability rows (seed 20261023) is re-coded by the same coder at least 5 days after first coding, without looking at the first codes. Cohen's κ (weighted, for the 0–2 score) is reported. There is no second coder.
+
 **7.4 Time and effort (RQ3).** These are taken from each run's `metrics.json`:
 
-- primary measure: `totals.active_seconds_reliable_phases_only`; also `active_seconds`;
+- primary measure: `totals.active_seconds`, the sum over phases of the time from each phase's start to its last hook-observed agent activity, so a late phase-end marker adds nothing;
+- check: `totals.active_seconds_reliable_phases_only`, which leaves out any phase flagged unreliable (end marker more than 300 s after the last activity, no hook events, or never closed). *Changed before freezing:* this was the primary measure in the draft, but it drops a whole phase's real work when only its end marker was late. In R001 it dropped the 16-minute plan phase, and the share of time before `implement` fell from 74% to about 42%. Because SDD runs have five or six phases and unstructured runs one, it would bias the comparison against SDD;
+- tokens, from the session transcripts' per-message usage records, including subagents (`sddlog` 1.2): output tokens, and all input tokens (fresh, cache-write and cache-read). Each API message is counted once;
 - human turns (`human_prompts`) and human prompt words;
 - per-phase active time;
 - for the SDD conditions, the share of active time before `implement`;
@@ -200,7 +240,17 @@ The coder cannot be blind to condition, because `specs/` reveals it. To limit dr
 
 **7.5 Spec revisions (RQ4, "fix the spec, not the output").** For each artifact, revisions = the number of distinct snapshot hashes after the phase that created it, minus 1. Changes to `spec.md` *during* `clarify` are counted separately as clarify edits. The key measure is **post-plan revisions**: changes to `spec.md`, `plan.md`, `data-model.md` or the constitution during `tasks` or `implement`. Changes to `tasks.md` that only tick checkboxes are not revisions.
 
-**7.6 Questions (RQ4).** For each run, from the `ANSWER` notes: questions asked, answer-sheet entries elicited, and fallback replies given. This is reported for every condition, since agents may also ask questions without `/speckit-clarify`.
+**7.6 Questions (RQ4a).** For each run, from the `ANSWER` and `LISTED` notes: questions asked (section 6.2), answer-sheet entries elicited, fallback replies given, and assumption lists given without a question. Unasked clarification markers come from the `spec.md` snapshots. This is reported for every condition, since agents may also ask questions without `/speckit-clarify`.
+
+**7.7 Constitution principles (RQ4c).** Three of the four fixed principles can be checked in code, in every condition (the principles are the same for all, even though only the SDD conditions are told them):
+
+| Principle | Met when |
+| --- | --- |
+| Standard library only | Product code imports nothing outside the Python standard library (tests may import `pytest`) |
+| Fail loudly | No exception handler in product code swallows an error: every `except` re-raises, exits non-zero, or writes a message to stderr |
+| Every requirement testable | At least 80% of stated requirements score 2 in the traceability coding (an agent-written test exercises them) |
+
+"Simplicity" has no objective check and is not coded. The measure is the number of principles met (0–3), reported per run; the coder records the evidence for each.
 
 ## 8. Analysis plan
 
@@ -214,7 +264,11 @@ The coder cannot be blind to condition, because `specs/` reveals it. To limit dr
 | P2 | RQ1 | Tier C pass rate; confirmed findings (count; High+Medium count) | `sdd` vs `unstructured` |
 | P3 | RQ2 | Traceability coverage; explicit-link rate | `sdd` vs `unstructured` |
 | P4 | RQ3 | Active time; turns; scaling with complexity | `sdd` vs `unstructured` |
-| P5 | RQ4 | Tier B intent pass rate | `sdd_clarify` vs `sdd` |
+| P5 | RQ4a | Tier B intent pass rate | `sdd_clarify` vs `sdd` |
+| P6 | RQ4b | Post-plan revisions | `sdd_clarify` and `sdd` only (descriptive) |
+| P7 | RQ4c | Principles met (0–3) | all conditions (descriptive) |
+
+P6 and P7 are counts that are expected to be small, so they are reported run by run and the decision rule (section 8.4) is not applied to them.
 
 **8.3 Statistics.** Report per-task paired differences, their median, and the matched-pairs rank-biserial correlation.
 
@@ -227,7 +281,7 @@ The coder cannot be blind to condition, because `specs/` reveals it. To limit dr
 - it has the same direction in at least 4 of the 5 tasks (ties count against);
 - the median paired difference reaches the minimum below.
 
-Otherwise the result is **"no consistent difference"**. Minimum differences: pass rates and traceability coverage 10 percentage points; time and turns a ratio of 1.25 (or 0.8); confirmed findings 1.
+Otherwise the result is **"no consistent difference"**. Minimum differences: pass rates and traceability coverage 10 percentage points; time, turns and tokens a ratio of 1.25 (or 0.8); confirmed findings 1.
 
 **8.5 Ceiling effects.** Tier A may sit near 100% in every condition. The validation in Appendix A shows plausible naive code passes tier A while failing tiers B and C, so those tiers are where differences are expected. A ceiling is reported as a finding, not treated as a failure of the design.
 
@@ -243,11 +297,13 @@ Otherwise the result is **"no consistent difference"**. Minimum differences: pas
 
 ## 10. Threats to validity specific to this design
 
-- **Operator = researcher, unblinded.** Mitigated by fixed prompts, machine-generated follow-ups, verbatim answers with fixed fallbacks, and caps. The operator does learn each task's answers after its first run; spreading runs across rounds limits this, and every answer is logged.
+- **Operator = researcher, unblinded.** Mitigated by fixed prompts, machine-generated follow-ups, verbatim answers with fixed fallbacks, a fixed definition of a question, and caps. The operator also grows familiar with each task over its runs, which could change how a question is matched to the answer sheet; every match is logged with the entry used, so it can be audited.
 - **One run per cell.** Model output varies between runs, so a single-cell difference may be noise. The optional replication (R021–R023) estimates this, and section 8.4 requires consistency across tasks.
 - **One harness and one model.** Results apply to Claude Code with that model, not to SDD in general.
 - **Who built the instrument.** The tasks, reference implementations and held-out suites were drafted with an AI assistant (Claude, from Anthropic). This is the same model family as the agent under test, and the tasks may suit that family's habits. The suites were written and frozen without seeing any agent output from this study, and the author reviewed them before freezing.
 - **Probe heuristics.** Thresholds such as "ids of at least 8 characters" and "tokens of at least 16", and black-box salt detection, can misclassify. Every probe failure is therefore confirmed by hand before it counts (section 7.2).
+- **Traceability partly built in.** The constitution prompt asks for testable requirements and the plan prompt for pytest, while no task text mentions tests. A score of 2 needs an agent-written test, so both traceability measures partly reflect these prompts.
+- **Carry-over.** Web tools are denied, but earlier run folders and the study repository are on the same machine. The agent is never pointed to them; any access outside the run folder appears in the tool-call log and is reported.
 - **SDD without human review** (section 6.5). The results do not show what careful human review of specs would add, and the time cost of SDD practised that way would be higher.
 - **Agent latency** is included in active time and varies with API load. Each run's start time is in its manifest, so time-of-day effects can be checked.
 - **Python version dependence** (section 7.1) is fixed by scoring with 3.13.x.
@@ -260,15 +316,15 @@ Otherwise the result is **"no consistent difference"**. Minimum differences: pas
 | Held-out suite tree hash | `a9b755596fa4d76f0658118373662f75c55dce3212a28a934cae2d1187425b9a` (`score_run.py --hash-only --heldout sealed/heldout`) |
 | Encrypted copy | `sealed/sealed-heldout-v1.zip.enc` in the study repository, SHA-256 `9ead2595d7649e3f4c975c371f99c0beb6311c7bc2dd739edf4c0a1967cf5e4d` (AES-256-CBC, PBKDF2, 600,000 iterations; passphrase held by the author) |
 | Archive contents | `heldout/` (157 test cases), `reference/` (5 reference implementations), `validation/` (6 naive variants, their scores, and the validation report) |
-| Instrument | `sddlog` 1.1, 67 tests (`sddlog-v1.1.patch`) |
+| Instrument | `sddlog` 1.2, 73 tests |
 | Base repository commit | ______________________ (from `make_base.sh`) |
 | Spec Kit | 1.0.6 |
 | Claude Code version | ______________________ |
-| Model string | ______________________ (same as R001) |
+| Model string | `claude-opus-5` (same as R001) |
 | Permission mode | ______________________ (same as R001) |
 | Scoring interpreter | Python 3.13.__ · pytest ____ · Bandit 1.9.4 |
 | Frozen in `$PILOT` commit | ______________ on ____-__-__ |
-| Hashes sent to advisor | ____-__-__ |
+| Hashes sent to advisor (Yan Wang) | ____-__-__ |
 
 ## 12. Deviations log
 

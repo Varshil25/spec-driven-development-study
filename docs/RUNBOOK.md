@@ -18,10 +18,10 @@ The sealed suite is in the repository only as `sealed/sealed-heldout-v1.zip.enc`
 ## 0. One-time setup (before R002)
 
 1. **Set `KIT=$PILOT`.** The study materials are in the study repository. Runs happen in separate clones of `$BASE` outside it, so an agent never sees the answer sheets. Keep `sealed-heldout-v1.zip` outside every repository.
-2. **Confirm the instrument** (`sddlog` 1.1 is already in the repository):
+2. **Confirm the instrument** (`sddlog` 1.2 is already in the repository):
    ```bash
    cd $PILOT
-   python3 -m pytest tools/sddlog/tests -q          # expect: 67 passed
+   python3 -m pytest tools/sddlog/tests -q          # expect: 73 passed
    ```
 3. **Freeze the pre-registration.** Fill in the blanks in section 11 of `docs/PREREGISTRATION.md` (versions, base commit). Then commit on `main`. The commit time is the pre-registration date:
    ```bash
@@ -112,6 +112,7 @@ Each time the agent's turn ends:
 1. **It asked a question?** Answer from the answer sheet, verbatim (`operator/answer-sheets/README.md`), and log it:
    `$L note --text "ANSWER I2: <question, shortened>"`
 2. **It asked permission to continue** ("Shall I proceed?", "Want me to implement it?")? Send exactly `Yes, go ahead.`
+   **It listed assumptions or review items but asked nothing?** Send nothing; log `$L note --text "LISTED: <shortened>"` and treat the turn as finished (item 3).
 3. **Otherwise, it says it is done.** In the second terminal:
    ```bash
    python3 $KIT/tools/study/check_examples.py $TASK --repo .
@@ -146,7 +147,7 @@ Add a line to `schedule/run-log.md` in `$PILOT`. **Keep the run directory**: Par
 | --- | --- |
 | `verify` reports **FAIL** | The run is invalid. Keep its logs, mark it `excluded` in the run log, and redo it from a fresh clone with the next spare ID (R019, then R020). |
 | `verify` reports **WARN** | Write a `note` explaining it. The run stays in the dataset. |
-| Agent or API outage, crash, or an interruption of more than 10 minutes mid-phase | Write a `note`. If the phase can carry on in a new session, carry on. Otherwise `run-end --status aborted` and redo with a spare ID. |
+| Agent or API outage, usage limit, crash, or an interruption of more than 10 minutes mid-phase | Write a `note`. If the same session can be resumed, resume it and send exactly `Please continue from where you stopped.`, then `$L note --text "RESUME: <reason>"`. If the phase can carry on in a new session, carry on. Otherwise `run-end --status aborted` and redo with a spare ID. |
 | Wrong text pasted, typo in a fixed prompt | Write a `note` at once. If the agent already acted on it, abort and redo with a spare ID. |
 | A phase marker was closed late | Already handled by `active_seconds`. Write a `note` as in R001. |
 

@@ -2,7 +2,7 @@
 
 **Study**: Evaluating and Extending Spec-Driven Development (Parts II–III)
 **Adds**: 2 Java/Quarkus tasks × 3 conditions = 6 study runs (R026–R031), 2 mechanics checks (R024–R025), 2 spare IDs (R032–R033)
-**Instrument**: unchanged (`sddlog` 1.1, logging protocol 1.1, Spec Kit 1.0.6, Claude Code, same model string)
+**Instrument**: unchanged (`sddlog` 1.2, logging protocol 1.2, Spec Kit 1.0.6, Claude Code, same model string)
 **Status**: written in Week 7, before any study run; frozen together with `PREREGISTRATION.md` in one commit before R004
 **Sealed held-out suite**: `sealed-heldout-java-v1.zip`, hashes in section 9
 
@@ -98,7 +98,7 @@ complexity ranking used in section 8.3 of the main pre-registration.
 ## 4. Environment
 
 **Java base repository** (`tools/study/make_base_java.sh`): the Python base
-(`sddlog` 1.1, Claude Code hooks, web tools denied, no Spec Kit) plus one commit
+(`sddlog` 1.2, Claude Code hooks, web tools denied, no Spec Kit) plus one commit
 adding the Quarkus skeleton in `tools/study/java-skeleton/`:
 
 | Item | Value |
@@ -202,7 +202,15 @@ Manual-review checklist for the Java runs:
 **7.3–7.6** (traceability, time and effort, spec revisions, questions) are as in
 the main pre-registration. The traceability register rows are in
 `coding/requirements.csv`. Source size counts `.java` lines (`score_run.py`):
-product code under `src/main`, tests under `src/test`.
+product code under `src/main`, tests under `src/test`. The primary time
+measure, token usage, the definition of a question and the resume message are
+also as in the main pre-registration (sections 6.1, 6.2 and 7.4).
+
+**Constitution principles** (main section 7.7) are coded with the Java
+principles: no dependency beyond those declared in the skeleton's `pom.xml`;
+fail loudly (no `catch` in product code swallows an error: each rethrows,
+returns an error response, or logs at error level); and at least 80% of stated
+requirements exercised by an agent-written JUnit or REST Assured test.
 
 **7.7 Java-specific exploratory measures** (labelled exploratory, not tested):
 
@@ -238,7 +246,7 @@ product code under `src/main`, tests under `src/test`.
 | JDK used for runs and scoring | ______________________ |
 | SAST | SpotBugs 4.10.5 · FindSecBugs 1.14.0 |
 | Frozen in commit | ______________ on ____-__-__ (together with `PREREGISTRATION.md`) |
-| Hashes sent to advisor | ____-__-__ |
+| Hashes sent to advisor (Yan Wang) | ____-__-__ |
 
 ## 10. Threats to validity specific to the Java runs
 

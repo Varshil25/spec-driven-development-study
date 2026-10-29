@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create the Part III coding sheets for one scored run.
 
-Writes two CSV files, pre-filled from the schedule, the requirements register
+Writes three CSV files, pre-filled from the schedule, the requirements register
 and the run's score file, ready for manual coding:
 
   coding/runs/<RUN>-traceability.csv   one row per stated and intent requirement
@@ -10,6 +10,8 @@ and the run's score file, ready for manual coding:
                                        tasks, SpotBugs + FindSecBugs for the
                                        Java tasks); manual-review rows are
                                        added by hand
+  coding/runs/<RUN>-principles.csv     one row per checkable constitution
+                                       principle (RQ4c, section 7.7)
 
 Usage: python3 tools/study/make_coding_sheets.py R004 --score scores/R004.json
 The coding rules are in docs/PREREGISTRATION.md, section 7.
@@ -29,6 +31,20 @@ TRACE_FIELDS = ["run_id", "task_id", "condition", "req_id", "tier", "requirement
                 "explicit_link", "score", "notes"]
 SEC_FIELDS = ["run_id", "task_id", "condition", "finding_id", "source", "cwe", "location",
               "severity", "confirmed", "notes"]
+PRINCIPLE_FIELDS = ["run_id", "task_id", "condition", "principle", "met_when", "met", "evidence"]
+# PREREGISTRATION.md section 7.7 (Python) and PREREGISTRATION-JAVA.md (Java).
+PRINCIPLES = {
+    "python": [
+        ("standard library only", "product code imports nothing outside the standard library (tests may import pytest)"),
+        ("fail loudly", "no except in product code swallows an error: each re-raises, exits non-zero or writes to stderr"),
+        ("every requirement testable", "at least 80% of stated requirements score 2 in the traceability sheet"),
+    ],
+    "java": [
+        ("no new dependencies", "no dependency beyond those declared in the skeleton's pom.xml"),
+        ("fail loudly", "no catch in product code swallows an error: each rethrows, returns an error response or logs at error level"),
+        ("every requirement testable", "at least 80% of stated requirements score 2 in the traceability sheet"),
+    ],
+}
 
 
 def main(argv=None):
@@ -96,7 +112,16 @@ def main(argv=None):
                              "source": "%s:%s" % (tool, finding["test_id"]), "cwe": finding["cwe"] or "",
                              "location": "%s:%s" % (finding["file"], finding["line"]),
                              "notes": "%s severity %s: %s" % (tool, finding["severity"], finding["message"])})
-    print("wrote %s\nwrote %s" % (trace_path, sec_path))
+    stack = "java" if run["task_id"].startswith("T-Q") else "python"
+    principles_path = out_dir / ("%s-principles.csv" % args.run_id)
+    with open(principles_path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PRINCIPLE_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        for principle, met_when in PRINCIPLES[stack]:
+            writer.writerow({"run_id": args.run_id, "task_id": run["task_id"],
+                             "condition": run["condition"], "principle": principle,
+                             "met_when": met_when})
+    print("wrote %s\nwrote %s\nwrote %s" % (trace_path, sec_path, principles_path))
     return 0
 
 
