@@ -3,7 +3,7 @@
 #
 #   bash tools/study/make_base.sh <sdd-pilot dir> <study kit dir> <new base dir>
 #
-# The base holds only the instrument (sddlog v1.1) and the Claude Code hooks
+# The base holds only the instrument (sddlog v1.2) and the Claude Code hooks
 # that feed it. It deliberately does NOT contain Spec Kit: Spec Kit installs
 # its commands as Claude Code skills that the model may invoke on its own, so
 # having them present would contaminate the unstructured condition. SDD runs
@@ -57,7 +57,7 @@ find . -name __pycache__ -type d -prune -exec rm -rf {} +
 
 git add -A
 git -c user.name="sdd-study" -c user.email="sdd-study@localhost" \
-    commit -q -m "study base v1: sddlog 1.1 + Claude Code hooks"
+    commit -q -m "study base v1: sddlog 1.2 + Claude Code hooks"
 git tag base-v1
 echo
 echo "Base ready at $BASE"

@@ -11,7 +11,8 @@ Design constraints:
   * Three independent capture paths, so no single failure loses a run:
       1. Claude Code hooks        -> real-time prompts / tool calls / edits
       2. git phase-boundary tags  -> authoritative file-edit ground truth
-      3. transcript ingestion     -> after-the-fact backfill of 1
+      3. transcript ingestion     -> after-the-fact backfill of 1, and the
+                                     only source of token counts
   * Secret redaction runs before anything touches disk.
 
 Usage: see `sddlog.py --help` or docs/LOGGING-PROTOCOL.md
@@ -56,7 +57,17 @@ EVENT_TYPES = {
     "tool_call",
     "artifact_snapshot",
     "note",
+    "token_usage",
 }
+
+# Token counts a Claude Code transcript records per API message (added in
+# sddlog 1.2). Hooks never see token counts; the transcript does.
+TOKEN_FIELDS = (
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "output_tokens",
+)
 
 CONDITIONS = {"sdd", "sdd_clarify", "unstructured"}
 
@@ -571,6 +582,7 @@ def compute_metrics(store, run_id):
     phase_start_ts = {}
     phase_end_ts = {}
     last_activity = {}
+    hook_prompt_phases = set()
     for event in events:
         etype = event.get("type")
         phase = event.get("phase")
@@ -587,12 +599,19 @@ def compute_metrics(store, run_id):
             bucket = per_phase.setdefault(phase, _empty_phase())
             if etype == "prompt":
                 bucket["human_prompts"] += 1
+                if event["payload"].get("source") == "hook":
+                    hook_prompt_phases.add(phase)
                 bucket["prompt_words"] += event["payload"].get("words", 0)
             elif etype == "agent_output":
                 bucket["agent_outputs"] += 1
                 bucket["output_words"] += event["payload"].get("words", 0)
             elif etype == "tool_call":
                 bucket["tool_calls"] += 1
+            elif etype == "token_usage":
+                for field in TOKEN_FIELDS:
+                    value = event["payload"].get(field, 0)
+                    bucket["tokens"][field] += value if isinstance(value, int) else 0
+                bucket["model_messages"] += event["payload"].get("messages", 0)
             elif etype == "file_edit":
                 path = event["payload"].get("path")
                 if is_instrument_path(path):
@@ -641,6 +660,14 @@ def compute_metrics(store, run_id):
             bucket["timing_reliable"] = False
             timing_warnings.append("%s: phase never closed" % name)
 
+    token_warnings = [
+        "%s: no token usage recorded (Stop hook had no transcript_path, or "
+        "run ingest-transcript)" % name
+        for name, bucket in per_phase.items()
+        if name in phase_end_ts and bucket["model_messages"] == 0
+        and name in hook_prompt_phases
+    ]
+
     for bucket in per_phase.values():
         bucket["files_touched"] = len(bucket["files_touched"])
         # One "turn" is a human prompt answered by the agent; the count of
@@ -664,6 +691,11 @@ def compute_metrics(store, run_id):
         "tool_calls": sum(p["tool_calls"] for p in per_phase.values()),
         "lines_added": sum(p["lines_added"] for p in per_phase.values()),
         "lines_removed": sum(p["lines_removed"] for p in per_phase.values()),
+        "model_messages": sum(p["model_messages"] for p in per_phase.values()),
+        "tokens": {
+            field: sum(p["tokens"][field] for p in per_phase.values())
+            for field in TOKEN_FIELDS
+        },
         "distinct_files_touched": len(
             {
                 e["payload"].get("path")
@@ -675,6 +707,12 @@ def compute_metrics(store, run_id):
         ),
         "events": len(events),
     }
+    totals["input_tokens_all"] = (
+        totals["tokens"]["input_tokens"]
+        + totals["tokens"]["cache_creation_input_tokens"]
+        + totals["tokens"]["cache_read_input_tokens"]
+    )
+    totals["output_tokens"] = totals["tokens"]["output_tokens"]
 
     artifact_sizes = {}
     for event in events:
@@ -701,6 +739,7 @@ def compute_metrics(store, run_id):
         "per_phase": {k: per_phase[k] for k in PHASES if k in per_phase},
         "artifacts": artifact_sizes,
         "timing_warnings": timing_warnings,
+        "token_warnings": token_warnings,
     }
 
 
@@ -718,6 +757,8 @@ def _empty_phase():
         "files_touched": set(),
         "lines_added": 0,
         "lines_removed": 0,
+        "model_messages": 0,
+        "tokens": {field: 0 for field in TOKEN_FIELDS},
     }
 
 
@@ -789,7 +830,8 @@ def verify_run(store, run_id):
     # condition-specific expectations
     warnings.extend(_condition_warnings(manifest.get("condition"), events))
 
-    for warning in compute_metrics(store, run_id).get("timing_warnings", []):
+    metrics = compute_metrics(store, run_id)
+    for warning in metrics.get("timing_warnings", []) + metrics.get("token_warnings", []):
         warnings.append(warning)
 
     if not any(e.get("type") == "prompt" for e in events):
@@ -920,6 +962,130 @@ def ingest_transcript(store, run_id, transcript_path, since=None):
     return added
 
 
+def read_transcript_usage(transcript_path):
+    """Token usage per API message, from a Claude Code transcript and its subagents.
+
+    Claude Code writes one JSONL line per content block, so a single API message
+    can appear several times under the same message id. Usage is therefore keyed
+    on the message id, and each field keeps its largest value. Subagent sessions
+    are stored beside the main transcript, in <session>/subagents/*.jsonl; their
+    messages are model work done for the run, so they count too.
+    """
+    path = Path(transcript_path)
+    files = [path]
+    subagents = path.with_suffix("") / "subagents"
+    if subagents.is_dir():
+        files.extend(sorted(subagents.glob("*.jsonl")))
+
+    usage = {}
+    for file in files:
+        try:
+            text = file.read_text(errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict) or entry.get("type") != "assistant":
+                continue
+            message = entry.get("message")
+            if not isinstance(message, dict):
+                continue
+            counts = message.get("usage")
+            message_id = message.get("id")
+            if not isinstance(counts, dict) or not message_id:
+                continue
+            record = usage.get(message_id)
+            if record is None:
+                record = {field: 0 for field in TOKEN_FIELDS}
+                record.update({
+                    "model": message.get("model"),
+                    "timestamp": entry.get("timestamp"),
+                    "subagent": file != path,
+                })
+                usage[message_id] = record
+            for field in TOKEN_FIELDS:
+                value = counts.get(field)
+                if isinstance(value, int) and value > record[field]:
+                    record[field] = value
+    return usage
+
+
+def _phase_windows(events):
+    """(phase, start, end) for every phase in the log; end is None while open."""
+    windows, open_at = [], {}
+    for event in events:
+        ts = parse_iso(event.get("ts"))
+        if event.get("type") == "phase_start":
+            open_at[event.get("phase")] = ts
+        elif event.get("type") == "phase_end":
+            windows.append((event.get("phase"), open_at.pop(event.get("phase"), ts), ts))
+    windows.extend((phase, start, None) for phase, start in open_at.items())
+    return windows
+
+
+def _phase_at(windows, ts):
+    """The phase whose window contains ts (the latest-opened one), or None."""
+    if ts is None:
+        return None
+    best = None
+    for phase, start, end in windows:
+        if start and start <= ts and (end is None or ts <= end):
+            if best is None or start > best[1]:
+                best = (phase, start)
+    return best[0] if best else None
+
+
+def record_token_usage(store, run_id, transcript_path, session_id=None):
+    """Append token_usage events for messages this run has not counted yet.
+
+    Messages already recorded (by an earlier Stop hook, or by a resumed session
+    whose transcript repeats them) are skipped by message id, so calling this
+    after every agent turn never double-counts. Each message is assigned to the
+    phase whose window contains its timestamp, which keeps a late backfill
+    honest; one without a timestamp goes to the phase open now.
+    """
+    events = store.read_events(run_id)
+    seen = set()
+    for event in events:
+        if event.get("type") == "token_usage":
+            seen.update(event.get("payload", {}).get("message_ids") or [])
+    new = {k: v for k, v in read_transcript_usage(transcript_path).items() if k not in seen}
+    if not new:
+        return 0
+
+    windows = _phase_windows(events)
+    by_phase = {}
+    for message_id, record in new.items():
+        ts = parse_iso(record.get("timestamp"))
+        phase = _phase_at(windows, ts)
+        if phase is None and ts is not None:
+            # Model work outside every phase window (before the run, or between
+            # phases) is not part of any measured phase.
+            continue
+        by_phase.setdefault(phase, {})[message_id] = record
+    if not by_phase:
+        return 0
+
+    for phase, records in by_phase.items():
+        payload = {field: sum(r[field] for r in records.values()) for field in TOKEN_FIELDS}
+        payload.update({
+            "messages": len(records),
+            "subagent_messages": sum(1 for r in records.values() if r["subagent"]),
+            "models": sorted({r["model"] for r in records.values() if r.get("model")}),
+            "message_ids": sorted(records),
+            "session_id": session_id,
+            "source": "transcript_usage",
+        })
+        store.append(run_id, "token_usage", payload, phase=phase)
+    return sum(len(records) for records in by_phase.values())
+
+
 def _extract_text(content):
     """Flatten Claude Code's content field (string or content-block list)."""
     if isinstance(content, str):
@@ -1020,6 +1186,12 @@ def handle_hook(store, event_name, raw):
             "note",
             {"text": "agent turn ended", "session_id": session_id, "source": "hook"},
         )
+        transcript = data.get("transcript_path")
+        if transcript:
+            try:
+                record_token_usage(store, run_id, transcript, session_id)
+            except Exception:  # noqa: BLE001 - a logging bug must not stop the agent
+                pass
     return 0
 
 
@@ -1106,17 +1278,20 @@ def render_report(metrics):
         ("Lines added", "lines_added"),
         ("Lines removed", "lines_removed"),
         ("Distinct files touched", "distinct_files_touched"),
+        ("Model messages", "model_messages"),
+        ("Input tokens, incl. cache reads and writes", "input_tokens_all"),
+        ("Output tokens", "output_tokens"),
         ("Events logged", "events"),
     ):
         lines.append("| %s | %s |" % (label, totals.get(key)))
     lines.append("")
     lines.append("## Per phase")
     lines.append("")
-    lines.append("| Phase | Active (s) | Wall-clock (s) | Turns | Prompt words | Tool calls | Files | +Lines | -Lines |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| Phase | Active (s) | Wall-clock (s) | Turns | Prompt words | Tool calls | Files | +Lines | -Lines | Output tokens |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for phase, bucket in metrics["per_phase"].items():
         lines.append(
-            "| %s | %s | %s%s | %s | %s | %s | %s | %s | %s |"
+            "| %s | %s | %s%s | %s | %s | %s | %s | %s | %s | %s |"
             % (
                 phase,
                 bucket.get("active_seconds"),
@@ -1128,6 +1303,7 @@ def render_report(metrics):
                 bucket["files_touched"],
                 bucket["lines_added"],
                 bucket["lines_removed"],
+                bucket.get("tokens", {}).get("output_tokens", 0),
             )
         )
     if metrics.get("timing_warnings"):
@@ -1135,6 +1311,12 @@ def render_report(metrics):
         lines.append("## Timing warnings")
         lines.append("")
         for warning in metrics["timing_warnings"]:
+            lines.append("- %s" % warning)
+    if metrics.get("token_warnings"):
+        lines.append("")
+        lines.append("## Token warnings")
+        lines.append("")
+        for warning in metrics["token_warnings"]:
             lines.append("- %s" % warning)
     if metrics.get("artifacts"):
         lines.append("")
@@ -1350,7 +1532,8 @@ def main(argv=None):
 
     if args.command == "ingest-transcript":
         added = ingest_transcript(store, run_id, args.path, args.since)
-        print("ingested %d new entries" % added)
+        counted = record_token_usage(store, run_id, args.path)
+        print("ingested %d new entries; token usage for %d new model messages" % (added, counted))
         return 0
 
     if args.command == "metrics":

@@ -4,7 +4,7 @@
 #
 #   bash tools/study/make_base_java.sh <sdd-pilot dir> <study kit dir> <new base dir>
 #
-# It is the Python base (make_base.sh: sddlog 1.1 + Claude Code hooks, web
+# It is the Python base (make_base.sh: sddlog 1.2 + Claude Code hooks, web
 # tools denied, no Spec Kit) plus ONE commit that adds the pinned Quarkus
 # project skeleton from tools/study/java-skeleton:
 #   Java 21 · Quarkus platform 3.40.1.1 · Maven 3.9.11 via the Maven wrapper 3.3.4

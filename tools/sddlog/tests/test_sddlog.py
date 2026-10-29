@@ -543,6 +543,148 @@ class TestTranscriptIngestion:
 
 
 # ---------------------------------------------------------------------------
+# token usage (sddlog 1.2)
+#
+# Hooks never see token counts, so they are read from the transcript's
+# per-message usage records. Claude Code writes one line per content block,
+# so the same message id repeats; counting each line would inflate RQ3.
+# ---------------------------------------------------------------------------
+
+
+def _assistant_line(message_id, ts, output_tokens, input_tokens=3,
+                    cache_read=1000, cache_write=200, text="ok"):
+    return json.dumps({
+        "type": "assistant",
+        "timestamp": ts,
+        "message": {
+            "id": message_id,
+            "model": "claude-opus-5",
+            "content": [{"type": "text", "text": text}],
+            "usage": {
+                "input_tokens": input_tokens,
+                "cache_creation_input_tokens": cache_write,
+                "cache_read_input_tokens": cache_read,
+                "output_tokens": output_tokens,
+            },
+        },
+    })
+
+
+def _stop(repo, transcript, session="s1"):
+    return run_cli(repo, "hook", "--event", "Stop", stdin=json.dumps(
+        {"session_id": session, "transcript_path": str(transcript)}))
+
+
+def _usage_events(repo, run_id):
+    return [e for e in events_of(repo, run_id) if e["type"] == "token_usage"]
+
+
+class TestTokenUsage:
+    def test_stop_hook_counts_each_message_once(self, repo, tmp_path):
+        run_id = start_run(repo)
+        run_cli(repo, "phase", "implement", "--start")
+        ts = sddlog.now_iso()
+        transcript = tmp_path / "session.jsonl"
+        # m1 is split over two lines, the first written mid-stream
+        transcript.write_text("\n".join([
+            _assistant_line("m1", ts, output_tokens=40),
+            _assistant_line("m1", ts, output_tokens=120, text="more"),
+            _assistant_line("m2", ts, output_tokens=30),
+        ]) + "\n")
+        assert _stop(repo, transcript).returncode == 0
+        events = _usage_events(repo, run_id)
+        assert len(events) == 1
+        payload = events[0]["payload"]
+        assert payload["messages"] == 2
+        assert payload["output_tokens"] == 150          # 120 + 30, not 40 + 120 + 30
+        assert payload["cache_read_input_tokens"] == 2000
+        assert events[0]["phase"] == "implement"
+
+        # a second Stop with nothing new adds nothing
+        _stop(repo, transcript)
+        assert len(_usage_events(repo, run_id)) == 1
+
+        # a later turn adds only its own message
+        with transcript.open("a") as handle:
+            handle.write(_assistant_line("m3", sddlog.now_iso(), output_tokens=7) + "\n")
+        _stop(repo, transcript)
+        events = _usage_events(repo, run_id)
+        assert len(events) == 2
+        assert events[1]["payload"]["message_ids"] == ["m3"]
+
+    def test_subagent_transcripts_are_included(self, repo, tmp_path):
+        run_id = start_run(repo)
+        run_cli(repo, "phase", "plan", "--start")
+        ts = sddlog.now_iso()
+        transcript = tmp_path / "abc.jsonl"
+        transcript.write_text(_assistant_line("main-1", ts, output_tokens=10) + "\n")
+        subagents = tmp_path / "abc" / "subagents"
+        subagents.mkdir(parents=True)
+        (subagents / "agent-x.jsonl").write_text(_assistant_line("sub-1", ts, output_tokens=5) + "\n")
+        (subagents / "agent-x.meta.json").write_text("{}")
+        _stop(repo, transcript)
+        payload = _usage_events(repo, run_id)[0]["payload"]
+        assert payload["messages"] == 2
+        assert payload["subagent_messages"] == 1
+        assert payload["output_tokens"] == 15
+
+    def test_metrics_sum_tokens_per_phase_and_in_totals(self, repo, tmp_path):
+        run_id = start_run(repo)
+        for phase, tokens in (("specify", 100), ("plan", 250)):
+            run_cli(repo, "phase", phase, "--start")
+            transcript = tmp_path / ("%s.jsonl" % phase)
+            transcript.write_text(
+                _assistant_line(phase + "-1", sddlog.now_iso(), output_tokens=tokens) + "\n")
+            _stop(repo, transcript, session=phase)
+            run_cli(repo, "phase", phase, "--end")
+        metrics = sddlog.compute_metrics(sddlog.Store(repo), run_id)
+        assert metrics["per_phase"]["specify"]["tokens"]["output_tokens"] == 100
+        assert metrics["per_phase"]["plan"]["tokens"]["output_tokens"] == 250
+        assert metrics["totals"]["output_tokens"] == 350
+        assert metrics["totals"]["model_messages"] == 2
+        assert metrics["totals"]["input_tokens_all"] == 2 * (3 + 200 + 1000)
+
+    def test_backfill_assigns_messages_by_timestamp(self, repo, tmp_path):
+        """A late ingest must credit each message to the phase it happened in,
+        not to whichever phase is open when the operator runs the backfill."""
+        run_id = start_run(repo)
+        run_cli(repo, "phase", "specify", "--start")
+        in_specify = sddlog.now_iso()
+        run_cli(repo, "phase", "specify", "--end")
+        run_cli(repo, "phase", "plan", "--start")
+        in_plan = sddlog.now_iso()
+        run_cli(repo, "phase", "plan", "--end")
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text("\n".join([
+            _assistant_line("before-run", "2020-01-01T00:00:00.000Z", output_tokens=999),
+            _assistant_line("a", in_specify, output_tokens=11),
+            _assistant_line("b", in_plan, output_tokens=22),
+        ]) + "\n")
+        proc = run_cli(repo, "ingest-transcript", "--path", str(transcript))
+        assert "token usage for 2 new model messages" in proc.stdout
+        by_phase = {e["phase"]: e["payload"]["output_tokens"] for e in _usage_events(repo, run_id)}
+        assert by_phase == {"specify": 11, "plan": 22}
+
+    def test_stop_hook_survives_a_bad_transcript(self, repo, tmp_path):
+        run_id = start_run(repo)
+        run_cli(repo, "phase", "implement", "--start")
+        garbage = tmp_path / "garbage.jsonl"
+        garbage.write_text("{not json\n" + json.dumps([1, 2]) + "\n")
+        for path in (garbage, tmp_path / "missing.jsonl"):
+            assert _stop(repo, path).returncode == 0
+        assert _usage_events(repo, run_id) == []
+
+    def test_verify_warns_when_an_agent_phase_has_no_tokens(self, repo):
+        start_run(repo, condition="unstructured")
+        run_cli(repo, "phase", "implement", "--start")
+        run_cli(repo, "hook", "--event", "UserPromptSubmit",
+                stdin=json.dumps({"prompt": "Build it"}))
+        run_cli(repo, "phase", "implement", "--end")
+        proc = run_cli(repo, "verify")
+        assert "implement: no token usage recorded" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
 # phase timing reliability
 #
 # Added after the R001 pilot, where an operator interruption between the end of
