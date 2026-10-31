@@ -7,11 +7,12 @@ them exactly. Nothing else is typed into the agent during a run.
 | Phase | Conditions | What to send |
 | --- | --- | --- |
 | constitution | sdd, sdd_clarify | contents of `constitution.txt` |
-| specify | sdd, sdd_clarify | `/speckit-specify ` followed by the task's `prompt.md`, as one message |
+| constitution | sdd_secure | contents of `constitution-secure.txt` |
+| specify | sdd, sdd_clarify, sdd_secure | `/speckit-specify ` followed by the task's `prompt.md`, as one message |
 | clarify | sdd_clarify | `/speckit-clarify`, then answers from the answer sheet |
-| plan | sdd, sdd_clarify | contents of `plan.txt` |
-| tasks | sdd, sdd_clarify | `/speckit-tasks` |
-| implement | sdd, sdd_clarify | `/speckit-implement` |
+| plan | sdd, sdd_clarify, sdd_secure | contents of `plan.txt` |
+| tasks | sdd, sdd_clarify, sdd_secure | `/speckit-tasks` |
+| implement | sdd, sdd_clarify, sdd_secure | `/speckit-implement` |
 | implement | unstructured | the task's `prompt.md`, as one message |
 | any | all | follow-ups printed by `check_examples.py`; answers from the answer sheet; `Yes, go ahead.` for permission-to-proceed questions |
 | any | all | `Please continue from where you stopped.` only when resuming a session that stopped mid-turn (usage limit, crash, outage); log `RESUME: <reason>` |
@@ -22,3 +23,28 @@ would push agents towards predictable identifiers in T-PASTE-01). The plan
 prompt adds no design decisions beyond what the task text already says. In
 the pilot, R001's plan prompt named the modules to build, which put the
 operator's design into the SDD condition; these fixed prompts remove that.
+
+**The secure-spec condition (`sdd_secure`).** `constitution-secure.txt` is
+`constitution.txt` plus a fifth principle, "Secure by default". It is the only
+difference between `sdd` and `sdd_secure`. The principle was written from the
+categories of the OWASP Top 10 (2021) and the chapter topics of the OWASP
+Application Security Verification Standard (validation, encoding and injection;
+files and resources; authentication and stored credentials; cryptographic
+randomness; resource limits; access control and concurrency; data
+protection), not from the held-out probes. Its topics overlap the probes
+because both draw on the same weakness catalogues; stating those concerns up
+front is exactly what a security-enriched specification is meant to do.
+
+## Change requests (existing-project stage)
+
+After each build, the same clone receives the task's change request
+(`tasks/<task>-CR/prompt.md`), under the same condition:
+
+| Condition | What to send |
+| --- | --- |
+| unstructured | the change request's `prompt.md`, as one message, in a new session |
+| sdd, sdd_secure | `/speckit-specify ` followed by the change request's `prompt.md`, then `plan.txt`, `/speckit-tasks`, `/speckit-implement`, each in a new session; the constitution from the build is kept |
+| sdd_clarify | the same, with `/speckit-clarify` between specify and plan |
+
+The stopping rule for a change request runs the original task's examples and
+the change request's examples (`check_examples.py <task>-CR`).

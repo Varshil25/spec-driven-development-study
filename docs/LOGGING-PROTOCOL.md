@@ -1,9 +1,9 @@
 # Logging Protocol
 
 **Study**: Evaluating and Extending Spec-Driven Development (Parts II–III)
-**Protocol version**: 1.2
-**Status**: 1.0 ratified at Milestone 2; 1.2 governs data collection from Week 7
-**Instrument**: `tools/sddlog/sddlog.py` (stdlib-only Python, 73 automated tests)
+**Protocol version**: 1.3
+**Status**: 1.0 ratified at Milestone 2; 1.3 governs data collection from Week 7
+**Instrument**: `tools/sddlog/sddlog.py` (stdlib-only Python, 80 automated tests)
 
 ---
 
@@ -179,7 +179,7 @@ implements.
 ### 7.1 Before any run
 
 1. The run's clone is fresh from the base repository, on the starting commit (plus the Spec Kit setup commit for SDD conditions), with a clean working tree.
-2. `python3 -m pytest tools/sddlog/tests/ -q` passes (73 tests).
+2. `python3 -m pytest tools/sddlog/tests/ -q` passes (80 tests).
 3. `.claude/settings.json` hooks present.
 
 ### 7.2 SDD conditions (`sdd`, `sdd_clarify`)
@@ -280,7 +280,7 @@ data beyond the single operator's own prompts.
 
 | Command | Purpose |
 | --- | --- |
-| `run-start --run-id --task --condition --model` | Open a run, write manifest, set `ACTIVE_RUN` |
+| `run-start --run-id --task --condition --model [--stage build\|change]` | Open a run, write manifest, set `ACTIVE_RUN` |
 | `run-end [--status]` | Close run, write `metrics.json` and `report.md` |
 | `phase <name> --start \| --end` | Phase boundary; `--end` snapshots artifacts and captures edits |
 | `log-prompt` / `log-output` | Manual capture (`--text`, `--file`, `--stdin`) |
@@ -291,10 +291,17 @@ data beyond the single operator's own prompts.
 | `ingest-transcript --path [--since]` | Idempotent backfill from agent transcript |
 | `metrics` / `report` / `verify` / `list` | Derive, render, check, enumerate |
 
-Valid conditions: `unstructured`, `sdd`, `sdd_clarify`. Valid phases:
+Valid conditions: `unstructured`, `sdd`, `sdd_clarify`, `sdd_secure`. Valid stages: `build`, `change`. Valid phases:
 `constitution`, `specify`, `clarify`, `plan`, `tasks`, `analyze`, `implement`.
 
 ## 12. Changelog
+
+**1.3 (Week 7)**: before the pre-registration is frozen and before any study run.
+
+- A fourth condition, `sdd_secure`: the default Spec Kit sequence with a security-enriched constitution prompt. Its required phases are those of `sdd`.
+- A run's **stage**: `run-start --stage build|change` (default `build`), recorded in the manifest and the `run_start` event. A change request reuses the build's constitution, so the change stage has no constitution phase; the verification gate checks phases against condition and stage.
+- Snapshots now also cover **earlier feature folders** (`specs/*/` other than the current feature), recorded as `prior:<folder>/<artifact>`, so an edit to the original specification during a change request is measurable. Builds have no earlier folders, so their artifact names are unchanged.
+- Seven new tests (80 in total).
 
 **1.2 (Week 7)**: before the pre-registration is frozen and before any study run.
 

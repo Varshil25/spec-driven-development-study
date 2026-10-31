@@ -69,7 +69,11 @@ TOKEN_FIELDS = (
     "output_tokens",
 )
 
-CONDITIONS = {"sdd", "sdd_clarify", "unstructured"}
+CONDITIONS = {"sdd", "sdd_clarify", "sdd_secure", "unstructured"}
+
+# Each run is either the first build of a task from an empty repository, or a
+# change request applied afterwards to that build's repository (sddlog 1.3).
+STAGES = ("build", "change")
 
 # Phases each condition must complete for a run to be treated as a faithful
 # instance of that condition. `sdd_clarify` (added for the Weeks 5-7 study,
@@ -79,8 +83,22 @@ CONDITIONS = {"sdd", "sdd_clarify", "unstructured"}
 REQUIRED_PHASES = {
     "sdd": ["constitution", "specify", "plan", "tasks", "implement"],
     "sdd_clarify": ["constitution", "specify", "clarify", "plan", "tasks", "implement"],
+    # sdd_secure (sddlog 1.3) is the default sequence with a security-enriched
+    # constitution prompt; only the prompt differs, so the phases are the same.
+    "sdd_secure": ["constitution", "specify", "plan", "tasks", "implement"],
     "unstructured": ["implement"],
 }
+
+CONDITION_LABELS = {"sdd": "SDD", "sdd_clarify": "SDD+clarify", "sdd_secure": "SDD+secure"}
+
+
+def required_phases(condition, stage="build"):
+    """Phases a run must complete. A change request reuses the constitution
+    written during the build, so the change stage has no constitution phase."""
+    required = list(REQUIRED_PHASES.get(condition) or [])
+    if stage == "change":
+        required = [p for p in required if p != "constitution"]
+    return required
 
 # Marker-to-marker wall clock is only as good as the operator's discipline in
 # closing a phase. If the gap between the last observed agent activity and the
@@ -541,25 +559,51 @@ def snapshot_artifacts(store, run_id, phase):
         if not source.exists() or not source.is_file():
             continue
         text = source.read_text(errors="replace")
-        redacted, _ = redact(text)
-        target.mkdir(parents=True, exist_ok=True)
-        dest = target / ("%s.md" % name)
-        dest.write_text(redacted)
-        store.append(
-            run_id,
-            "artifact_snapshot",
-            {
-                "artifact": name,
-                "source_path": rel,
-                "snapshot_path": str(dest.relative_to(repo)),
-                "sha256": sha256(text),
-                "words": word_count(text),
-                "lines": len(text.splitlines()),
-            },
-            phase=phase,
-        )
+        _record_snapshot(store, run_id, phase, target, name, rel, text)
         recorded.append(name)
+
+    # A change request usually adds a new feature folder (specs/002-...). The
+    # earlier folders are snapshotted too, as "prior:<folder>/<artifact>", so
+    # that an edit to the original specification during the change (RQ4b)
+    # is measurable. In a build there are no earlier folders.
+    current = Path(feature).as_posix().rstrip("/") if feature else ""
+    specs_root = repo / "specs"
+    if specs_root.is_dir():
+        for folder in sorted(p for p in specs_root.iterdir() if p.is_dir()):
+            rel_folder = folder.relative_to(repo).as_posix()
+            if rel_folder == current or not (folder / "spec.md").is_file():
+                continue
+            for name, template in ARTIFACT_CANDIDATES:
+                if "{feature_dir}" not in template:
+                    continue
+                rel = template.format(feature_dir=rel_folder)
+                source = repo / rel
+                if source.is_file():
+                    label = "prior:%s/%s" % (folder.name, name)
+                    _record_snapshot(store, run_id, phase, target, label, rel,
+                                     source.read_text(errors="replace"))
+                    recorded.append(label)
     return recorded
+
+
+def _record_snapshot(store, run_id, phase, target, name, rel, text):
+    redacted, _ = redact(text)
+    dest = target / ("%s.md" % name.replace("/", "__").replace(":", "_"))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(redacted)
+    store.append(
+        run_id,
+        "artifact_snapshot",
+        {
+            "artifact": name,
+            "source_path": rel,
+            "snapshot_path": str(dest.relative_to(store.repo)),
+            "sha256": sha256(text),
+            "words": word_count(text),
+            "lines": len(text.splitlines()),
+        },
+        phase=phase,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -828,7 +872,8 @@ def verify_run(store, run_id):
         warnings.append("phases still open: %s" % ", ".join(open_phases))
 
     # condition-specific expectations
-    warnings.extend(_condition_warnings(manifest.get("condition"), events))
+    warnings.extend(_condition_warnings(manifest.get("condition"), events,
+                                        manifest.get("stage", "build")))
 
     metrics = compute_metrics(store, run_id)
     for warning in metrics.get("timing_warnings", []) + metrics.get("token_warnings", []):
@@ -845,14 +890,14 @@ def verify_run(store, run_id):
     return problems, warnings
 
 
-def _condition_warnings(condition, events):
+def _condition_warnings(condition, events, stage="build"):
     """Check that the phases actually run match the condition's definition.
 
     A mismatch does not corrupt the log, so it is a warning rather than a
     failure, but it means the run may not be a faithful instance of its
     condition and needs an explanatory note before it enters the dataset.
     """
-    required = REQUIRED_PHASES.get(condition)
+    required = required_phases(condition, stage)
     if not required:
         return []
     warnings = []
@@ -861,7 +906,7 @@ def _condition_warnings(condition, events):
 
     missing = [p for p in required if p not in seen]
     if missing:
-        label = {"sdd": "SDD", "sdd_clarify": "SDD+clarify"}.get(condition, condition)
+        label = CONDITION_LABELS.get(condition, condition)
         warnings.append("%s run missing completed phases: %s" % (label, ", ".join(missing)))
 
     extra = sorted(seen - set(required) - {None})
@@ -869,6 +914,9 @@ def _condition_warnings(condition, events):
         if condition == "sdd" and extra == ["clarify"]:
             warnings.append(
                 "sdd run contains a clarify phase; condition should be sdd_clarify")
+        elif condition == "sdd_secure" and extra == ["clarify"]:
+            warnings.append(
+                "sdd_secure run contains a clarify phase, which that condition does not run")
         else:
             warnings.append(
                 "%s run contains phases outside its condition: %s"
@@ -1363,6 +1411,8 @@ def main(argv=None):
     p.add_argument("--agent", default="claude-code")
     p.add_argument("--operator", default=os.environ.get("USER", "unknown"))
     p.add_argument("--run-id", default=None)
+    p.add_argument("--stage", default="build", choices=STAGES,
+                   help="build: first build from an empty repository; change: a change request on it")
     p.add_argument("--notes", default="")
 
     p = sub.add_parser("run-end", help="close the active run")
@@ -1441,6 +1491,7 @@ def main(argv=None):
             "run_id": run_id,
             "task_id": args.task,
             "condition": args.condition,
+            "stage": args.stage,
             "model": args.model,
             "agent": args.agent,
             "operator": args.operator,
@@ -1456,7 +1507,7 @@ def main(argv=None):
         store.active_path.parent.mkdir(parents=True, exist_ok=True)
         store.active_path.write_text(run_id + "\n")
         store.append(run_id, "run_start", {k: manifest[k] for k in
-                                           ("task_id", "condition", "model", "agent", "operator")})
+                                           ("task_id", "condition", "stage", "model", "agent", "operator")})
         store.rebuild_index()
         print(run_id)
         return 0

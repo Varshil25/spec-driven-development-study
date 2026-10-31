@@ -18,10 +18,10 @@ The sealed suite is in the repository only as `sealed/sealed-heldout-v1.zip.enc`
 ## 0. One-time setup (before R002)
 
 1. **Set `KIT=$PILOT`.** The study materials are in the study repository. Runs happen in separate clones of `$BASE` outside it, so an agent never sees the answer sheets. Keep `sealed-heldout-v1.zip` outside every repository.
-2. **Confirm the instrument** (`sddlog` 1.2 is already in the repository):
+2. **Confirm the instrument** (`sddlog` 1.3 is already in the repository):
    ```bash
    cd $PILOT
-   python3 -m pytest tools/sddlog/tests -q          # expect: 73 passed
+   python3 -m pytest tools/sddlog/tests -q          # expect: 80 passed
    ```
 3. **Freeze the pre-registration.** Fill in the blanks in section 11 of `docs/PREREGISTRATION.md` (versions, base commit). Then commit on `main`. The commit time is the pre-registration date:
    ```bash
@@ -42,6 +42,37 @@ The sealed suite is in the repository only as `sealed/sealed-heldout-v1.zip.enc`
 
 ---
 
+## The usual way: the run tool
+
+Every study run is driven by `tools/study/run_build.py` (pre-registration
+section 5). It sends every fixed prompt to Claude Code in headless mode, runs
+the stopping-rule check and the follow-ups, writes all the `sddlog` markers and
+notes, and commits the clone at the end. Your only job is to read each agent
+turn it shows you and type what it is:
+
+| You type | When the agent's turn... | The tool sends |
+| --- | --- | --- |
+| `I2` (or `I1,I3`; `orig:I2` for the original task's sheet in a change request) | asks something an answer-sheet entry covers | that entry's reply, verbatim |
+| `safety` | asks an uncovered safety question | the safety fallback |
+| `nopref` | asks any other uncovered question | the no-preference fallback |
+| `permit` | asks for permission to continue | `Yes, go ahead.` |
+| `listed` | lists assumptions or review items but asks nothing | nothing (logs a `LISTED` note) |
+| `done` | says it has finished | nothing; in `implement` it runs the checker |
+
+```bash
+RUN=R004                                     # the next row of schedule/schedule.csv
+git clone -q $BASE ~/sdd-study/runs/$RUN
+cd ~/sdd-study/runs/$RUN
+git checkout -q -b run/$RUN base-v1
+python3 $KIT/tools/study/run_build.py $RUN   # adds Spec Kit itself for SDD conditions
+python3 $KIT/tools/study/run_build.py ${RUN}C   # then the change request, same clone
+```
+
+Then archive each (step 4). If the session stops with an error (a usage limit,
+say), the tool asks whether to resume it with the fixed resume message. The
+manual steps below do the same thing by hand; use them only if the
+mechanics checks show that headless mode cannot run the Spec Kit commands.
+
 ## 1. Start a run (every condition)
 
 Take the next row of `schedule/schedule.csv`:
@@ -53,7 +84,7 @@ cd ~/sdd-study/runs/$RUN
 git checkout -q -b run/$RUN base-v1
 ```
 
-**`sdd` and `sdd_clarify` only:** add Spec Kit as one setup commit:
+**`sdd`, `sdd_clarify` and `sdd_secure` only:** add Spec Kit as one setup commit:
 ```bash
 specify init --here --force --integration claude --extension git --non-interactive --script sh
 git add -A && git commit -qm "condition setup: Spec Kit 1.0.6"
@@ -72,7 +103,9 @@ Open `$KIT/operator/answer-sheets/$TASK.md` in a second window. Keep a second te
 
 ---
 
-## 2a. `sdd` and `sdd_clarify`
+## 2a. `sdd`, `sdd_clarify` and `sdd_secure`
+
+(`sdd_secure` sends `prompts/constitution-secure.txt` in the constitution phase; everything else is as for `sdd`.)
 
 Run each phase in a **fresh** Claude Code session, as in R001:
 
@@ -155,23 +188,49 @@ Every one of these also goes into the deviations log, section 12 of `PREREGISTRA
 
 ---
 
+## 5b. Change requests (`<build ID>C`)
+
+A change request runs in the build's clone, right after the build is archived,
+under the same condition, as run `${RUN}C` (for example R004C):
+
+- `sddlog run-start` gets `--stage change` and the task `<task>-CR`.
+- SDD conditions start at `specify`, with `/speckit-specify ` followed by `tasks/<task>-CR/prompt.md`; the constitution phase is skipped, because the build's constitution stays in place.
+- `unstructured` sends `tasks/<task>-CR/prompt.md` as one message in a new session.
+- The stopping rule is `check_examples.py <task>-CR`, which runs the original task's examples and then the change request's.
+- Answer from `operator/answer-sheets/<task>-CR.md`; the original task's sheet still applies to behaviour the change request does not touch.
+
+`run_build.py ${RUN}C` does all of this.
+
 ## 6. After the last study run: start of Part III
 
-1. **Unseal.** Decrypt the archive, unzip it next to the kit and check it is the frozen version (full steps in `sealed/README.md`):
+1. **Unseal both archives.** Decrypt them, unzip them next to the kit and check they are the frozen versions (full steps in `sealed/README.md`):
    ```bash
    openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in sealed/sealed-heldout-v1.zip.enc -out sealed-heldout-v1.zip
-   sha256sum sealed-heldout-v1.zip                                              # must equal section 11
-   unzip -n sealed-heldout-v1.zip                                             # -n keeps sealed/README.md
-   python3 $KIT/tools/study/score_run.py --hash-only --heldout sealed/heldout   # must equal section 11
+   openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in sealed/sealed-heldout-cr-v1.zip.enc -out sealed-heldout-cr-v1.zip
+   sha256sum sealed-heldout-v1.zip sealed-heldout-cr-v1.zip                       # must equal section 11
+   unzip -n sealed-heldout-v1.zip && unzip -n sealed-heldout-cr-v1.zip             # -n keeps sealed/README.md
+   python3 $KIT/tools/study/score_run.py --hash-only --heldout sealed/heldout      # must equal section 11
+   python3 $KIT/tools/study/score_run.py --hash-only --heldout sealed-cr/heldout   # must equal section 11
    ```
-2. **Score** every run with the pre-registered interpreter (install `pytest` and `bandit==1.9.4` for it first):
+2. **Score every build at the commit that closed it.** The clone now holds the code after its change request, so the build is scored from its own closing commit (`run R004 closed`), checked out separately. Use the pre-registered interpreter (install `pytest` and `bandit==1.9.4` for it first):
    ```bash
-   python3.13 $KIT/tools/study/score_run.py --task $TASK --repo ~/sdd-study/runs/$RUN \
+   cd ~/sdd-study/runs/$RUN
+   BUILD=$(git log --format=%H --grep "^run $RUN closed$" -1)
+   git worktree add -f ~/sdd-study/scoring/$RUN $BUILD
+   python3.13 $KIT/tools/study/score_run.py --task $TASK --repo ~/sdd-study/scoring/$RUN \
        --run-id $RUN --heldout sealed/heldout --sast --out $PILOT/scores/$RUN.json
    ```
-3. **Coding sheets** for the manual coding (pre-registration section 7):
+3. **Score every change request twice**, on the clone as it stands: on its own suite, and on the original task's suite for regression:
+   ```bash
+   python3.13 $KIT/tools/study/score_run.py --task $TASK-CR --repo ~/sdd-study/runs/$RUN \
+       --run-id ${RUN}C --heldout sealed-cr/heldout --sast --out $PILOT/scores/${RUN}C.json
+   python3.13 $KIT/tools/study/score_run.py --task $TASK --repo ~/sdd-study/runs/$RUN \
+       --run-id ${RUN}C-regression --heldout sealed/heldout --out $PILOT/scores/${RUN}C-regression.json
+   ```
+4. **Coding sheets** for the manual coding (pre-registration section 7):
    ```bash
    python3 $KIT/tools/study/make_coding_sheets.py $RUN --score $PILOT/scores/$RUN.json
+   python3 $KIT/tools/study/make_coding_sheets.py ${RUN}C --score $PILOT/scores/${RUN}C.json
    ```
 
 ---

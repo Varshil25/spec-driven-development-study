@@ -1006,3 +1006,80 @@ class TestThreeConditions:
                         "--model", "m", "--run-id", "R007")
         assert again.returncode != 0
         assert "already exists" in again.stderr
+
+
+# ---------------------------------------------------------------------------
+# sddlog 1.3: the sdd_secure condition and the change-request stage
+# ---------------------------------------------------------------------------
+
+
+class TestSecureConditionAndChangeStage:
+    def test_clean_sdd_secure_run_has_no_condition_warnings(self, repo):
+        start_run(repo, condition="sdd_secure")
+        proc = _run_phases(repo, SDD)
+        assert proc.returncode == 0, proc.stdout
+        assert condition_warnings(proc.stdout) == []
+
+    def test_sdd_secure_run_with_clarify_is_flagged(self, repo):
+        start_run(repo, condition="sdd_secure")
+        proc = _run_phases(repo, SDD_CLARIFY)
+        assert "sdd_secure run contains a clarify phase" in proc.stdout
+
+    def test_stage_is_recorded_and_defaults_to_build(self, repo):
+        run_id = start_run(repo)
+        manifest = sddlog.Store(repo).read_manifest(run_id)
+        assert manifest["stage"] == "build"
+        run_cli(repo, "run-end")
+        proc = run_cli(repo, "run-start", "--task", "T-TEST-01-CR", "--condition", "sdd",
+                       "--model", "m", "--stage", "change", "--run-id", "R004C")
+        assert proc.returncode == 0, proc.stderr
+        assert sddlog.Store(repo).read_manifest("R004C")["stage"] == "change"
+
+    def test_change_stage_needs_no_constitution_phase(self, repo):
+        """A change request reuses the constitution written during the build."""
+        run_cli(repo, "run-start", "--task", "T-TEST-01-CR", "--condition", "sdd_clarify",
+                "--model", "m", "--stage", "change")
+        proc = _run_phases(repo, ["specify", "clarify", "plan", "tasks", "implement"])
+        assert proc.returncode == 0, proc.stdout
+        assert condition_warnings(proc.stdout) == []
+
+    def test_change_stage_still_requires_its_other_phases(self, repo):
+        run_cli(repo, "run-start", "--task", "T-TEST-01-CR", "--condition", "sdd",
+                "--model", "m", "--stage", "change")
+        proc = _run_phases(repo, ["specify", "implement"])
+        assert "missing completed phases: plan, tasks" in proc.stdout
+
+    def test_earlier_feature_folders_are_snapshotted_as_prior(self, repo):
+        """During a change request the agent may edit the original spec (RQ4b);
+        that is only measurable if the earlier feature folder is snapshotted."""
+        first = repo / "specs" / "001-tool"
+        second = repo / "specs" / "002-change"
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        (first / "spec.md").write_text("# Original spec\n")
+        (first / "plan.md").write_text("# Original plan\n")
+        (second / "spec.md").write_text("# Change spec\n")
+        (repo / ".specify" / "feature.json").write_text(
+            json.dumps({"feature_directory": "specs/002-change"}))
+        run_id = start_run(repo)
+        proc = run_cli(repo, "snapshot", "--phase", "specify")
+        assert proc.returncode == 0, proc.stderr
+        names = {e["payload"]["artifact"]: e["payload"]["source_path"]
+                 for e in events_of(repo, run_id) if e["type"] == "artifact_snapshot"}
+        assert names["spec"] == "specs/002-change/spec.md"
+        assert names["prior:001-tool/spec"] == "specs/001-tool/spec.md"
+        assert names["prior:001-tool/plan"] == "specs/001-tool/plan.md"
+        assert "prior:002-change/spec" not in names
+
+    def test_build_snapshot_names_are_unchanged(self, repo):
+        """Builds keep the 1.0 artifact names, so R001 stays comparable."""
+        folder = repo / "specs" / "001-tool"
+        folder.mkdir(parents=True)
+        (folder / "spec.md").write_text("# Spec\n")
+        (repo / ".specify" / "feature.json").write_text(
+            json.dumps({"feature_directory": "specs/001-tool"}))
+        run_id = start_run(repo)
+        run_cli(repo, "snapshot", "--phase", "specify")
+        names = sorted(e["payload"]["artifact"] for e in events_of(repo, run_id)
+                       if e["type"] == "artifact_snapshot")
+        assert names == ["constitution", "spec"]

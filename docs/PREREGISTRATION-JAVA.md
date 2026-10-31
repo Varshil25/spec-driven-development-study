@@ -2,7 +2,7 @@
 
 **Study**: Evaluating and Extending Spec-Driven Development (Parts II–III)
 **Adds**: 2 Java/Quarkus tasks × 3 conditions = 6 study runs (R026–R031), 2 mechanics checks (R024–R025), 2 spare IDs (R032–R033)
-**Instrument**: unchanged (`sddlog` 1.2, logging protocol 1.2, Spec Kit 1.0.6, Claude Code, same model string)
+**Instrument**: unchanged (`sddlog` 1.3, logging protocol 1.3, Spec Kit 1.0.6, Claude Code, same model string)
 **Status**: written in Week 7, before any study run; frozen together with `PREREGISTRATION.md` in one commit before R004
 **Sealed held-out suite**: `sealed-heldout-java-v1.zip`, hashes in section 9
 
@@ -98,7 +98,7 @@ complexity ranking used in section 8.3 of the main pre-registration.
 ## 4. Environment
 
 **Java base repository** (`tools/study/make_base_java.sh`): the Python base
-(`sddlog` 1.2, Claude Code hooks, web tools denied, no Spec Kit) plus one commit
+(`sddlog` 1.3, Claude Code hooks, web tools denied, no Spec Kit) plus one commit
 adding the Quarkus skeleton in `tools/study/java-skeleton/`:
 
 | Item | Value |
