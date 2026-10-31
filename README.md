@@ -34,9 +34,10 @@ week, from Week 1 to Week 10.
 Study runs (R002 onwards) land in `logs/runs/` alongside the pilot run, under
 protocol 1.3.
 
-**Sealed held-out tests.** The held-out test suites for the five study tasks,
-with their reference implementations, are in [sealed/](sealed/) as an encrypted
-archive, to be decrypted and published once the last study run is finished.
+**Sealed held-out tests.** The held-out test suites for the five study tasks
+and for their change requests, with their reference implementations, are in
+[sealed/](sealed/) as two encrypted archives, to be decrypted and published
+once the last study run is finished.
 Their SHA-256 hashes are recorded in section 11 of the
 [pre-registration](docs/PREREGISTRATION.md), so anyone can check later that the
 published suites are the ones frozen before any data existed.

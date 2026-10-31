@@ -40,10 +40,10 @@ been exercised end to end on both stacks.
 | 7.5 | Seal the Java archive with your passphrase, commit the `.enc` file, fill section 9 of the addendum | You | |
 | 7.6 | Build both bases (`make_base.sh`, `make_base_java.sh`) and record their commits | You | |
 | 7.7 | Mechanics checks R002, R003 (Python) and R024, R025 (Java); fix and log anything they reveal | You | |
-| 7.8 | Freeze: fill section 11 of `PREREGISTRATION.md` and section 9 of the addendum, commit both in one commit, email both sets of hashes to the advisor | You | |
+| 7.8 | Freeze: fill section 11 of `PREREGISTRATION.md` and section 9 of the addendum, commit both in one commit, email the hashes of all three archives (Python builds, change requests, Java) to the advisor | You | |
 | 7.9 | Ask the advisor to confirm the advisor of record (the proposal names Yan Wang; the Week 1 and Weeks 3–4 reports name Alex Pang) and the Dec 5 scope in this plan | You | Advisor of record: Yan Wang (decided 29 Oct) |
 | 7.10 | Settle the open pre-registration decisions; `sddlog` 1.2 records tokens | Claude | Done (PR #4) |
-| 7.11 | Fourth condition `sdd_secure`; a change request per Python task (existing-project stage) with 107 sealed held-out cases, validated; schedule regenerated for four conditions; `sddlog` 1.3 | Claude | Done (this branch); seal the change-request archive at the freeze (7.8) |
+| 7.11 | Fourth condition `sdd_secure`; a change request per Python task (existing-project stage) with 107 sealed held-out cases, validated; schedule regenerated for four conditions; `sddlog` 1.3 | Claude | Done: reviewed, validated (Appendix C) and sealed as `sealed/sealed-heldout-cr-v1.zip.enc`; its hashes are already in section 11 |
 | 7.12 | Run tool `run_build.py`: drives each run in Claude Code's headless mode; the operator only classifies agent turns | Claude | Done; first real use is the mechanics checks (7.7) |
 
 **Time needed from you:** about 2 h review, 1 h sealing and bases, 3–4 h

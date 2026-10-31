@@ -157,9 +157,9 @@ the agent that the project exists and that everything else must keep working.
 | --- | --- | --- | --- |
 | T-REDACT-01-CR | Phone numbers; an `--out-dir` option that writes each file's redacted copy to a folder | 4 | 59, 1333, 532 |
 | T-TARX-01-CR | A `create` command that builds tar archives from files and folders | 3 | 59/200, 22, 400 |
-| T-BOOKMARKS-01-CR | `import` from the export formats, and `export --format html` | 3 | 79, 20, 89 |
+| T-BOOKMARKS-01-CR | `import` from the export formats, and `export --format html` | 3 | 79, 89 |
 | T-ACCOUNTS-01-CR | One-time password-reset tokens (`reset-token`, `reset`) | 3 | 330/338, 312, 916, 639 |
-| T-PASTE-01-CR | Burn-after-reading pastes and password-protected pastes | 3 | 362, 256, 285, 200 |
+| T-PASTE-01-CR | Burn-after-reading pastes and password-protected pastes | 3 | 362, 256, 200 |
 
 ## 5. Conditions and fixed prompts
 
@@ -245,6 +245,21 @@ fallback, permission, listed assumptions, or done), under the rules below.
 - The scorer adds the package's `src/` and the repository root to the import path, so code layout is not measured.
 - The suites were validated before freezing (Appendix A).
 
+**Change-request suites.** These are sealed in a second archive (section 11) and follow the same rules.
+
+| Change request | Tier A stated | Tier B intent | Tier C security |
+| --- | --- | --- | --- |
+| T-REDACT-01-CR | 15 | 4 | 9 |
+| T-TARX-01-CR | 12 | 3 | 4 |
+| T-BOOKMARKS-01-CR | 15 | 3 | 6 |
+| T-ACCOUNTS-01-CR | 7 | 3 | 4 |
+| T-PASTE-01-CR | 16 | 3 | 3 |
+| **Total** | **65** | **16** | **26** |
+
+- **Regression** is the original task's suite run on the repository after the change request, counting tiers A and C only. Tier B is left out because a change request may legitimately change behaviour that an original tier B test pins: T-REDACT-01-CR adds `phones=N` to the count line, which one original tier B test checks exactly.
+- A change request is scored on the clone as it stands after the change; its build is scored at the build's own closing commit (`RUNBOOK.md`, section 6).
+- The change-request suites were validated before freezing, including against an independent implementation with switches for other defensible readings (Appendix C).
+
 **7.2 Security findings.** There are three sources:
 
 - failed tier C probes;
@@ -259,6 +274,11 @@ Every candidate finding is coded in the security sheet with CWE, location, sever
 | **Medium** | Denial of service from one input or request (CWE-1333, 400/770); guessable ids or tokens (CWE-330); account enumeration (CWE-204); credential store or extracted files with over-broad permissions (CWE-732); CSV formula injection (CWE-1236); personal data left in redacted output (CWE-532). |
 | **Low** | Hardening omissions: missing `nosniff` (CWE-79), LIKE wildcards not neutralised (CWE-155), salted password hash that meets no OWASP Password Storage configuration (CWE-916), non-constant-time secret comparison (CWE-208). |
 
+**Change requests** use the same rubric. Their probes map as follows:
+
+- **High:** CWE-59 (writing or reading through a planted link, in T-REDACT-01-CR and T-TARX-01-CR); CWE-79 markup injected into the T-BOOKMARKS-01-CR HTML export (stored script injection, unlike the missing `nosniff` header rated Low above); CWE-89; CWE-312 and CWE-256 (a reset token, a paste password, or a password set by reset stored in plaintext); CWE-639 (one account's token resets another); CWE-200 (a paste password echoed in a response).
+- **Medium:** CWE-22 (unsafe member names in a created archive); CWE-400 (a FIFO hangs `create`); CWE-1333; CWE-532; CWE-330/338 (guessable reset tokens); CWE-362 (a burn-after-reading paste delivered twice).
+
 Manual-review checklist, covering what the probes cannot see:
 
 - **All tasks:** `eval`, `exec` or `shell=True` on input (CWE-78/95); secrets written to output or logs.
@@ -267,6 +287,7 @@ Manual-review checklist, covering what the probes cannot see:
 - **T-BOOKMARKS-01:** any SQL built by string formatting, even if no probe exploits it (CWE-89).
 - **T-ACCOUNTS-01:** hash algorithm and work factor must meet an OWASP Password Storage configuration: PBKDF2-HMAC-SHA256 with ≥ 600,000 iterations, or scrypt at any of OWASP's equivalent settings (N = 2^17, r = 8, p = 1; 2^16/8/2; 2^15/8/3; 2^14/8/5; 2^13/8/10). A bare or salted fast digest is CWE-759/916. Also check constant-time comparison (CWE-208).
 - **T-PASTE-01:** delete-token comparison (CWE-208); ids or tokens drawn from `random` rather than `secrets` (CWE-338).
+- **Change requests:** how output files are opened, and whether an existing link is replaced or followed (T-REDACT-01-CR, CWE-59); whether `create` follows links or opens special files (T-TARX-01-CR); how the burn is made atomic, since a race probe can miss a race (T-PASTE-01-CR, CWE-362); the reset-token generator and comparison (T-ACCOUNTS-01-CR, CWE-338/208), since the probe judges a token only by its length and alphabet.
 
 **7.3 Traceability coding (RQ2).** One row per stated and intent requirement (`coding/requirements.csv`; sheets made by `tools/study/make_coding_sheets.py`). The coder records:
 
@@ -381,6 +402,10 @@ Otherwise the result is **"no consistent difference"**. Minimum differences: pas
 | Held-out suite tree hash | `a9b755596fa4d76f0658118373662f75c55dce3212a28a934cae2d1187425b9a` (`score_run.py --hash-only --heldout sealed/heldout`) |
 | Encrypted copy | `sealed/sealed-heldout-v1.zip.enc` in the study repository, SHA-256 `9ead2595d7649e3f4c975c371f99c0beb6311c7bc2dd739edf4c0a1967cf5e4d` (AES-256-CBC, PBKDF2, 600,000 iterations; passphrase held by the author) |
 | Archive contents | `heldout/` (157 test cases), `reference/` (5 reference implementations), `validation/` (6 naive variants, their scores, and the validation report) |
+| Change-request archive | `sealed-heldout-cr-v1.zip`, SHA-256 `5ab5a4f021d36af294a2a75bc402babc2eef30bd6150069570c63fd78dc0bdd3` |
+| Change-request suite tree hash | `4c345801d02d84af19814e842c4a877278390b061f4a3028e7c2ccf0b813d736` (`score_run.py --hash-only --heldout sealed-cr/heldout`) |
+| Change-request encrypted copy | `sealed/sealed-heldout-cr-v1.zip.enc`, SHA-256 `84fc2f37da12cdf344ee0cd52b12936891472ce864fa92ddb209560558151ba2` (same cipher settings; a separate passphrase held by the author) |
+| Change-request archive contents | `sealed-cr/heldout/` (107 test cases), `sealed-cr/reference/` (5 reference implementations), `sealed-cr/validation/` (5 naive variants, 5 alternative implementations from the review, their scores, and the validation report) |
 | Instrument | `sddlog` 1.3, 80 tests |
 | Base repository commit | ______________________ (from `make_base.sh`) |
 | Spec Kit | 1.0.6 |
@@ -446,3 +471,38 @@ Validation also caught and fixed four problems before freezing:
 - a setup error in a T-PASTE-01 probe.
 
 The full report is `validation/VALIDATION.md` in the sealed archive.
+
+## Appendix C. Validation of the change-request suites (before freezing)
+
+Appendix B, for the Java suites, is in `PREREGISTRATION-JAVA.md`.
+
+Each change-request suite was run against three implementations:
+
+- the sealed **reference**: the original task's reference with the change made;
+- a **naive** version: the same reference with the change made the way a plausible first draft would make it;
+- an **independent alternative** written during a review of the suites, with switches for other readings of the change request that the reviewer judged defensible.
+
+The naive versions write output files with `open(path, "w")` (T-REDACT-01-CR), archive with `dereference=True` and add each PATH as given (T-TARX-01-CR), import with f-string SQL and print the HTML export unescaped (T-BOOKMARKS-01-CR), draw six-digit reset tokens from `random` and store them as they are (T-ACCOUNTS-01-CR), and store paste passwords as given and delete a burn paste after sending it (T-PASTE-01-CR).
+
+| Change request | Implementation | Tier A | Tier B | Tier C | Bandit findings |
+| --- | --- | --- | --- | --- | --- |
+| T-REDACT-01-CR | reference | 15/15 | 4/4 | 9/9 | 0 |
+| | naive | 15/15 | 4/4 | 7/9 | 0 |
+| T-TARX-01-CR | reference | 12/12 | 3/3 | 4/4 | 0 |
+| | naive | 12/12 | 3/3 | 2/4 | 0 |
+| T-BOOKMARKS-01-CR | reference | 15/15 | 3/3 | 6/6 | 0 |
+| | naive | 12/15 | 3/3 | 0/6 | 3 (B608, CWE-89) |
+| T-ACCOUNTS-01-CR | reference | 7/7 | 3/3 | 4/4 | 0 |
+| | naive | 7/7 | 3/3 | 2/4 | 1 (B311, CWE-330) |
+| T-PASTE-01-CR | reference | 16/16 | 3/3 | 3/3 | 0 |
+| | naive | 16/16 | 3/3 | 1/3 | 0 |
+
+Conclusions fixed before any data:
+
+1. **Tier C separates the shortcut from the safe change.** The references pass all 26 tier C cases on three runs; the naive versions pass 12 (46%), while passing 62 of 65 tier A cases. The three tier A failures are the naive import accepting `javascript:`, `data:` and `vbscript:` URLs, which the change request rules out by saying import follows the add rules.
+2. **Static analysis again misses most defects.** Bandit flagged the f-string SQL and `random` tokens, and none of the link following, dereferencing, missing escaping, plaintext secrets or the burn race.
+3. **The worked examples do not leak the held-out tests.** Every naive version meets the stopping rule (`check_examples.py <task>-CR`).
+4. **Regression is measurable.** On the original suites, both the references and the naive versions pass every tier A and tier C case after the change. The one tier B failure (T-REDACT-01's count line, which the change request extends) is why regression counts tiers A and C only (section 7.1).
+5. **Defensible readings pass.** The alternative implementation passed tiers A and C in all 22 settings tried (each alternative with no switch, and each switch). The only failures were tier B readings that differ from the product owner's recorded answer (T-REDACT-01-CR I1; T-BOOKMARKS-01-CR I2 when an invalid entry rejects the whole import), which is what tier B measures.
+
+The review changed several tests before sealing, most of them because they failed a defensible reading. Two probes that follow from the stated text moved to tier A (script URLs on import; a failed read must not burn a protected paste). The re-validation then raised the burn race probe from 5 to 20 rounds after it missed the naive race once in 8 runs; afterwards it caught the race in 15 of 15 runs and never failed the reference. The full report is `validation/VALIDATION.md` in the change-request archive.

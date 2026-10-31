@@ -36,7 +36,6 @@ Standard library only. Exit status: 0 all examples pass, 1 some fail,
 """
 
 import argparse
-import gzip
 import http.client
 import io
 import json

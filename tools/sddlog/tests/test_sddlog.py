@@ -434,7 +434,7 @@ class TestMetrics:
 
 class TestVerify:
     def test_clean_sdd_run_passes(self, repo):
-        run_id = start_run(repo)
+        start_run(repo)
         run_cli(repo, "capture-edits", "--label", "baseline")
         for phase in ("constitution", "specify", "plan", "tasks", "implement"):
             run_cli(repo, "phase", phase, "--start")

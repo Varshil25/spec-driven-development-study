@@ -68,8 +68,8 @@ them to the results.
 | C, security | Implicit security expectations, each mapped to a CWE weakness | A crafted archive must not write outside the target folder (CWE-22) |
 
 There are 157 hidden tests for the builds and 107 for the change requests.
-After a change request, the build's own tests are run again to catch anything
-the change broke (regression).
+After a change request, the build's own stated and security tests are run
+again to catch anything the change broke (regression).
 
 Security is also checked with the Bandit static analyser and a manual review
 against a fixed checklist; only findings confirmed by hand are counted.

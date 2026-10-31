@@ -5,7 +5,7 @@ tasks, encrypted. It holds 157 held-out test cases in three tiers, the five
 reference implementations, and the validation evidence (naive variants, their
 scores, and the validation report).
 
-It stays encrypted until the last study run (R018, or R023 if the optional
+It stays encrypted until the last study run (R038, or R039 if the optional
 replication is run) is finished. The study's author keeps the passphrase;
 it is not stored anywhere in this repository.
 
@@ -27,6 +27,37 @@ python3 tools/study/score_run.py --hash-only --heldout sealed/heldout
 
 OpenSSL asks for the passphrase. Then commit the unpacked `sealed/` folder,
 so the tests become public alongside the results they produced.
+
+## Change-request suite (`sealed-heldout-cr-v1.zip.enc`)
+
+The change requests (pre-registration sections 3, 4 and 7.1) have their own
+sealed archive. It holds 107 held-out test cases for the five change requests
+under `sealed-cr/heldout/`, the five change-request reference implementations
+(`sealed-cr/reference/`), and the validation evidence
+(`sealed-cr/validation/`: naive variants, the review's alternative
+implementations, their scores and the validation report). Its top folder is
+`sealed-cr/`, so it unpacks beside `sealed/`. It was sealed before any study
+run, with a separate passphrase that the author keeps; the passphrase is not
+stored anywhere in this repository.
+
+| File | SHA-256 |
+| --- | --- |
+| `sealed-heldout-cr-v1.zip` (the plaintext archive, as recorded in section 11) | `5ab5a4f021d36af294a2a75bc402babc2eef30bd6150069570c63fd78dc0bdd3` |
+| `sealed-heldout-cr-v1.zip.enc` (the encrypted file) | `84fc2f37da12cdf344ee0cd52b12936891472ce864fa92ddb209560558151ba2` |
+| Tree hash of `sealed-cr/heldout` | `4c345801d02d84af19814e842c4a877278390b061f4a3028e7c2ccf0b813d736` |
+
+**Unsealing (after the last study run), from the repository root:**
+
+```bash
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
+    -in sealed/sealed-heldout-cr-v1.zip.enc -out sealed-heldout-cr-v1.zip
+sha256sum sealed-heldout-cr-v1.zip      # must equal 5ab5a4f0…0bdd3 above
+unzip -n sealed-heldout-cr-v1.zip       # creates sealed-cr/
+python3 tools/study/score_run.py --hash-only --heldout sealed-cr/heldout
+                                        # must equal the tree hash above
+```
+
+Then commit the unpacked `sealed-cr/` folder with the results.
 
 ## Java/Quarkus suite (`sealed-heldout-java-v1.zip.enc`)
 
