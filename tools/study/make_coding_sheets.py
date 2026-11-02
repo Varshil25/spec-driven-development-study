@@ -14,6 +14,7 @@ and the run's score file, ready for manual coding:
                                        principle (RQ4c, section 7.7)
 
 Usage: python3 tools/study/make_coding_sheets.py R004 --score scores/R004.json
+       python3 tools/study/make_coding_sheets.py R004C --score scores/R004C.json   (change request)
 The coding rules are in docs/PREREGISTRATION.md, section 7.
 """
 
@@ -55,9 +56,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     schedule = {r["run_id"]: r for r in csv.DictReader(open(KIT / "schedule" / "schedule.csv"))}
-    if args.run_id not in schedule:
-        parser.error("%s is not in schedule/schedule.csv" % args.run_id)
-    run = schedule[args.run_id]
+    base = args.run_id[:-1] if args.run_id.endswith("C") else args.run_id
+    if base not in schedule:
+        parser.error("%s is not in schedule/schedule.csv" % base)
+    run = dict(schedule[base])
+    if args.run_id.endswith("C"):
+        # A change request on the build's repository (PREREGISTRATION.md, section 3).
+        run["task_id"] += "-CR"
     score = json.loads(Path(args.score).read_text())
     if score.get("task_id") != run["task_id"]:
         parser.error("score file is for %s, schedule says %s" % (score.get("task_id"), run["task_id"]))

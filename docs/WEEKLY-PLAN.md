@@ -12,9 +12,9 @@ Part IV all finish by Week 11, and Week 12 is for writing.
 | Week | Dates | Focus | Gate at the end of the week |
 | --- | --- | --- | --- |
 | **7** | Mon 26 Oct – Sun 1 Nov | Java/Quarkus extension built and validated; pre-registration frozen; mechanics checks | Hashes sent to the advisor; no study run before this |
-| **8** | Mon 2 Nov – Sun 8 Nov | Round 1: R004–R008 (Python) + R026–R027 (Java) | Round 1 logged, every run `verify` OK |
-| **9** | Mon 9 Nov – Sun 15 Nov | Round 2: R009–R013 + R028–R029; Part IV specs written | Round 2 logged; seven `ai_specs/` files exist |
-| **10** | Mon 16 Nov – Sun 22 Nov | Round 3: R014–R018 + R030–R031; Part IV pipeline run | All 21 study runs done; distilled wiki built |
+| **8** | Mon 2 Nov – Sun 8 Nov | Rounds 1–2: R004–R013 and their change requests (Python) + R026–R027 (Java) | Rounds 1–2 logged, every run `verify` OK |
+| **9** | Mon 9 Nov – Sun 15 Nov | Round 3: R014–R018 and change requests + R028–R029; Part IV specs written | Round 3 logged; seven `ai_specs/` files exist |
+| **10** | Mon 16 Nov – Sun 22 Nov | Round 4: R034–R038 and change requests + R030–R031; Part IV pipeline run | All 46 study runs done (20 builds, 20 change requests, 6 Java); distilled wiki built |
 | **11** | Mon 23 Nov – Sun 29 Nov (Thanksgiving 26 Nov) | Unseal, score, code (Part III); OpenKB comparison (Part IV) | All results tables final |
 | **12** | Mon 30 Nov – Sat 5 Dec | Write, advisor review, submit | Report submitted 5 Dec |
 
@@ -40,8 +40,11 @@ been exercised end to end on both stacks.
 | 7.5 | Seal the Java archive with your passphrase, commit the `.enc` file, fill section 9 of the addendum | You | |
 | 7.6 | Build both bases (`make_base.sh`, `make_base_java.sh`) and record their commits | You | |
 | 7.7 | Mechanics checks R002, R003 (Python) and R024, R025 (Java); fix and log anything they reveal | You | |
-| 7.8 | Freeze: fill section 11 of `PREREGISTRATION.md` and section 9 of the addendum, commit both in one commit, email both sets of hashes to the advisor | You | |
-| 7.9 | Ask the advisor to confirm the advisor of record (the proposal names Yan Wang; the Week 1 and Weeks 3–4 reports name Alex Pang) and the Dec 5 scope in this plan | You | |
+| 7.8 | Freeze: fill section 11 of `PREREGISTRATION.md` and section 9 of the addendum, commit both in one commit, email the hashes of all three archives (Python builds, change requests, Java) to the advisor | You | |
+| 7.9 | Ask the advisor to confirm the advisor of record (the proposal names Yan Wang; the Week 1 and Weeks 3–4 reports name Alex Pang) and the Dec 5 scope in this plan | You | Advisor of record: Yan Wang (decided 29 Oct) |
+| 7.10 | Settle the open pre-registration decisions; `sddlog` 1.2 records tokens | Claude | Done (PR #4) |
+| 7.11 | Fourth condition `sdd_secure`; a change request per Python task (existing-project stage) with 107 sealed held-out cases, validated; schedule regenerated for four conditions; `sddlog` 1.3 | Claude | Done: reviewed, validated (Appendix C) and sealed as `sealed/sealed-heldout-cr-v1.zip.enc`; its hashes are already in section 11 |
+| 7.12 | Run tool `run_build.py`: drives each run in Claude Code's headless mode; the operator only classifies agent turns | Claude | Done; first real use is the mechanics checks (7.7) |
 
 **Time needed from you:** about 2 h review, 1 h sealing and bases, 3–4 h
 mechanics runs.
@@ -52,13 +55,15 @@ mechanics runs.
 
 | # | Work | Who |
 | --- | --- | --- |
-| 8.1 | Round 1, in schedule order: R004 T-ACCOUNTS-01 `sdd`, R005 T-TARX-01 `sdd_clarify`, R006 T-REDACT-01 `unstructured`, R007 T-PASTE-01 `sdd`, R008 T-BOOKMARKS-01 `sdd_clarify`, R026 T-QNOTES-01 `unstructured`, R027 T-QIMPORT-01 `sdd_clarify` | You |
+| 8.1 | Rounds 1 and 2 in schedule order, each build followed by its change request (`run_build.py R004`, then `run_build.py R004C`): R004–R008, then Java R026–R027, then R009–R013. See [weeks/week-08](../weeks/week-08/README.md) | You |
 | 8.2 | After each run: `verify`, run log line, bundle, copy logs into the repository (runbook step 4) | You |
 | 8.3 | Report skeleton: title page, abstract placeholder, introduction, background and the study design chapter, drafted from the proposal, the pre-registration and the research brief | Claude |
 
 **Pacing.** Expect about 20–40 min of agent time for an `unstructured` run and
-1–2.5 h for an SDD run (the practice SDD build took about 160 min). Java runs add
-Maven builds. Plan 2–3 runs a day on 3–4 days, and leave headroom for usage
+1–2.5 h for an SDD run (the practice SDD build took about 160 min); a change
+request is usually shorter than its build. With `run_build.py` you only need to
+be at hand to classify the agent's turns, so other work can go on meanwhile.
+Plan 3–4 builds with their change requests a day, and leave headroom for usage
 limits: an interrupted run is resumed or redone with a spare ID, as
 pre-registered.
 
@@ -68,7 +73,7 @@ pre-registered.
 
 | # | Work | Who |
 | --- | --- | --- |
-| 9.1 | Round 2: R009–R013, then R028 T-QNOTES-01 `sdd_clarify` and R029 T-QIMPORT-01 `sdd` | You |
+| 9.1 | Round 3: R014–R018 with their change requests, then Java R028–R029. See [weeks/week-09](../weeks/week-09/README.md) | You |
 | 9.2 | Part IV step 1: declare the Oracle for the SDD research literature, name at least 3 sources it rejects, and list its key questions | You |
 | 9.3 | Part IV step 2: write the seven `ai_specs/` files (overview, domain knowledge, oracle, collection, distillation, output format, batch process) | You, Claude drafts |
 | 9.4 | Part IV corpus list: 15–20 sources (preprints, the Spec Kit docs and blog posts, practitioner reports), each with its URL and licence noted | Claude drafts, you approve |
@@ -80,12 +85,12 @@ pre-registered.
 
 | # | Work | Who |
 | --- | --- | --- |
-| 10.1 | Round 3: R014–R018, then R030 T-QNOTES-01 `sdd` and R031 T-QIMPORT-01 `unstructured` | You |
-| 10.2 | Optional replication R021–R023 (T-REDACT-01), **only if** round 3 is finished by Thursday 19 Nov | You |
+| 10.1 | Round 4: R034–R038 with their change requests, then Java R030–R031. See [weeks/week-10](../weeks/week-10/README.md) | You |
+| 10.2 | Optional replication R021–R023 and R039 (T-REDACT-01), **only if** round 4 is finished by Thursday 19 Nov | You |
 | 10.3 | Part IV steps 3–4: `collect.py` and `distill.py`; run one source by hand and fix the **spec**, not the output, until the article matches the Oracle's voice and format; then the whole corpus, and the index | You, Claude scaffolds the scripts |
 | 10.4 | Analysis scripts: per-task tables, paired differences, the 4-of-5 consistency rule, Friedman and Wilcoxon (reported, not relied on), and the Java cross-stack table | Claude |
 
-**Gate:** all 21 study runs are done and logged. The held-out suites stay
+**Gate:** all 46 study runs (20 builds, 20 change requests, 6 Java builds) are done and logged. The held-out suites stay
 sealed until the last run is closed.
 
 ---
@@ -131,9 +136,11 @@ constitution, rubrics, raw data link).
 
 Cuts are made in this order, and each one is logged in the deviations log:
 
-1. Drop the optional replication R021–R023 (already optional).
+1. Drop the optional replication R021–R023 and R039 (already optional).
 2. Part IV: compare the two wikis only structurally (proposal Table 1), without
    asking them the key questions.
 3. Drop the Java runs of the last round not yet run (R030–R031), and report the
-   Java extension as two tasks with an incomplete round. The Python study is
-   never cut: its 15 runs are the core of RQ1–RQ4.
+   Java extension as two tasks with an incomplete round.
+4. Drop the change requests of round 4 (R034C–R038C), and report the change
+   requests with one task missing from each condition pair. The 20 Python
+   builds are never cut: they are the core of RQ1–RQ4.

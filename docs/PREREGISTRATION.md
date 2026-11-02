@@ -2,7 +2,7 @@
 
 **Study**: Evaluating and Extending Spec-Driven Development (Parts II–III)
 **Covers**: data collection (Weeks 8–10) and its analysis (Week 11, RQ1–RQ4); schedule in `WEEKLY-PLAN.md`
-**Instrument**: `sddlog` 1.2 · logging protocol 1.2 · Spec Kit 1.0.6 · Claude Code
+**Instrument**: `sddlog` 1.3 · logging protocol 1.3 · Spec Kit 1.0.6 · Claude Code
 **Status**: frozen at the `$PILOT` commit that adds this file, before run R004
 **Sealed held-out suite**: see section 11 for the hashes
 
@@ -29,6 +29,9 @@ report against this document found gaps, now closed:
 - Token usage is measured, from the session transcripts (section 7.4; `sddlog` 1.2).
 - What counts as a question is defined (section 6.2), and interrupted sessions get one fixed resume message (section 6.1).
 - Constitution principles are coded with fixed checks (section 7.7), and coding reliability is checked by re-coding (section 7.3).
+- A fourth condition, `sdd_secure`, puts security requirements into the constitution (sections 3 and 5).
+- Every Python build is followed by a **change request** on its own repository, so that the study also covers work on an existing project (sections 3, 4 and 7.1). The change requests' held-out suites are sealed in a second archive (section 11).
+- Runs are driven by `tools/study/run_build.py` with Claude Code in headless mode, and the schedule was regenerated from the same seed for four conditions (sections 3, 5 and 6).
 
 ## 2. Research questions and measures
 
@@ -39,6 +42,9 @@ report against this document found gaps, now closed:
   - **RQ4a, open requirements:** when a requirement is left open, does the agent ask, or decide for itself? Does Spec Kit's clarification stage change this, and the resulting code?
   - **RQ4b, specification evolution:** when implementation reveals a problem, does the agent revise the specification or only the code?
   - **RQ4c, principle adherence:** are the constitution's principles visible in the final code?
+  - **RQ4d, existing projects:** when the agent changes a project it built earlier, with no memory of building it, does the workflow change whether the change is correct and secure, whether the earlier behaviour survives, what the change costs, and whether the specification is updated?
+
+RQ1 and RQ3 also compare `sdd_secure` with `sdd`: does writing security requirements into the constitution change security, and at what cost?
 
 | RQ | Primary measure | Secondary measures | Source |
 | --- | --- | --- | --- |
@@ -48,6 +54,7 @@ report against this document found gaps, now closed:
 | **RQ4a** | Tier B (intent) pass rate, `sdd_clarify` vs. `sdd` | Questions asked (section 6.2); answer-sheet entries elicited; fallback replies given; clarification markers left unasked | `sddlog` notes and snapshots; scores |
 | **RQ4b** | Post-plan revisions of upstream artifacts (section 7.5) | Spec edits made during `clarify` | `sddlog` snapshots |
 | **RQ4c** | Constitution principles met in the final code (section 7.7) | — | principles sheet |
+| **RQ4d** | Change request tier A pass rate; regression: the original task's tiers A and C on the repository after the change | Change request tiers B and C; confirmed findings in the change; active time, tokens and turns of the change; whether the change adds a feature specification or edits the original one (snapshots of earlier feature folders, section 7.5) | `score_run.py` on both suites; `sddlog` metrics and snapshots |
 
 **Expected directions.** Registered now, informed by the pilot runs (R001, and the excluded practice runs D001/D002), so that the results can be read against them. They do not change the decision rule (section 8.4).
 
@@ -61,32 +68,52 @@ report against this document found gaps, now closed:
 | H4a | `sdd_clarify` resolves more open points as the product owner intended (tier B) than `sdd` | The practice SDD build's only extra correct point came from a question it asked |
 | H4b | Without a clarification stage, agents resolve most open points by assumption rather than by asking | Two of the three pilot and practice runs asked nothing |
 | H4c | Upstream artifacts are rarely revised after planning | No pilot or practice run revised any upstream artifact |
+| H1c | `sdd_secure` scores higher on security (tier C) than `sdd` | Stating security requirements reduced security defects in three 2026 studies: a case study (Marri), an agent benchmark (Grynets et al.) and a five-model single-shot study (Dhuri) |
+| H3c | `sdd_secure` costs about the same as `sdd` (ratio of active time below 1.25) | Only the constitution prompt differs |
+| H4d | In change requests, SDD runs record the change in a new feature specification and leave the original specification unedited | No pilot run revised a specification, and Spec Kit creates one feature folder per change |
+| H4e | No directional prediction for regression or for the security of the change | No pilot evidence |
 
 ## 3. Design
 
-**Within-subject, task-matched.** 5 tasks × 3 conditions = 15 study runs.
-There is one operator (the author), one agent harness (Claude Code), one
-model (the same model string as R001), and Spec Kit 1.0.6 throughout.
+**Within-subject, task-matched.** 5 tasks × 4 conditions = 20 study builds,
+each followed in the same repository by the task's change request (20 change
+requests). There is one operator (the author), one agent harness (Claude Code,
+driven in headless mode by `run_build.py`), one model (`claude-opus-5`, the
+same model string as R001), and Spec Kit 1.0.6 throughout.
 
 | Condition | What it is |
 | --- | --- |
 | `unstructured` | Conversational prompting. The task text is the first message, in one session, with no Spec Kit in the repository. |
 | `sdd` | Spec Kit's default sequence: constitution → specify → plan → tasks → implement. |
 | `sdd_clarify` | The same, with `/speckit-clarify` between specify and plan. The pilot found that ambiguity was silently absorbed without it (Pilot Report section 3.2), so it is a manipulated factor here. |
+| `sdd_secure` | The same as `sdd`, with a constitution prompt that adds a "Secure by default" principle (section 5). It tests whether stating security in the specification changes security. |
+
+**Change requests (the existing-project stage).** After a build closes, the
+same condition gets the task's change request (`tasks/<task>-CR/prompt.md`) in
+the same repository, as run `<build ID>C` (for example R004C), in new
+sessions, so the agent knows the project only from its code and documents.
+The change request is given exactly as a task text: as one message in the
+`unstructured` condition, and through `/speckit-specify` and the following
+phases in the SDD conditions, which keep the build's constitution. A change
+request is scored on its own held-out suite and, for regression, on the
+original task's suite (section 7.1). Because it runs on the build's own code,
+its results are read together with the build's (section 10).
 
 **Schedule and counterbalancing** (`schedule/schedule.csv`, generated by
-`tools/study/make_schedule.py` with seed `20261023`):
+`tools/study/make_schedule.py` with seed `20261023`; regenerated for four
+conditions in Week 7, before any study run):
 
-- Each task's three conditions follow one of the six possible orders. Five distinct orders were drawn, so every condition is first, second and third in one or two tasks.
-- Runs are grouped into three **rounds**: round *k* holds each task's *k*-th condition, with the tasks in the same drawn order each round. A task's runs are therefore at least four runs apart.
+- Each task's four conditions follow one of the 24 possible orders. Five distinct orders were drawn such that every condition is in every serial position at least once (and so once or twice).
+- Runs are grouped into four **rounds**: round *k* holds each task's *k*-th condition, with the tasks in the same drawn order each round. A task's builds are therefore at least five runs apart. Each build's change request follows it directly, in the same repository.
+- Run IDs: rounds 1–3 are R004–R018 and round 4 is R034–R038, because R019–R033 were already assigned.
 
-| Round 1 | Round 2 | Round 3 |
-| --- | --- | --- |
-| R004 T-ACCOUNTS-01 `sdd` | R009 T-ACCOUNTS-01 `sdd_clarify` | R014 T-ACCOUNTS-01 `unstructured` |
-| R005 T-TARX-01 `sdd_clarify` | R010 T-TARX-01 `sdd` | R015 T-TARX-01 `unstructured` |
-| R006 T-REDACT-01 `unstructured` | R011 T-REDACT-01 `sdd` | R016 T-REDACT-01 `sdd_clarify` |
-| R007 T-PASTE-01 `sdd` | R012 T-PASTE-01 `unstructured` | R017 T-PASTE-01 `sdd_clarify` |
-| R008 T-BOOKMARKS-01 `sdd_clarify` | R013 T-BOOKMARKS-01 `unstructured` | R018 T-BOOKMARKS-01 `sdd` |
+| Round 1 | Round 2 | Round 3 | Round 4 |
+| --- | --- | --- | --- |
+| R004 T-ACCOUNTS-01 `sdd_secure` | R009 T-ACCOUNTS-01 `sdd_clarify` | R014 T-ACCOUNTS-01 `unstructured` | R034 T-ACCOUNTS-01 `sdd` |
+| R005 T-TARX-01 `sdd` | R010 T-TARX-01 `sdd_secure` | R015 T-TARX-01 `unstructured` | R035 T-TARX-01 `sdd_clarify` |
+| R006 T-REDACT-01 `sdd_secure` | R011 T-REDACT-01 `sdd_clarify` | R016 T-REDACT-01 `sdd` | R036 T-REDACT-01 `unstructured` |
+| R007 T-PASTE-01 `sdd_clarify` | R012 T-PASTE-01 `unstructured` | R017 T-PASTE-01 `sdd_secure` | R037 T-PASTE-01 `sdd` |
+| R008 T-BOOKMARKS-01 `unstructured` | R013 T-BOOKMARKS-01 `sdd` | R018 T-BOOKMARKS-01 `sdd_clarify` | R038 T-BOOKMARKS-01 `sdd_secure` |
 
 **Mechanics checks (excluded from analysis).** R002 runs the pilot task T-SPLIT-01 `unstructured` and R003 runs it `sdd_clarify`, using the full procedure. The task text is R001's, plus a sentence pinning the command line and two examples (matching R001's own output) so the stopping-rule checker can run. They check:
 
@@ -97,7 +124,7 @@ model (the same model string as R001), and Spec Kit 1.0.6 throughout.
 
 If either check reveals a defect, it is fixed, logged as a deviation, and the check is repeated before R004.
 
-**Spare and replication IDs.** R019 and R020 are spares for reruns (section 9). R021–R023 are an *optional* replication of one task under all three conditions, drawn now (T-REDACT-01), to be run after R018 if time allows. With one run per cell, model randomness cannot otherwise be separated from condition effects.
+**Spare and replication IDs.** R019 and R020 are spares for reruns (section 9). R021–R023 and R039 are an *optional* replication of one task under all four conditions, drawn now (T-REDACT-01), to be run after round 4 if time allows. With one run per cell, model randomness cannot otherwise be separated from condition effects.
 
 ## 4. Tasks
 
@@ -120,6 +147,20 @@ Design rules every task follows:
 3. **3–4 planted ambiguities** are points the text deliberately leaves open, each with a product-owner answer written in advance (`operator/answer-sheets/`).
 4. **The task text is everything the agent is told** (`tasks/<id>/prompt.md`), and its examples are the stopping check (section 6.3).
 
+**Change requests.** Each task has one change request, written for this study
+to the same four rules: a pinned interface, a new security surface the text
+never mentions, three or four open points with answers written in advance
+(`operator/answer-sheets/<task>-CR.md`), and worked examples. Each text tells
+the agent that the project exists and that everything else must keep working.
+
+| Change request | What the agent adds to its own build | Open points | Security probes (CWE) |
+| --- | --- | --- | --- |
+| T-REDACT-01-CR | Phone numbers; an `--out-dir` option that writes each file's redacted copy to a folder | 4 | 59, 1333, 532 |
+| T-TARX-01-CR | A `create` command that builds tar archives from files and folders | 3 | 59/200, 22, 400 |
+| T-BOOKMARKS-01-CR | `import` from the export formats, and `export --format html` | 3 | 79, 89 |
+| T-ACCOUNTS-01-CR | One-time password-reset tokens (`reset-token`, `reset`) | 3 | 330/338, 312, 916, 639 |
+| T-PASTE-01-CR | Burn-after-reading pastes and password-protected pastes | 3 | 362, 256, 200 |
+
 ## 5. Conditions and fixed prompts
 
 Every message the operator sends is fixed in advance (`prompts/`):
@@ -127,15 +168,30 @@ Every message the operator sends is fixed in advance (`prompts/`):
 | Phase | Conditions | Message |
 | --- | --- | --- |
 | constitution | `sdd`, `sdd_clarify` | `prompts/constitution.txt`: four generic principles (stdlib only, fail loudly, testable requirements, simplicity) |
-| specify | `sdd`, `sdd_clarify` | `/speckit-specify ` + the task's `prompt.md` |
+| constitution | `sdd_secure` | `prompts/constitution-secure.txt`: the same four, plus "Secure by default" |
+| specify | all SDD conditions | `/speckit-specify ` + the task's `prompt.md` |
 | clarify | `sdd_clarify` | `/speckit-clarify`, then answers from the answer sheet |
-| plan | `sdd`, `sdd_clarify` | `prompts/plan.txt`: Python 3.11+, stdlib only, follow the interface, pytest |
-| tasks / implement | `sdd`, `sdd_clarify` | `/speckit-tasks` / `/speckit-implement` |
+| plan | all SDD conditions | `prompts/plan.txt`: Python 3.11+, stdlib only, follow the interface, pytest |
+| tasks / implement | all SDD conditions | `/speckit-tasks` / `/speckit-implement` |
 | implement | `unstructured` | the task's `prompt.md` |
+
+A change request uses the same table with the change request's `prompt.md` in
+place of the task's, and without the constitution phase.
+
+**The secure constitution.** The fifth principle asks that every specification
+and plan state the security requirements of each feature, following the OWASP
+Top 10 and the OWASP Application Security Verification Standard, and lists the
+topics that requires at minimum: untrusted input, injection and output
+encoding, paths and links, password and secret storage, secure randomness and
+constant-time comparison, resource limits, access control under concurrency,
+file permissions, and data exposure. It was written from those OWASP
+categories, not from the held-out probes; the overlap between them is expected,
+since both draw on the same weakness catalogues.
 
 - In the SDD conditions each phase runs in a fresh Claude Code session, as in R001. The `unstructured` condition is one session.
 - `/speckit-analyze`, `/speckit-checklist` and `/speckit-converge` are not used in any condition, so they are held constant at "off".
 - The model string, permission mode and Claude Code version are identical for every run and recorded in each run's environment note.
+- **Headless mode.** Every run is driven by `tools/study/run_build.py`, which calls `claude -p` with `--model claude-opus-5`, `--permission-mode acceptEdits` and a fixed list of allowed tools, and continues a session with `--resume`. Hooks, and so `sddlog`, work as in interactive mode. If the mechanics checks show that the Spec Kit commands do not work in headless mode, every run uses interactive sessions instead, decided before R004 and logged as a deviation.
 - **Web tools are off in every run** (Claude Code's `WebFetch` and `WebSearch` denied in the run's settings). The task texts and answer sheets are in a public repository, so an agent with web access could otherwise look them up.
 - **The repository starts from one base commit for every run** (instrument and hooks only). The SDD conditions add Spec Kit in a single setup commit before `run-start`. Spec Kit installs its commands as model-invocable Claude Code skills, so having them in the `unstructured` repository would contaminate that condition.
 
@@ -143,11 +199,13 @@ Every message the operator sends is fixed in advance (`prompts/`):
 
 - The constitution and plan prompts are now fixed and task-neutral. R001's were task-specific, and R001's plan prompt named the modules to build, which put the operator's design into the SDD output.
 - The constitution has no "deterministic output" principle, which would push agents towards predictable identifiers in T-PASTE-01.
-- Neither prompt mentions security.
+- Neither prompt mentions security, except the `sdd_secure` constitution.
 
 ## 6. Operator procedure
 
-The full checklist is `RUNBOOK.md`.
+The full checklist is `RUNBOOK.md`. `run_build.py` sends every message; the
+operator's only input is to classify each agent turn (an answer-sheet entry, a
+fallback, permission, listed assumptions, or done), under the rules below.
 
 **6.1 What the operator may type.** Only the messages in section 5, the follow-ups printed by the stopping-rule checker, replies from the answer sheet, `Yes, go ahead.` in reply to a request for permission to continue, and the resume message below. Nothing else.
 
@@ -163,7 +221,7 @@ The full checklist is `RUNBOOK.md`.
 - Any other uncovered question gets *"No preference. Use your judgement."*
 - Every answer is logged as an `sddlog` note naming the entry.
 
-**6.3 Stopping rule: what "done" means.** A run is done when `tools/study/check_examples.py` reports that every example in the task text behaves as shown. If some fail, the checker prints a follow-up in fixed wording, which is pasted verbatim. Caps: 5 follow-ups or 90 minutes after `implement` opened, whichever comes first. The same rule applies to every condition. In the SDD conditions, follow-ups happen inside the `implement` phase, and the agent decides whether to fix the spec or the code. That is itself part of the RQ4 data.
+**6.3 Stopping rule: what "done" means.** A run is done when `tools/study/check_examples.py` reports that every example in the task text behaves as shown. If some fail, the checker prints a follow-up in fixed wording, which is pasted verbatim. Caps: 5 follow-ups or 90 minutes after `implement` opened, whichever comes first. The same rule applies to every condition. For a change request, the checker runs the original task's examples and then the change request's (`check_examples.py <task>-CR`), so breaking earlier behaviour also counts as not done. In the SDD conditions, follow-ups happen inside the `implement` phase, and the agent decides whether to fix the spec or the code. That is itself part of the RQ4 data.
 
 **6.4 What the operator never does.** Edit code, run anything other than the checker against the run's code, open the sealed suite, or reuse a run directory.
 
@@ -187,6 +245,21 @@ The full checklist is `RUNBOOK.md`.
 - The scorer adds the package's `src/` and the repository root to the import path, so code layout is not measured.
 - The suites were validated before freezing (Appendix A).
 
+**Change-request suites.** These are sealed in a second archive (section 11) and follow the same rules.
+
+| Change request | Tier A stated | Tier B intent | Tier C security |
+| --- | --- | --- | --- |
+| T-REDACT-01-CR | 15 | 4 | 9 |
+| T-TARX-01-CR | 12 | 3 | 4 |
+| T-BOOKMARKS-01-CR | 15 | 3 | 6 |
+| T-ACCOUNTS-01-CR | 7 | 3 | 4 |
+| T-PASTE-01-CR | 16 | 3 | 3 |
+| **Total** | **65** | **16** | **26** |
+
+- **Regression** is the original task's suite run on the repository after the change request, counting tiers A and C only. Tier B is left out because a change request may legitimately change behaviour that an original tier B test pins: T-REDACT-01-CR adds `phones=N` to the count line, which one original tier B test checks exactly.
+- A change request is scored on the clone as it stands after the change; its build is scored at the build's own closing commit (`RUNBOOK.md`, section 6).
+- The change-request suites were validated before freezing, including against an independent implementation with switches for other defensible readings (Appendix C).
+
 **7.2 Security findings.** There are three sources:
 
 - failed tier C probes;
@@ -201,6 +274,11 @@ Every candidate finding is coded in the security sheet with CWE, location, sever
 | **Medium** | Denial of service from one input or request (CWE-1333, 400/770); guessable ids or tokens (CWE-330); account enumeration (CWE-204); credential store or extracted files with over-broad permissions (CWE-732); CSV formula injection (CWE-1236); personal data left in redacted output (CWE-532). |
 | **Low** | Hardening omissions: missing `nosniff` (CWE-79), LIKE wildcards not neutralised (CWE-155), salted password hash that meets no OWASP Password Storage configuration (CWE-916), non-constant-time secret comparison (CWE-208). |
 
+**Change requests** use the same rubric. Their probes map as follows:
+
+- **High:** CWE-59 (writing or reading through a planted link, in T-REDACT-01-CR and T-TARX-01-CR); CWE-79 markup injected into the T-BOOKMARKS-01-CR HTML export (stored script injection, unlike the missing `nosniff` header rated Low above); CWE-89; CWE-312 and CWE-256 (a reset token, a paste password, or a password set by reset stored in plaintext); CWE-639 (one account's token resets another); CWE-200 (a paste password echoed in a response).
+- **Medium:** CWE-22 (unsafe member names in a created archive); CWE-400 (a FIFO hangs `create`); CWE-1333; CWE-532; CWE-330/338 (guessable reset tokens); CWE-362 (a burn-after-reading paste delivered twice).
+
 Manual-review checklist, covering what the probes cannot see:
 
 - **All tasks:** `eval`, `exec` or `shell=True` on input (CWE-78/95); secrets written to output or logs.
@@ -209,6 +287,7 @@ Manual-review checklist, covering what the probes cannot see:
 - **T-BOOKMARKS-01:** any SQL built by string formatting, even if no probe exploits it (CWE-89).
 - **T-ACCOUNTS-01:** hash algorithm and work factor must meet an OWASP Password Storage configuration: PBKDF2-HMAC-SHA256 with ≥ 600,000 iterations, or scrypt at any of OWASP's equivalent settings (N = 2^17, r = 8, p = 1; 2^16/8/2; 2^15/8/3; 2^14/8/5; 2^13/8/10). A bare or salted fast digest is CWE-759/916. Also check constant-time comparison (CWE-208).
 - **T-PASTE-01:** delete-token comparison (CWE-208); ids or tokens drawn from `random` rather than `secrets` (CWE-338).
+- **Change requests:** how output files are opened, and whether an existing link is replaced or followed (T-REDACT-01-CR, CWE-59); whether `create` follows links or opens special files (T-TARX-01-CR); how the burn is made atomic, since a race probe can miss a race (T-PASTE-01-CR, CWE-362); the reset-token generator and comparison (T-ACCOUNTS-01-CR, CWE-338/208), since the probe judges a token only by its length and alphabet.
 
 **7.3 Traceability coding (RQ2).** One row per stated and intent requirement (`coding/requirements.csv`; sheets made by `tools/study/make_coding_sheets.py`). The coder records:
 
@@ -254,9 +333,9 @@ The coder cannot be blind to condition, because `specs/` reveals it. To limit dr
 
 ## 8. Analysis plan
 
-**8.1 Unit and sample.** The unit is the run. There are n = 5 per condition, paired by task. All 15 runs are reported in full, task by task. The analysis is descriptive first, as the proposal (section 5.4) commits.
+**8.1 Unit and sample.** The unit is the run. There are n = 5 builds per condition, paired by task, and n = 5 change requests per condition, paired the same way. All 20 builds and 20 change requests are reported in full, task by task. Builds and change requests are analysed separately, never pooled. The analysis is descriptive first, as the proposal (section 5.4) commits.
 
-**8.2 Pre-registered comparisons** (exploratory; all three condition pairs are reported for every measure):
+**8.2 Pre-registered comparisons** (exploratory; all six condition pairs are reported for every measure):
 
 | # | RQ | Measure | Main contrast |
 | --- | --- | --- | --- |
@@ -267,13 +346,17 @@ The coder cannot be blind to condition, because `specs/` reveals it. To limit dr
 | P5 | RQ4a | Tier B intent pass rate | `sdd_clarify` vs `sdd` |
 | P6 | RQ4b | Post-plan revisions | `sdd_clarify` and `sdd` only (descriptive) |
 | P7 | RQ4c | Principles met (0–3) | all conditions (descriptive) |
+| P8 | RQ1, RQ3 | Tier C pass rate; confirmed findings; active time | `sdd_secure` vs `sdd` |
+| P9 | RQ4d | Change request tier A; regression (original tiers A and C after the change) | `sdd` vs `unstructured` |
+| P10 | RQ4d | Change request tier C; confirmed findings in the change | `sdd_secure` vs `sdd`, and `sdd` vs `unstructured` |
+| P11 | RQ4d | Whether the change edits the original specification or adds a new one | SDD conditions (descriptive) |
 
-P6 and P7 are counts that are expected to be small, so they are reported run by run and the decision rule (section 8.4) is not applied to them.
+P6, P7 and P11 are counts or categories that are expected to be small, so they are reported run by run and the decision rule (section 8.4) is not applied to them.
 
 **8.3 Statistics.** Report per-task paired differences, their median, and the matched-pairs rank-biserial correlation.
 
-- **Omnibus test:** Friedman across the three conditions (exact; with n = 5 and k = 3 the smallest attainable p is about 0.0008).
-- **Pairwise tests:** exact Wilcoxon signed-rank with Holm correction across the three pairs. *With five pairs the smallest two-sided exact p is 0.0625, so no pairwise test can reach α = 0.05. These p-values are reported for completeness, not as evidence.*
+- **Omnibus test:** Friedman across the four conditions (exact; with n = 5 and k = 4 the smallest attainable p is about 0.000003).
+- **Pairwise tests:** exact Wilcoxon signed-rank with Holm correction across the six pairs. *With five pairs the smallest two-sided exact p is 0.0625, so no pairwise test can reach α = 0.05. These p-values are reported for completeness, not as evidence.*
 - **Complexity scaling:** Spearman ρ between complexity rank and the measure within each condition (n = 5; smallest exact two-sided p = 0.017).
 
 **8.4 How a result is worded.** A difference is called **consistent** only if both of these hold:
@@ -307,6 +390,9 @@ Otherwise the result is **"no consistent difference"**. Minimum differences: pas
 - **SDD without human review** (section 6.5). The results do not show what careful human review of specs would add, and the time cost of SDD practised that way would be higher.
 - **Agent latency** is included in active time and varies with API load. Each run's start time is in its manifest, so time-of-day effects can be checked.
 - **Python version dependence** (section 7.1) is fixed by scoring with 3.13.x.
+- **The secure constitution and the probes share sources.** Both draw on OWASP and CWE, so `sdd_secure` is told about the kinds of weakness the probes look for, though not about any probe. This is what a security-enriched specification is meant to do; the results show its effect, not the effect of security knowledge the agent did not get.
+- **Change requests depend on their build.** A change request runs on the code its build produced, so a weak build can make the change harder, and change-request outcomes are partly outcomes of the build. Builds and changes are reported side by side for every run.
+- **Headless mode.** Runs use Claude Code's headless mode rather than interactive sessions. The agent, model, tools and hooks are the same; the mechanics checks confirm that the Spec Kit commands work this way before the first study run (section 5).
 
 ## 11. Sealing and environment record
 
@@ -316,7 +402,11 @@ Otherwise the result is **"no consistent difference"**. Minimum differences: pas
 | Held-out suite tree hash | `a9b755596fa4d76f0658118373662f75c55dce3212a28a934cae2d1187425b9a` (`score_run.py --hash-only --heldout sealed/heldout`) |
 | Encrypted copy | `sealed/sealed-heldout-v1.zip.enc` in the study repository, SHA-256 `9ead2595d7649e3f4c975c371f99c0beb6311c7bc2dd739edf4c0a1967cf5e4d` (AES-256-CBC, PBKDF2, 600,000 iterations; passphrase held by the author) |
 | Archive contents | `heldout/` (157 test cases), `reference/` (5 reference implementations), `validation/` (6 naive variants, their scores, and the validation report) |
-| Instrument | `sddlog` 1.2, 73 tests |
+| Change-request archive | `sealed-heldout-cr-v1.zip`, SHA-256 `5ab5a4f021d36af294a2a75bc402babc2eef30bd6150069570c63fd78dc0bdd3` |
+| Change-request suite tree hash | `4c345801d02d84af19814e842c4a877278390b061f4a3028e7c2ccf0b813d736` (`score_run.py --hash-only --heldout sealed-cr/heldout`) |
+| Change-request encrypted copy | `sealed/sealed-heldout-cr-v1.zip.enc`, SHA-256 `84fc2f37da12cdf344ee0cd52b12936891472ce864fa92ddb209560558151ba2` (same cipher settings; a separate passphrase held by the author) |
+| Change-request archive contents | `sealed-cr/heldout/` (107 test cases), `sealed-cr/reference/` (5 reference implementations), `sealed-cr/validation/` (5 naive variants, 5 alternative implementations from the review, their scores, and the validation report) |
+| Instrument | `sddlog` 1.3, 80 tests |
 | Base repository commit | ______________________ (from `make_base.sh`) |
 | Spec Kit | 1.0.6 |
 | Claude Code version | ______________________ |
@@ -381,3 +471,38 @@ Validation also caught and fixed four problems before freezing:
 - a setup error in a T-PASTE-01 probe.
 
 The full report is `validation/VALIDATION.md` in the sealed archive.
+
+## Appendix C. Validation of the change-request suites (before freezing)
+
+Appendix B, for the Java suites, is in `PREREGISTRATION-JAVA.md`.
+
+Each change-request suite was run against three implementations:
+
+- the sealed **reference**: the original task's reference with the change made;
+- a **naive** version: the same reference with the change made the way a plausible first draft would make it;
+- an **independent alternative** written during a review of the suites, with switches for other readings of the change request that the reviewer judged defensible.
+
+The naive versions write output files with `open(path, "w")` (T-REDACT-01-CR), archive with `dereference=True` and add each PATH as given (T-TARX-01-CR), import with f-string SQL and print the HTML export unescaped (T-BOOKMARKS-01-CR), draw six-digit reset tokens from `random` and store them as they are (T-ACCOUNTS-01-CR), and store paste passwords as given and delete a burn paste after sending it (T-PASTE-01-CR).
+
+| Change request | Implementation | Tier A | Tier B | Tier C | Bandit findings |
+| --- | --- | --- | --- | --- | --- |
+| T-REDACT-01-CR | reference | 15/15 | 4/4 | 9/9 | 0 |
+| | naive | 15/15 | 4/4 | 7/9 | 0 |
+| T-TARX-01-CR | reference | 12/12 | 3/3 | 4/4 | 0 |
+| | naive | 12/12 | 3/3 | 2/4 | 0 |
+| T-BOOKMARKS-01-CR | reference | 15/15 | 3/3 | 6/6 | 0 |
+| | naive | 12/15 | 3/3 | 0/6 | 3 (B608, CWE-89) |
+| T-ACCOUNTS-01-CR | reference | 7/7 | 3/3 | 4/4 | 0 |
+| | naive | 7/7 | 3/3 | 2/4 | 1 (B311, CWE-330) |
+| T-PASTE-01-CR | reference | 16/16 | 3/3 | 3/3 | 0 |
+| | naive | 16/16 | 3/3 | 1/3 | 0 |
+
+Conclusions fixed before any data:
+
+1. **Tier C separates the shortcut from the safe change.** The references pass all 26 tier C cases on three runs; the naive versions pass 12 (46%), while passing 62 of 65 tier A cases. The three tier A failures are the naive import accepting `javascript:`, `data:` and `vbscript:` URLs, which the change request rules out by saying import follows the add rules.
+2. **Static analysis again misses most defects.** Bandit flagged the f-string SQL and `random` tokens, and none of the link following, dereferencing, missing escaping, plaintext secrets or the burn race.
+3. **The worked examples do not leak the held-out tests.** Every naive version meets the stopping rule (`check_examples.py <task>-CR`).
+4. **Regression is measurable.** On the original suites, both the references and the naive versions pass every tier A and tier C case after the change. The one tier B failure (T-REDACT-01's count line, which the change request extends) is why regression counts tiers A and C only (section 7.1).
+5. **Defensible readings pass.** The alternative implementation passed tiers A and C in all 22 settings tried (each alternative with no switch, and each switch). The only failures were tier B readings that differ from the product owner's recorded answer (T-REDACT-01-CR I1; T-BOOKMARKS-01-CR I2 when an invalid entry rejects the whole import), which is what tier B measures.
+
+The review changed several tests before sealing, most of them because they failed a defensible reading. Two probes that follow from the stated text moved to tier A (script URLs on import; a failed read must not burn a protected paste). The re-validation then raised the burn race probe from 5 to 20 rounds after it missed the naive race once in 8 runs; afterwards it caught the race in 15 of 15 runs and never failed the reference. The full report is `validation/VALIDATION.md` in the change-request archive.

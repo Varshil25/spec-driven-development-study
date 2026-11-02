@@ -26,12 +26,16 @@ A Quarkus service counts as started once its port accepts connections, since
 the task text does not promise any particular log line. A failed build is
 reported to the agent in fixed wording, like any failing example.
 
+A change-request task (for example T-REDACT-01-CR) lists the original task
+under "includes": the original task's examples are checked first, each set in
+its own scratch directory, so a change that breaks the original behaviour is
+reported to the agent like any other failing example.
+
 Standard library only. Exit status: 0 all examples pass, 1 some fail,
 2 usage or setup error.
 """
 
 import argparse
-import gzip
 import http.client
 import io
 import json
@@ -68,6 +72,7 @@ def short(text, limit=200):
 
 def build_fixtures(spec, workdir):
     for name, content in spec.get("files", {}).items():
+        (workdir / name).parent.mkdir(parents=True, exist_ok=True)
         (workdir / name).write_text(content)
     for archive in spec.get("archives", []):
         path = workdir / archive["name"]
@@ -106,6 +111,11 @@ def check_cli(spec, repo, workdir, python):
         if "stdout" in expect and out != expect["stdout"]:
             problems.append("standard output was %r instead of %r"
                             % (short(out), short(expect["stdout"])))
+        if "stdout_contains" in expect and expect["stdout_contains"] not in out:
+            problems.append("standard output did not contain %r (it was %r)"
+                            % (expect["stdout_contains"], short(out)))
+        if expect.get("stdout_nonempty") and not out.strip():
+            problems.append("nothing was printed to standard output")
         if "stderr_contains" in expect and expect["stderr_contains"] not in err:
             problems.append("standard error did not contain %r (it was %r)"
                             % (expect["stderr_contains"], short(err)))
@@ -329,6 +339,22 @@ def follow_up(failures):
     return "\n".join(lines)
 
 
+def run_spec(spec, repo, args):
+    """Run one task's examples in a fresh scratch directory; return the failures."""
+    workdir = Path(tempfile.mkdtemp(prefix="examples-"))
+    try:
+        build_fixtures(spec, workdir)
+        failure = build_quarkus(repo) if spec.get("runtime") == "quarkus" else None
+        if failure:
+            print("FAIL  %s" % failure[0]["show"])
+            return [failure]
+        if spec["kind"] == "http":
+            return check_http(spec, repo, workdir, args.python, args.java)
+        return check_cli(spec, repo, workdir, args.python)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("task", help="task id, e.g. T-REDACT-01")
@@ -342,20 +368,20 @@ def main(argv=None):
         print("no examples defined for %s (%s)" % (args.task, spec_path), file=sys.stderr)
         return 2
     spec = json.loads(spec_path.read_text())
+    specs = []
+    for included in spec.get("includes", []):
+        included_path = KIT / "tasks" / included / "examples.json"
+        if not included_path.exists():
+            print("no examples defined for %s (%s)" % (included, included_path), file=sys.stderr)
+            return 2
+        specs.append(json.loads(included_path.read_text()))
+    specs.append(spec)
     repo = Path(args.repo).resolve()
-    workdir = Path(tempfile.mkdtemp(prefix="examples-"))
-    try:
-        build_fixtures(spec, workdir)
-        failure = build_quarkus(repo) if spec.get("runtime") == "quarkus" else None
-        if failure:
-            print("FAIL  %s" % failure[0]["show"])
-            failures = [failure]
-        elif spec["kind"] == "http":
-            failures = check_http(spec, repo, workdir, args.python, args.java)
-        else:
-            failures = check_cli(spec, repo, workdir, args.python)
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    failures = []
+    for current in specs:
+        if len(specs) > 1:
+            print("-- examples of %s" % current["task"])
+        failures += run_spec(current, repo, args)
 
     if not failures:
         print("\nAll examples pass. Stopping rule met: the run is done.")
