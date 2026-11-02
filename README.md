@@ -13,7 +13,7 @@ its collected data. It contains:
   full command sequence (R001), and the logging instrument `sddlog` with its
   protocol.
 - **Milestone 3 (Weeks 5–9):** the design of the controlled study (5 tasks ×
-  3 conditions = 15 runs), its pre-registration and runbook, `sddlog` 1.1,
+  3 conditions = 15 runs), its pre-registration and runbook, `sddlog` 1.2,
   the task set, the scoring tools, and one practice comparison on a login task.
   The 15 study runs have not been carried out yet. See the
   [Weeks 5–9 report](docs/WEEKS-5-9-REPORT.md).
@@ -44,7 +44,7 @@ published suites are the ones frozen before any data existed.
 | [docs/LOGGING-PROTOCOL.md](docs/LOGGING-PROTOCOL.md) | **Deliverable.** The logging protocol (version 1.1): capture architecture, event schema, measures, operator procedure, verification gate, limitations |
 | [docs/PILOT-REPORT.md](docs/PILOT-REPORT.md) | **Deliverable.** What the pilot run showed, and what it changed about the study design |
 | [tools/sddlog/sddlog.py](tools/sddlog/sddlog.py) | The instrument: run lifecycle, hook capture, git edit capture, transcript ingest, metrics, verification |
-| [tools/sddlog/tests/](tools/sddlog/tests/) | 67 tests covering redaction, event invariants, hook payloads, edit capture, metrics, verification, and the three study conditions |
+| [tools/sddlog/tests/](tools/sddlog/tests/) | 73 tests covering redaction, event invariants, hook payloads, edit capture, metrics, token usage, verification, and the three study conditions |
 | [tools/study/](tools/study/) | Study tools: base-repository builders (Python and Java), the Quarkus skeleton, stopping-rule checker, scorer (with Java build and SpotBugs support), coding-sheet generator, schedule generator |
 | [tasks/](tasks/) | Task texts and stopping-rule examples: 5 Python study tasks, 2 Java/Quarkus study tasks (T-QNOTES-01, T-QIMPORT-01), the pilot task T-SPLIT-01, the Java mechanics task T-QCOUNT-01, and the practice task T-LOGIN-01 |
 | [operator/answer-sheets/](operator/answer-sheets/) | Product-owner answers to each task's open points, and the rules for answering |

@@ -7,6 +7,14 @@ difference between conditions is whether the agent *asks*.
 
 ## Rules (pre-registered)
 
+0. **What counts as a question** (PREREGISTRATION.md section 6.2). An agent
+   turn is a question when it ends by asking you for information or for a
+   decision, including clarification markers or `/speckit-clarify` questions
+   it puts to you. A list of assumptions, decisions or review items that asks
+   for nothing is **not** a question: send nothing, and log
+   `python3 tools/sddlog/sddlog.py note --text "LISTED: <what was listed, shortened>"`.
+   If the agent then waits for input, treat its turn as finished and go to the
+   stopping-rule check (RUNBOOK step 3).
 1. **Answer only what is asked. Never volunteer.** If the agent does not ask,
    it does not get the information, even if you can see it guessing wrong.
 2. **Find the entry that covers the question** and reply with that entry's
