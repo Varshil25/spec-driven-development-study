@@ -192,7 +192,7 @@ mkdir -p ~/sdd-study/bundles && git bundle create ~/sdd-study/bundles/$RUN.bundl
 cp -r logs/runs/$RUN $PILOT/logs/runs/
 ```
 
-Add a line to `schedule/run-log.md` in `$PILOT`. **Keep the run directory**: Part III scores it.
+Add a line to `schedule/run-log.md` in `$PILOT`. **Keep the run directory**: Part III scores it. In the cloud workspace, whose folders do not last, also copy the bundle into the repository (`cp ~/sdd-study/bundles/$RUN.bundle $PILOT/logs/bundles/`): Part III then scores a clone of the bundle.
 
 ---
 

@@ -4,7 +4,7 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 
 | Run | Date | Task | Condition | verify | Follow-ups | Cap reached? | Status | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| R002 | | T-SPLIT-01 | unstructured | | | | | mechanics check |
+| R002 | 2026-11-03 | T-SPLIT-01 | unstructured | OK | 0 | no | ok | mechanics check; operated by Claude; 1 LISTED, no questions; 7.9 min active, 1.86M tokens, about $2.49 (Claude Code's estimate) |
 | R003 | | T-SPLIT-01 | sdd_clarify | | | | | mechanics check |
 | R024 | | T-QCOUNT-01 | unstructured | | | | | Java mechanics check |
 | R025 | | T-QCOUNT-01 | sdd_clarify | | | | | Java mechanics check |

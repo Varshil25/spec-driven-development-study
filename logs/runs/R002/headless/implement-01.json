@@ -1,0 +1,109 @@
+{
+  "phase": "implement",
+  "call": 1,
+  "sent": "Build a command-line tool that reads a CSV file of shared group expenses and prints who owes whom in order to settle up. The CSV has a header row with columns payer, amount, description. The participant list is supplied separately as a comma-separated argument. Every participant owes an equal share of the group total. The tool computes each person's net balance and prints a minimal list of payments that settles every balance to zero. All money is handled in whole cents and rounding must never lose or invent money: the payments printed must sum exactly to the total imbalance. Malformed input (missing file, unknown payer not in the participant list, non-numeric or negative amount, empty participant list) must produce a clear error on stderr and a non-zero exit code. Python 3, standard library only.\n\nRun it as `python -m splitter EXPENSES.csv --participants NAMES`, with the package `splitter` under `src/`. Each payment is printed on its own line as `PAYER pays PAYEE AMOUNT`, with the amount to two decimal places.\n\nExamples, where `trip.csv` contains a header row and the single row `Alice,30.00,Hotel`:\n\n```\n$ python -m splitter trip.csv --participants Alice,Bob\nBob pays Alice 15.00\n\n$ python -m splitter missing.csv --participants Alice,Bob\n(an error message on standard error; a non-zero exit status)\n```",
+  "returncode": 0,
+  "wall_seconds": 475.5,
+  "stderr": "Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.\n",
+  "reply": {
+    "duration_api_ms": 459974,
+    "stop_reason": "end_turn",
+    "session_id": "fe2baeca-44dd-4674-bcd6-0c259684a5b9",
+    "total_cost_usd": 2.4895990000000006,
+    "usage": {
+      "input_tokens": 82,
+      "cache_creation_input_tokens": 53718,
+      "cache_read_input_tokens": 1828918,
+      "output_tokens": 41502,
+      "output_tokens_details": {
+        "thinking_tokens": 9510
+      },
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 53718,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "global",
+      "iterations": [
+        {
+          "input_tokens": 2,
+          "output_tokens": 915,
+          "cache_read_input_tokens": 66142,
+          "cache_creation_input_tokens": 520,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 520
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+    },
+    "modelUsage": {
+      "claude-opus-5": {
+        "inputTokens": 82,
+        "outputTokens": 41502,
+        "cacheReadInputTokens": 1828918,
+        "cacheCreationInputTokens": 53718,
+        "webSearchRequests": 0,
+        "costUSD": 2.4895990000000006,
+        "contextWindow": 1000000,
+        "maxOutputTokens": 64000,
+        "thinkingTokens": 9510,
+        "cacheCreationEphemeral5mInputTokens": 0,
+        "cacheCreationEphemeral1hInputTokens": 53718,
+        "canonicalModel": "claude-opus-5",
+        "provider": "firstParty",
+        "costBasis": "list"
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "fast_mode_disabled_reason": "sdk_opt_in_required",
+    "subagent_stats": {
+      "spawned": 0,
+      "requested": {
+        "background": 0,
+        "foreground": 0,
+        "unset": 0
+      },
+      "started_in_background": 0,
+      "max_depth": 0,
+      "spawned_by_subagents": 0,
+      "completed": 0,
+      "failed": 0,
+      "killed": {
+        "parent": 0,
+        "user": 0,
+        "system": 0
+      },
+      "refused": {
+        "depth_limit": 0,
+        "concurrency_limit": 0,
+        "budget": 0
+      },
+      "by_type": {}
+    },
+    "safety_stops": 0,
+    "is_error": false,
+    "num_turns": 41,
+    "subtype": "success",
+    "api_error_status": null,
+    "result": "Done. Both spec examples match byte-for-byte, and all 694 tests pass.\n\n## What's there\n\n```\nsrc/splitter/   money.py  \u2014 cents parsing/formatting (no floats, ever)\n                expenses.py \u2014 participant list + CSV loading/validation\n                settle.py \u2014 shares, balances, minimal payment plan\n                cli.py, __main__.py, errors.py\ntests/          694 tests across the four modules\nREADME.md, pyproject.toml\n```\n\nRun it with `PYTHONPATH=src python -m splitter trip.csv --participants Alice,Bob`, or `pip install -e .` once and drop the prefix (I verified both).\n\n## Two things worth flagging\n\n**Minimality turned out to need more than greedy.** I first wrote the textbook greedy settlement (largest debtor pays largest creditor). Checking it against a brute-force optimum on 4000 instances, it produced a *longer* list than necessary in 4.5% of them \u2014 so it didn't actually meet the \"minimal\" requirement. The fix: split the non-zero balances into the maximum number of disjoint zero-sum subgroups, then settle each. A subgroup of `k` with no smaller zero-sum subgroup needs exactly `k-1` payments, so maximising subgroups minimises the total. Now 0/4000 suboptimal, with a brute-force oracle test in the suite.\n\nThat search is NP-hard, so above 13 non-zero balances it falls back to greedy \u2014 still correct, still \u2264 n-1 payments. The exact path costs ~75ms at the limit (measured); real expense-sharing groups sit well below it.\n\n**A silent money-loss path in CSV parsing.** A test failure of my own making exposed it: `Alice,1,000,Hotel` is four CSV fields, so the amount parses as `1` and `000` becomes the description \u2014 the user means $1000 and gets $1.00, with no error. I made rows with more populated fields than the header declares an error (trailing empty fields from a stray comma are still tolerated). I also reject amounts finer than a cent (`0.005`) rather than rounding them, since rounding is precisely how a total stops adding up.\n\nOn the invariants you called out: shares sum to the total (remainder handed out one cent at a time in participant order), balances sum to zero, and printed payments sum to the total imbalance. All three are checked on randomised expense sets, not just fixed examples. I hand-verified one realistic case too \u2014 4 people, 213.75 total, shares 5344/5344/5344/5343\u00a2, payments summing to exactly the 8456\u00a2 credit.\n\nOne judgment call beyond the spec: duplicate participant names (`Alice,Bob,Alice`) are an error, since accepting them would charge someone two shares. Say the word if you'd rather that be allowed.",
+    "ttft_ms": 1598,
+    "type": "result",
+    "duration_ms": 471879,
+    "uuid": "2beb0678-0dd9-41d8-84e7-b5a23c202704",
+    "ttft_stream_ms": 999,
+    "time_to_request_ms": 149,
+    "first_content_frame_ms": 999,
+    "queued_turn_count": 0,
+    "result_index": 0
+  }
+}
