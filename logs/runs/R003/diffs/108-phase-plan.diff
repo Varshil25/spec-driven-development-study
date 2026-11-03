@@ -1,0 +1,1229 @@
+diff --git a/specs/001-expense-splitter/contracts/cli.md b/specs/001-expense-splitter/contracts/cli.md
+new file mode 100644
+index 0000000..be0c1d6
+--- /dev/null
++++ b/specs/001-expense-splitter/contracts/cli.md
+@@ -0,0 +1,137 @@
++# Contract: `splitter` command-line interface
++
++**Feature**: `001-expense-splitter` | **Date**: 2026-11-03
++
++This is the **normative** interface — the only one users and calling scripts depend on. Changing
++anything below is a breaking change. Every item is traced to the requirement that fixes it.
++
++## Invocation
++
++```text
++python -m splitter EXPENSES.csv --participants NAMES
++```
++
++Run from the repository root with `src` on the import path:
++
++```bash
++PYTHONPATH=src python -m splitter expenses.csv --participants "Alice,Bob"
++```
++
++| Element | Required | Contract |
++|---------|----------|----------|
++| `EXPENSES.csv` | yes | Exactly one positional argument: the path of the expenses file (FR-001) |
++| `--participants NAMES` | yes | Comma-separated participant names (FR-001) |
++| `prog` name in messages | — | `splitter` |
++
++More than one positional argument, a missing positional, a missing `--participants`, or any
++unrecognised option is a command-line error (exit 2, below). No other options exist; no
++configuration file or environment variable alters behaviour.
++
++## Input: expenses file
++
++| Property | Contract | Requirement |
++|----------|----------|-------------|
++| Encoding | UTF-8; a leading byte-order mark is ignored; undecodable bytes are an error | FR-002a |
++| Format | Comma-separated, standard double-quote quoting (so descriptions may contain commas) | FR-002 |
++| Header | First non-blank line must be exactly `payer,amount,description` — that order, lower case, no extra columns, no surrounding spaces in the field names | FR-002 |
++| Data rows | Each subsequent non-blank line is one expense with exactly three fields | FR-002, FR-010 |
++| Blank lines | Ignored anywhere in the file; a trailing newline is normal | Assumptions |
++| Amount grammar | Digits, optional single decimal point followed by one or two digits, optional leading `+`; surrounding whitespace ignored. Valid: `30`, `30.5`, `30.00`, `0`, `0.00`, `+30`. Invalid: `abc`, ``, `-5.00`, `1.005`, `$5`, `1,200.00`, `1e3`, `inf`, `nan`, `3 0.00` | FR-003, FR-004 |
++| Payer | Must equal one of the participants exactly after trimming, case-sensitively | FR-006 |
++| Description | Read for the field count, then ignored; never affects output | FR-018 |
++| File mutation | None. The file is opened read-only and is byte-identical after every run | FR-021, SC-008 |
++
++## Input: participant list
++
++| Rule | Contract | Requirement |
++|------|----------|-------------|
++| Splitting | Split the value on commas; trim surrounding whitespace from each element | FR-006 |
++| Non-empty | At least one name must result | FR-007 |
++| No empty element | `Alice,,Bob` and `Alice,Bob,` are errors, never silently skipped | FR-007 |
++| No duplicates | The same trimmed name twice is an error | FR-008 |
++| Case | Case-sensitive: `alice` and `Alice` are two people | FR-006 |
++| Ordering | Where order matters, ascending Unicode code-point order of the trimmed name; no locale collation, case-folding, or accent-folding; identical under every `LC_*` setting | FR-011a, SC-005 |
++
++## Output: standard output on success
++
++One line per payment, in the order the settlement algorithm generates them (FR-015):
++
++```text
++PAYER pays PAYEE AMOUNT
++```
++
++| Property | Contract | Requirement |
++|----------|----------|-------------|
++| Separator | Single spaces; the literal word `pays` | FR-016 |
++| Amount | Exactly two decimal places, no currency symbol, no thousands separator, no sign | FR-016 |
++| Minimum amount | Every printed amount is at least `0.01`; a `0.00` line never appears | FR-013 |
++| Line count | At most (number of participants − 1) | FR-013, SC-003 |
++| Conservation | The printed amounts sum to exactly the total imbalance | FR-014, SC-002 |
++| Already settled | Nothing at all is printed (no header, no "nothing to do" message) | FR-017 |
++| Determinism | Byte-identical across repeated runs and across locales | FR-015, SC-005 |
++| Line ending | `\n` after every line, including the last |  |
++
++Reference case (SC-001) — file `payer,amount,description` + `Alice,30.00,Hotel`, participants
++`Alice,Bob`:
++
++```text
++Bob pays Alice 15.00
++```
++
++## Output: standard error and exit status on failure
++
++On any failure: **exactly one** message on stderr, **nothing** on stdout, non-zero exit (FR-019,
++FR-020). Where an input holds several problems, only the first is reported and the tool stops there
++(FR-010a, SC-004).
++
++| Exit | Meaning | Requirement |
++|------|---------|-------------|
++| 0 | Success, including the already-settled case | FR-017, FR-020 |
++| 1 | Input or validation failure (every row in the table below) | FR-019, FR-020 |
++| 2 | Malformed command line — missing path, missing `--participants`, unrecognised option, extra positional. `argparse` prints its usage line and the `splitter: error: …` message | FR-020 |
++
++### Message catalogue (exit 1)
++
++Every message is prefixed `splitter: error: ` on stderr, and names the problem plus — where the
++problem lies in the file — the line number and the offending value (SC-007). `{path}` is the path as
++the user typed it; `{line}` is the 1-based physical line number.
++
++| Condition | Message | Requirement |
++|-----------|---------|-------------|
++| Empty participant list | `--participants requires at least one participant name` | FR-007 |
++| Empty element in list | `--participants contains an empty participant name` | FR-007 |
++| Duplicate participant | `--participants contains duplicate participant name '{name}'` | FR-008 |
++| File missing or unreadable | `cannot read expenses file '{path}': {reason}` | FR-009 |
++| Not valid UTF-8 | `cannot decode expenses file '{path}' as UTF-8` | FR-002a |
++| No header (file empty or all blank) | `{path}: missing header row; expected 'payer,amount,description'` | FR-002, FR-010 |
++| Wrong header | `{path}:{line}: header must be exactly 'payer,amount,description'; found '{found}'` | FR-002, FR-010 |
++| Wrong field count | `{path}:{line}: expected 3 fields, found {count}` | FR-010 |
++| Unknown payer | `{path}:{line}: unknown payer '{payer}'; not in the participant list` | FR-006 |
++| Invalid amount | `{path}:{line}: invalid amount '{value}'; expected a non-negative number with at most two decimal places` | FR-003, FR-004 |
++
++`{found}` renders the header row's fields re-joined with commas, so the user sees what their file
++actually says. For a multi-line quoted record, `{line}` is the record's last physical line.
++
++### Order of checks
++
++Fail-fast, stopping at the first problem (FR-010a):
++
++1. Command line shape (`argparse`) → exit 2
++2. Participant list: empty → empty element → duplicate
++3. Opening and decoding the file
++4. Header
++5. Data rows by increasing line number; within one row: field count → payer → amount
++
++So a file with a bad amount on line 3 and an unknown payer on line 5 reports only the line 3 amount;
++a bad header hides every row problem; and a duplicate participant is reported without the file being
++opened at all.
++
++## Guarantees
++
++| Guarantee | Requirement |
++|-----------|-------------|
++| No third-party import at runtime | Constitution I |
++| No file created, modified, or deleted; no network access | FR-021, SC-008 |
++| Results on stdout, diagnostics on stderr, never interleaved | Constitution Interfaces |
++| 1,000 rows × 50 participants completes in under two seconds | SC-006 |
++| Identical input always yields identical output and exit status | FR-015, SC-005 |
+diff --git a/specs/001-expense-splitter/contracts/python-api.md b/specs/001-expense-splitter/contracts/python-api.md
+new file mode 100644
+index 0000000..64b31bd
+--- /dev/null
++++ b/specs/001-expense-splitter/contracts/python-api.md
+@@ -0,0 +1,137 @@
++# Contract: internal Python API
++
++**Feature**: `001-expense-splitter` | **Date**: 2026-11-03
++
++**Status: internal.** The normative, user-facing interface is [`cli.md`](./cli.md). These signatures
++exist so the test suite can assert the cent-conservation invariants of FR-014/SC-002 directly on
++pure functions instead of inferring them from printed text (Constitution III). They are not a
++published library API and may change freely as long as `cli.md` keeps holding.
++
++Types follow [data-model.md](../data-model.md). All money is `int` cents.
++
++## `splitter.errors`
++
++```python
++class SplitterError(Exception):
++    """An input or validation failure whose message is ready to show the user."""
++```
++
++The single exception type for every exit-1 rejection. Carries a finished message with no
++`splitter: error: ` prefix — `cli.main` adds that. Raised by `cli.parse_participants` and by
++`expenses.read_expenses`; caught only in `cli.main` (research D8).
++
++## `splitter.expenses`
++
++```python
++@dataclass(frozen=True)
++class Expense:
++    payer: str          # trimmed; a known participant
++    amount_cents: int   # >= 0
++    line: int           # 1-based physical line, for messages only
++
++HEADER: tuple[str, str, str] = ("payer", "amount", "description")
++
++def parse_amount(value: str, *, path: str, line: int) -> int:
++    """Trim `value`, match `^\\+?\\d+(?:\\.\\d{1,2})?$`, return whole cents.
++
++    Raises SplitterError naming path, line, and value if it does not match. (FR-003, FR-004)
++    """
++
++def read_expenses(path: str, participants: Sequence[str]) -> list[Expense]:
++    """Read and fully validate the expenses file; descriptions are discarded.
++
++    Opens with encoding="utf-8-sig", newline="". Skips blank rows. Requires the first
++    non-blank row to equal HEADER exactly. Validates each data row in order: field count,
++    payer membership, amount. Returns expenses in file order.
++
++    Raises SplitterError for: unreadable path (FR-009), undecodable bytes (FR-002a),
++    missing or wrong header (FR-002, FR-010), wrong field count (FR-010), unknown payer
++    (FR-006), invalid amount (FR-003, FR-004). Reports only the first problem (FR-010a).
++    """
++```
++
++`participants` is passed in because the payer check (FR-006) is a data-row error that must be
++ordered among the other row errors by line number (FR-010a).
++
++## `splitter.settle`
++
++Pure functions — no I/O, no exceptions raised, no global state.
++
++```python
++@dataclass(frozen=True)
++class Payment:
++    payer: str
++    payee: str
++    amount_cents: int   # >= 1
++
++def compute_shares(participants: Sequence[str], total_cents: int) -> dict[str, int]:
++    """Equal split with the remainder charged one cent each to the first `remainder`
++    participants in ascending code-point name order.
++
++    Postcondition: sum(result.values()) == total_cents exactly. (FR-011, FR-011a)
++    """
++
++def compute_balances(
++    participants: Sequence[str], expenses: Sequence[Expense]
++) -> dict[str, int]:
++    """Each participant's paid total minus their share. Participants absent from every
++    expense row are included with a paid total of 0.
++
++    Postcondition: sum(result.values()) == 0 exactly. (FR-012)
++    """
++
++def settle(balances: Mapping[str, int]) -> list[Payment]:
++    """Greedy largest-debt against largest-credit, re-selected each step, ties broken in
++    ascending code-point name order. Returns payments in generation order.
++
++    Preconditions: sum(balances.values()) == 0.
++    Postconditions:
++      len(result) <= len(balances) - 1                                  (FR-013)
++      all(p.amount_cents >= 1 for p in result)                          (FR-013)
++      sum(p.amount_cents) == sum(b for b in balances.values() if b > 0) (FR-014)
++      applying every payment leaves all balances exactly 0              (SC-002)
++      fully determined by `balances`                                    (FR-015, SC-005)
++    """
++```
++
++`compute_shares` takes `total_cents` rather than the expenses so the share arithmetic of FR-011 can
++be tested over totals and group sizes without constructing files; `settle` takes a balance map for
++the same reason.
++
++## `splitter.cli`
++
++```python
++def parse_participants(raw: str) -> list[str]:
++    """Split on commas, trim each element, return names in command-line order.
++
++    Raises SplitterError for: no names at all, any empty or whitespace-only element,
++    any duplicate. (FR-007, FR-008)
++    """
++
++def format_payment(payment: Payment) -> str:
++    """Render as 'PAYER pays PAYEE AMOUNT' with two decimal places, by integer
++    arithmetic — never float formatting. (FR-016)
++    """
++
++def main(argv: Sequence[str] | None = None) -> int:
++    """Entry point. Returns 0 on success, 1 on SplitterError. argparse exits 2 itself on a
++    malformed command line.
++
++    Writes payment lines to stdout only after all validation has succeeded, so stdout is
++    untouched on failure (FR-019). Writes one 'splitter: error: {message}' line to stderr
++    on SplitterError. `argv` defaults to sys.argv[1:]; tests pass it explicitly to exercise
++    the CLI in process (research D11).
++    """
++```
++
++Returning an `int` rather than calling `sys.exit` is what lets most CLI tests run in process; only
++`__main__.py` turns the value into a process status.
++
++## `splitter.__main__`
++
++```python
++raise SystemExit(main())
++```
++
++Nothing else — this module exists so `python -m splitter` works, as the spec's Given Constraints
++require.
+diff --git a/specs/001-expense-splitter/data-model.md b/specs/001-expense-splitter/data-model.md
+new file mode 100644
+index 0000000..9796455
+--- /dev/null
++++ b/specs/001-expense-splitter/data-model.md
+@@ -0,0 +1,231 @@
++# Phase 1 Data Model: Shared Expense Settle-Up
++
++**Feature**: `001-expense-splitter` | **Date**: 2026-11-03
++
++All monetary values below are **integer cents** (`int`), never `float` or `Decimal` — see
++[research.md](./research.md) D1. All name ordering is ascending Unicode code-point order of the
++trimmed name, i.e. Python's default `str` comparison (D5, FR-011a).
++
++---
++
++## Entities
++
++### Participant
++
++A named member of the group, supplied on the command line.
++
++| Field | Type | Notes |
++|-------|------|-------|
++| `name` | `str` | The trimmed name; serves as the identity |
++
++Represented as a plain `str` — it has exactly one field, so a wrapper class would be indirection
++with no behaviour (Principle IV). The group is a `list[str]` in command-line order, sorted only
++where ordering matters.
++
++**Validation** (all raise `SplitterError`, checked in this order — D9):
++
++| Rule | Requirement | Rejection trigger |
++|------|-------------|-------------------|
++| At least one name | FR-007 | the `--participants` value yields no names after splitting and trimming |
++| No empty element | FR-007 | any comma-separated element is empty or whitespace-only after trimming (`Alice,,Bob`, `Alice,Bob,`) |
++| No duplicates | FR-008 | the same trimmed name appears more than once |
++
++**Derivation**: `raw.split(",")` → trim each element → reject empties → reject duplicates. An empty
++element is never silently dropped, because the group size determines every share.
++
++**Comparison**: case-sensitive and exact after trimming. ` Alice ` and `Alice` are the same person;
++`alice` and `Alice` are two different people (FR-006).
++
++---
++
++### Expense
++
++One recorded payment, read from one non-blank data row of the expenses file.
++
++| Field | Type | Notes |
++|-------|------|-------|
++| `payer` | `str` | Trimmed; must be an existing participant (FR-006) |
++| `amount_cents` | `int` | `>= 0` (FR-003, FR-005) |
++| `line` | `int` | 1-based physical line in the file, used only for error messages |
++
++Implemented as a frozen dataclass. The **description column is not a field**: FR-018 makes it
++computationally inert, so it is read to satisfy the three-field count check and then discarded. Not
++storing it is what makes acceptance scenario 1.5 (two files differing only in description produce
++identical output) true by construction.
++
++**Validation** (per row, in this order — D9):
++
++| Rule | Requirement | Rejection trigger |
++|------|-------------|-------------------|
++| Exactly three fields | FR-010 | row length != 3 |
++| Known payer | FR-006 | trimmed column 1 is not one of the participants |
++| Valid amount | FR-003, FR-004 | trimmed column 2 fails `^\+?\d+(?:\.\d{1,2})?$` |
++
++`amount_cents = 0` is valid and contributes nothing (FR-005); a row with amount `0.00` is
++indistinguishable in effect from an absent row.
++
++---
++
++### ExpenseFile (transient, not a stored entity)
++
++The parse of the whole file. Reading yields `list[Expense]`; the file-level rules are:
++
++| Rule | Requirement | Rejection trigger |
++|------|-------------|-------------------|
++| Readable path | FR-009 | `OSError` from `open` — message names the path |
++| Valid UTF-8 | FR-002a | `UnicodeDecodeError` — message names the path; a leading BOM is consumed by `utf-8-sig`, not an error |
++| Header present and exact | FR-002, FR-010 | first non-blank row != `["payer", "amount", "description"]` (exact, no trimming, no case-folding) |
++
++Blank rows — those `csv.reader` yields as `[]`, or as a single whitespace-only field — are skipped
++wherever they appear, including before the header. A row of `,,` is **not** blank: it is a
++three-field data row with an empty payer, and is rejected as an unknown payer.
++
++---
++
++### Share (derived)
++
++The portion of the group total charged to one participant. Not a class — a `dict[str, int]` keyed by
++participant name.
++
++**Derivation** (FR-011, D6):
++
++```text
++total_cents = sum(e.amount_cents for e in expenses)
++base, remainder = divmod(total_cents, len(participants))
++share[name] = base + 1  for the first `remainder` names in ascending code-point order
++share[name] = base      for the rest
++```
++
++**Invariants**:
++
++- `sum(share.values()) == total_cents` exactly — guaranteed by `divmod` (FR-011).
++- `0 <= remainder < len(participants)`, so at most one extra cent per participant.
++- Every participant has a share whether or not they appear in any expense row (acceptance 1.4).
++- With one participant, that participant's share is the whole total.
++
++---
++
++### NetBalance (derived)
++
++What one participant paid minus what they owe.
++
++**Derivation** (FR-012):
++
++```text
++paid[name]    = sum of amount_cents of that participant's expenses (0 if they paid nothing)
++balance[name] = paid[name] - share[name]
++```
++
++**Invariants**:
++
++- `sum(balance.values()) == 0` exactly — follows from `sum(paid) == total == sum(share)` (FR-012).
++- `balance > 0` → the group owes this participant; `< 0` → this participant owes the group;
++  `== 0` → settled, and they appear in no payment.
++- A single participant always has balance 0, so nothing is printed (edge case: group of one).
++
++---
++
++### Payment (derived output)
++
++A single whole-cent transfer from a participant who owes to one who is owed.
++
++| Field | Type | Notes |
++|-------|------|-------|
++| `payer` | `str` | Had a negative balance |
++| `payee` | `str` | Had a positive balance |
++| `amount_cents` | `int` | `>= 1` (FR-013) |
++
++Implemented as a frozen dataclass. The settlement is an ordered `list[Payment]`; its order is the
++generation order of the algorithm below and is part of the output contract (FR-015).
++
++**Derivation** (FR-015, D7):
++
++```text
++remaining = {name: bal for name, bal in balance.items() if bal != 0}
++while any balance in remaining is negative:
++    debtor   = the name minimising (remaining[name],  name)   # most negative, then name ascending
++    creditor = the name minimising (-remaining[name], name)   # largest credit, then name ascending
++    amount   = min(-remaining[debtor], remaining[creditor])
++    emit Payment(debtor, creditor, amount)
++    remaining[debtor]   += amount
++    remaining[creditor] -= amount
++```
++
++**Invariants**:
++
++- `len(payments) <= len(participants) - 1` — each iteration zeroes at least one participant, and the
++  last zeroes two (FR-013, SC-003).
++- `sum(p.amount_cents) == sum(b for b in balance.values() if b > 0)` — the total imbalance, exactly
++  (FR-014, SC-002).
++- Every `amount_cents >= 1`, so no `0.00` line is ever printed (FR-013, SC-003).
++- Applying every payment leaves all balances at exactly 0 (SC-002).
++- The loop terminates: balances sum to zero, so a negative balance implies a positive one exists,
++  and each iteration strictly reduces the number of non-zero balances.
++- Fully determined by the input — no dict-iteration-order or locale dependence (FR-015, SC-005).
++
++---
++
++## Transformation pipeline
++
++```text
++argv
++ │  argparse (FR-001)                      ─ malformed command line ─────► exit 2 (FR-020)
++ ▼
++(path: str, participants_raw: str)
++ │  parse_participants (FR-007, FR-008)    ─ empty / empty element / dup ─► SplitterError ► exit 1
++ ▼
++participants: list[str]
++ │  read_expenses (FR-002, FR-002a,        ─ unreadable / undecodable /  ─► SplitterError ► exit 1
++ │   FR-003..FR-006, FR-009, FR-010)          bad header / bad row
++ ▼
++expenses: list[Expense]                    (descriptions already discarded — FR-018)
++ │  compute_shares (FR-011, FR-011a)
++ ▼
++shares: dict[str, int]                     sum == total_cents
++ │  compute_balances (FR-012)
++ ▼
++balances: dict[str, int]                   sum == 0
++ │  settle (FR-013, FR-014, FR-015)
++ ▼
++payments: list[Payment]                    sum == total imbalance; len <= n-1; each >= 1 cent
++ │  format_payment (FR-016)
++ ▼
++stdout: "PAYER pays PAYEE 0.00\n" per payment, or nothing at all (FR-017) ► exit 0
++```
++
++No state is retained between stages beyond these values, nothing is written to disk at any stage
++(FR-021, SC-008), and every rejection leaves stdout untouched because formatting happens only after
++the whole pipeline has succeeded (FR-019, D8).
++
++---
++
++## Worked example (acceptance scenario 3.1, FR-011/FR-014)
++
++Expenses: Alice paid `10.00`. Participants: `Alice,Bob,Carol`.
++
++| Step | Value |
++|------|-------|
++| `total_cents` | 1000 |
++| `divmod(1000, 3)` | `base = 333`, `remainder = 1` |
++| Sorted names | `["Alice", "Bob", "Carol"]` |
++| Shares | Alice 334, Bob 333, Carol 333 — sums to 1000 ✓ |
++| Paid | Alice 1000, Bob 0, Carol 0 |
++| Balances | Alice +666, Bob −333, Carol −333 — sums to 0 ✓ |
++| Settlement step 1 | debtor Bob (tie −333 with Carol, `Bob` < `Carol`), creditor Alice, amount 333 |
++| Settlement step 2 | debtor Carol, creditor Alice, amount 333 |
++| Payments | `Bob pays Alice 3.33`, `Carol pays Alice 3.33` — sums to 666 = 6.67? |
++
++The two payments total 666 cents = `6.66`, while Alice's positive balance is 666 cents. The sum of
++printed payments equals the total imbalance exactly, as FR-014 requires.
++
++> **Discrepancy to resolve before implementation**: acceptance scenario 3.1 states the printed
++> amounts sum to exactly **6.67**. Under FR-011's ordered-remainder rule the odd cent is charged to
++> *Alice* (first in name order), which raises her share to 334 and therefore *lowers* her credit to
++> 666 — so the payments sum to 6.66, not 6.67. 6.67 would be the total only if the odd cent were
++> charged to a debtor (e.g. shares Alice 333, Bob 334, Carol 333 → payments 3.34 + 3.33 = 6.67).
++> FR-011/FR-011a are the normative rule and are self-consistent; the `6.67` figure in scenario 3.1
++> appears to be an arithmetic slip in the example, not a separate requirement. **Planned
++> resolution**: implement FR-011 as written, and have `/speckit-tasks` include a task to correct
++> scenario 3.1's expected total to `6.66`. No cent is lost either way — the conservation property
++> SC-002 holds under FR-011; only the example's arithmetic is wrong. Flagging rather than silently
++> choosing, because the fix touches the spec.
+diff --git a/specs/001-expense-splitter/plan.md b/specs/001-expense-splitter/plan.md
+new file mode 100644
+index 0000000..a0fff92
+--- /dev/null
++++ b/specs/001-expense-splitter/plan.md
+@@ -0,0 +1,162 @@
++# Implementation Plan: Shared Expense Settle-Up
++
++**Branch**: `001-expense-splitter` | **Date**: 2026-11-03 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/001-expense-splitter/spec.md`
++
++## Summary
++
++A single-command CLI that reads a strict three-column UTF-8 CSV of group expenses, charges every
++supplied participant an equal share of the group total, and prints a deterministic, minimal-ish list
++of `PAYER pays PAYEE AMOUNT` transfers that zeroes every net balance.
++
++Technical approach: all money is held as **integer cents** end to end — never `float`, never
++`Decimal` — so no rounding step can lose or invent a cent. Amount text is validated by an explicit
++regular expression rather than by a permissive numeric parser, which is what makes FR-004's
++rejections (`1e3`, `-5.00`, `1.005`, `$5`, `1,200.00`, `inf`, `nan`) fall out of one rule instead of
++a list of special cases. The leftover-cent allocation and the greedy largest-debt/largest-credit
++settlement are both tie-broken by ascending Unicode code-point name order, which Python's default
++`str` comparison already provides with no locale involvement, giving the byte-identical output
++SC-005 requires. Validation is fail-fast in a fixed order (command line → file → header → rows by
++line number) to satisfy FR-010a with no error-collecting machinery.
++
++## Technical Context
++
++**Language/Version**: Python 3.11 or newer (CPython; development host runs 3.13.17). No syntax or
++library feature newer than 3.11 is used.
++
++**Primary Dependencies**: None at runtime — Python standard library only (`argparse`, `csv`,
++`dataclasses`, `re`, `sys`). `pytest` is a development/test dependency only, which the constitution
++permits by name.
++
++**Storage**: N/A. One CSV file is opened read-only; nothing is written, created, or deleted (FR-021,
++SC-008).
++
++**Testing**: `pytest`, run from the repository root. `pytest.ini` sets `pythonpath = src` (a core
++pytest ini option, not a plugin) so tests import `splitter` with no installation step and no
++third-party tooling.
++
++**Target Platform**: Any OS with CPython 3.11+ (Linux, macOS, Windows). No network access.
++
++**Project Type**: Single project — one CLI package plus its test suite.
++
++**Performance Goals**: 1,000 expense rows across 50 participants settled and printed in well under
++two seconds (SC-006). Parsing is O(rows); share and balance computation is O(participants); the
++greedy settlement re-scans the balance map each transfer, so O(participants²) ≈ 2,500 operations at
++50 participants — chosen over a heap for simplicity (see [research.md](./research.md) D7).
++
++**Constraints**: Standard library only; deterministic and locale-independent output; read-only
++filesystem access; exit status 0 / 1 / 2 exactly as FR-020 specifies; results on stdout and
++diagnostics on stderr, never mixed.
++
++**Scale/Scope**: One user, one invocation, no persistence or configuration. Expected inputs are
++thousands of rows and tens of participants; no streaming or pagination needed.
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++Checked against `.specify/memory/constitution.md` v1.0.0.
++
++| Gate | Principle | Pre-Phase 0 | Post-Phase 1 | Evidence |
++|------|-----------|-------------|--------------|----------|
++| No third-party runtime import | I. Standard Library Only | PASS | PASS | Design imports only `argparse`, `csv`, `dataclasses`, `re`, `sys`. `pytest` is test-only and named as permitted. No vendored source. |
++| Runtime is Python 3.11+ only | Additional Constraints | PASS | PASS | No feature newer than 3.11 in the design; `X \| Y` annotations and `dataclasses` are 3.10-or-earlier features. |
++| Every invalid input fails loudly | II. Fail Loudly | PASS | PASS | Every rejection path raises `SplitterError`, is printed to stderr by `cli.main`, and exits non-zero. No default or partial settlement is ever printed on error (FR-019). `contracts/cli.md` pins the exact message for each. |
++| No bare/blanket exception swallowing | II. Fail Loudly | PASS | PASS | Only two `except` clauses in the design, both narrow: `OSError` (file unreadable) and `UnicodeDecodeError` (undecodable bytes); each converts to an explicit `SplitterError`, neither swallows. |
++| No secrets in output | II / Secrets | PASS | PASS | The tool handles no credentials; messages echo only the user's own path, row number, and field value. |
++| Every requirement maps to a test | III. Every Requirement Is Testable | PASS | PASS | Traceability table below maps FR-001…FR-021 and SC-001…SC-008 to a named test file; each error path gets its own test asserting both message content and exit status. |
++| Smallest design that satisfies the spec | IV. Simplicity | PASS | PASS | Six source files, no abstraction layers, no plugin seams, no configuration surface, no third option anywhere. Rejected alternatives recorded in `research.md` rather than built. |
++| Text-in/text-out CLI convention | Interfaces | PASS | PASS | Payments to stdout, diagnostics to stderr, status in exit code (FR-016, FR-019, FR-020). |
++| No hidden state / no writes | No hidden state | PASS | PASS | Single read-only `open()`; no temp files, caches, config files, or network calls. |
++| Tests discoverable from repo root | Layout | PASS | PASS | `tests/` at root, `pytest.ini` committed, `pytest` with no arguments collects everything. |
++
++**Result**: all gates pass. Complexity Tracking is empty — there is no deviation to justify.
++
++### Requirement traceability
++
++Every functional requirement maps to at least one planned test file; `/speckit-tasks` will expand
++these into individual test cases whose names cite the requirement id (Principle III).
++
++| Requirement | Covering test file |
++|-------------|--------------------|
++| FR-001 (argument shape), FR-020 (exit 2 on CLI misuse) | `tests/test_cli_invocation.py` |
++| FR-002, FR-002a, FR-010 (header, BOM, UTF-8, row length) | `tests/test_expenses.py`, `tests/test_cli_errors.py` |
++| FR-003, FR-004, FR-005 (amount grammar, rejections, zero) | `tests/test_expenses.py` |
++| FR-006 (unknown payer) | `tests/test_expenses.py`, `tests/test_cli_errors.py` |
++| FR-007, FR-008 (empty / duplicate participants) | `tests/test_cli_errors.py` |
++| FR-009 (unreadable path) | `tests/test_cli_errors.py` |
++| FR-010a (first problem only) | `tests/test_cli_errors.py` |
++| FR-011, FR-011a, FR-012 (shares, name order, balances) | `tests/test_settle.py` |
++| FR-013, FR-014, FR-015 (payment set, conservation, determinism) | `tests/test_settle.py` |
++| FR-016, FR-017 (line format, silence when settled) | `tests/test_cli_output.py` |
++| FR-018 (description is inert) | `tests/test_cli_output.py` |
++| FR-019 (one stderr message, empty stdout) | `tests/test_cli_errors.py` |
++| FR-021, SC-008 (no file mutation) | `tests/test_cli_output.py` |
++| SC-001 (reference case) | `tests/test_cli_output.py` |
++| SC-002, SC-003 (conservation and bound over many inputs) | `tests/test_settle.py` |
++| SC-004 (11 malformed cases) | `tests/test_cli_errors.py` |
++| SC-005 (byte-identical repeat runs, locale-independent) | `tests/test_cli_output.py` |
++| SC-006 (1,000 rows × 50 participants under 2 s) | `tests/test_performance.py` |
++| SC-007 (message names row and value) | `tests/test_cli_errors.py` |
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/001-expense-splitter/
++├── spec.md              # Feature specification (/speckit-specify, /speckit-clarify)
++├── plan.md              # This file (/speckit-plan)
++├── research.md          # Phase 0 output — design decisions and rejected alternatives
++├── data-model.md        # Phase 1 output — entities, invariants, transformation pipeline
++├── quickstart.md        # Phase 1 output — how to run and validate the feature
++├── contracts/
++│   ├── cli.md           # Phase 1 output — user-facing CLI contract (the normative interface)
++│   └── python-api.md    # Phase 1 output — internal module signatures tests call directly
++└── tasks.md             # Phase 2 output (/speckit-tasks — NOT created by /speckit-plan)
++```
++
++### Source Code (repository root)
++
++```text
++pytest.ini               # pythonpath = src; nothing else needed to run the suite
++
++src/
++└── splitter/
++    ├── __init__.py      # package marker, no logic
++    ├── __main__.py      # `python -m splitter` entry: raise SystemExit(main())
++    ├── errors.py        # SplitterError — the one exception type the CLI turns into exit 1
++    ├── expenses.py      # Expense; participant-list parsing, CSV reading, amount grammar
++    ├── settle.py        # shares, net balances, greedy settlement, Payment
++    └── cli.py           # argparse wiring, orchestration, formatting, stderr/exit handling
++
++tests/
++├── conftest.py              # tmp CSV writer fixture; repo-root/src path for subprocess runs
++├── test_cli_invocation.py   # argparse surface and exit status 2
++├── test_cli_output.py       # stdout format, silence, determinism, read-only guarantee
++├── test_cli_errors.py       # one test per rejection: message text + empty stdout + exit 1
++├── test_expenses.py         # header, BOM, encoding, row length, amount grammar, payer check
++├── test_settle.py           # share allocation, balance invariants, settlement properties
++└── test_performance.py      # SC-006 ceiling
++```
++
++**Structure Decision**: Single-project layout with the `splitter` package under `src/` exactly as the
++spec's Given Constraints require, and a flat `tests/` tree at the repository root. The package is
++split along the two seams the specification itself draws — reading/validating input
++(`expenses.py`) and computing the settlement (`settle.py`) — with `cli.py` holding only the I/O
++boundary. That split is what lets `test_settle.py` assert the cent-conservation invariants of
++FR-014/SC-002 directly on pure functions, instead of inferring them from printed text. No
++`models/`, `services/`, or `lib/` subpackages: at this size they would be empty indirection, which
++Principle IV forbids.
++
++Tests are not split into `contract/`, `integration/`, and `unit/` directories; a flat `tests/` tree
++named by subject is fewer moving parts for a suite this small, and `pytest` from the root collects
++it with no configuration beyond the committed `pytest.ini`.
++
++## Complexity Tracking
++
++> **Fill ONLY if Constitution Check has violations that must be justified**
++
++No violations. No abstraction layer, configuration option, plugin seam, or generality beyond the
++stated requirements is introduced, so there is nothing to justify here.
+diff --git a/specs/001-expense-splitter/quickstart.md b/specs/001-expense-splitter/quickstart.md
+new file mode 100644
+index 0000000..119e71c
+--- /dev/null
++++ b/specs/001-expense-splitter/quickstart.md
+@@ -0,0 +1,234 @@
++# Quickstart & Validation: Shared Expense Settle-Up
++
++**Feature**: `001-expense-splitter` | **Date**: 2026-11-03
++
++How to run the tool and confirm end to end that the feature works. Interface details live in
++[`contracts/cli.md`](./contracts/cli.md); entity rules and invariants in
++[`data-model.md`](./data-model.md). This guide contains no implementation code.
++
++## Prerequisites
++
++- Python 3.11 or newer (`python3 --version`)
++- `pytest` for the test suite — the only development dependency; the tool itself needs nothing
++  beyond the standard library
++- No install step, virtualenv, build, or network access required
++
++## Setup
++
++Run everything from the repository root. `src` must be on the import path:
++
++```bash
++cd /root/sdd-study/runs/R003
++export PYTHONPATH=src
++```
++
++`pytest.ini` already sets `pythonpath = src`, so the test suite needs no environment variable — the
++export above is only for running the tool by hand.
++
++## Run the tool
++
++```bash
++cat > /tmp/trip.csv <<'EOF'
++payer,amount,description
++Alice,30.00,Hotel
++EOF
++
++python -m splitter /tmp/trip.csv --participants "Alice,Bob"
++```
++
++Expected — exactly one line on stdout, exit status 0:
++
++```text
++Bob pays Alice 15.00
++```
++
++Check the status explicitly:
++
++```bash
++python -m splitter /tmp/trip.csv --participants "Alice,Bob"; echo "exit=$?"
++```
++
++## Run the test suite
++
++```bash
++pytest                 # whole suite, from the repository root
++pytest -q              # quiet
++pytest tests/test_settle.py -v     # just the cent-arithmetic invariants
++```
++
++Expected: all tests pass. Every functional requirement FR-001…FR-021 has at least one test naming
++it (see the traceability table in [`plan.md`](./plan.md)); the suite is the merge gate.
++
++---
++
++## Validation scenarios
++
++Each scenario below is a runnable check of one acceptance requirement. Together they cover the three
++user stories. All of them assume `export PYTHONPATH=src` from Setup.
++
++### V1 — Reference case (SC-001, FR-016)
++
++```bash
++printf 'payer,amount,description\nAlice,30.00,Hotel\n' > /tmp/v1.csv
++python -m splitter /tmp/v1.csv --participants "Alice,Bob"
++```
++
++**Expect**: stdout is exactly `Bob pays Alice 15.00`, exit 0.
++
++### V2 — Participant who paid nothing is still charged (FR-011, acceptance 1.2 & 1.4)
++
++```bash
++printf 'payer,amount,description\nAlice,60.00,Flights\nBob,30.00,Food\n' > /tmp/v2.csv
++python -m splitter /tmp/v2.csv --participants "Alice,Bob,Carol"
++```
++
++**Expect**: at most two lines; Carol appears as a payer; the printed amounts total `30.00` (Carol's
++share), and applying them zeroes all three balances.
++
++### V3 — Already settled prints nothing (FR-017, acceptance 1.3)
++
++```bash
++printf 'payer,amount,description\nAlice,10.00,A\nBob,10.00,B\n' > /tmp/v3.csv
++python -m splitter /tmp/v3.csv --participants "Alice,Bob"; echo "exit=$?"
++```
++
++**Expect**: no output at all before `exit=0`.
++
++### V4 — Awkward split loses no cent (SC-002, FR-011, FR-014)
++
++```bash
++printf 'payer,amount,description\nAlice,10.00,Taxi\n' > /tmp/v4.csv
++python -m splitter /tmp/v4.csv --participants "Alice,Bob,Carol"
++```
++
++**Expect**: two lines whose amounts sum to exactly Alice's positive balance, with every cent
++accounted for. Verify the sum mechanically:
++
++```bash
++python -m splitter /tmp/v4.csv --participants "Alice,Bob,Carol" \
++  | awk '{ total += $NF } END { printf "paid out: %.2f\n", total }'
++```
++
++> **Note**: the spec's acceptance scenario 3.1 states this total is `6.67`. Under FR-011 the
++> leftover cent is charged to `Alice` (first in name order), which makes the correct total `6.66`.
++> See the discrepancy note at the end of [`data-model.md`](./data-model.md) — FR-011 is normative and
++> the `6.67` figure is an arithmetic slip to be corrected in the spec. No cent is lost either way.
++
++### V5 — Description text is inert (FR-018, acceptance 1.5)
++
++```bash
++printf 'payer,amount,description\nAlice,30.00,Hotel\n'        > /tmp/v5a.csv
++printf 'payer,amount,description\nAlice,30.00,"Hotel, nice"\n' > /tmp/v5b.csv
++diff <(python -m splitter /tmp/v5a.csv --participants "Alice,Bob") \
++     <(python -m splitter /tmp/v5b.csv --participants "Alice,Bob") && echo "identical"
++```
++
++**Expect**: `identical`. Note the second file's quoted description contains a comma — it must still
++parse as three fields.
++
++### V6 — Byte-order mark tolerated (FR-002a, acceptance 1.7)
++
++```bash
++printf 'payer,amount,description\nAlice,30.00,Hotel\n'           > /tmp/v6a.csv
++printf '\xef\xbb\xbfpayer,amount,description\nAlice,30.00,Hotel\n' > /tmp/v6b.csv
++diff <(python -m splitter /tmp/v6a.csv --participants "Alice,Bob") \
++     <(python -m splitter /tmp/v6b.csv --participants "Alice,Bob") && echo "identical"
++```
++
++**Expect**: `identical`, both exit 0.
++
++### V7 — Determinism, including across locales (SC-005, FR-015)
++
++```bash
++LC_ALL=C      python -m splitter /tmp/v2.csv --participants "Alice,Bob,Carol" > /tmp/run1
++LC_ALL=en_US.UTF-8 python -m splitter /tmp/v2.csv --participants "Alice,Bob,Carol" > /tmp/run2
++cmp /tmp/run1 /tmp/run2 && echo "byte-identical"
++```
++
++**Expect**: `byte-identical`.
++
++### V8 — Error cases all fail loudly (FR-019, FR-020, SC-004, SC-007)
++
++Each command must print one message on stderr naming the problem, print **nothing** on stdout, and
++exit non-zero. Exact message texts are in [`contracts/cli.md`](./contracts/cli.md).
++
++```bash
++printf 'payer,amount,description\nAlice,30.00,Hotel\n' > /tmp/ok.csv
++
++# exit 1 — input and validation failures
++python -m splitter /tmp/does-not-exist.csv --participants "Alice,Bob"   # unreadable path (FR-009)
++printf 'payer,amount,description\nDave,5.00,X\n' > /tmp/e1.csv
++python -m splitter /tmp/e1.csv --participants "Alice,Bob"               # unknown payer (FR-006)
++printf 'payer,amount,description\nAlice,abc,X\n' > /tmp/e2.csv
++python -m splitter /tmp/e2.csv --participants "Alice,Bob"               # non-numeric (FR-004)
++printf 'payer,amount,description\nAlice,-5.00,X\n' > /tmp/e3.csv
++python -m splitter /tmp/e3.csv --participants "Alice,Bob"               # negative (FR-004)
++printf 'payer,amount,description\nAlice,1.005,X\n' > /tmp/e4.csv
++python -m splitter /tmp/e4.csv --participants "Alice,Bob"               # over-precise (FR-004)
++python -m splitter /tmp/ok.csv --participants ""                        # empty list (FR-007)
++python -m splitter /tmp/ok.csv --participants "Alice,,Bob"              # empty name (FR-007)
++python -m splitter /tmp/ok.csv --participants "Alice,Alice"             # duplicate (FR-008)
++printf 'Payer,Amount,Description\nAlice,5.00,X\n' > /tmp/e5.csv
++python -m splitter /tmp/e5.csv --participants "Alice,Bob"               # bad header (FR-002)
++printf 'payer,amount,description\nAlice,5.00\n' > /tmp/e6.csv
++python -m splitter /tmp/e6.csv --participants "Alice,Bob"               # bad row length (FR-010)
++printf 'payer,amount,description\nAlice,5.00,\xff\xfe\n' > /tmp/e7.csv
++python -m splitter /tmp/e7.csv --participants "Alice,Bob"               # bad UTF-8 (FR-002a)
++
++# exit 2 — malformed command line (FR-020)
++python -m splitter /tmp/ok.csv                                          # missing --participants
++python -m splitter --participants "Alice,Bob"                           # missing path
++python -m splitter /tmp/ok.csv --participants "Alice,Bob" --verbose     # unknown option
++```
++
++Confirm stdout stays empty and the status is right for one of them:
++
++```bash
++out=$(python -m splitter /tmp/e2.csv --participants "Alice,Bob" 2>/tmp/err); status=$?
++echo "stdout=[$out] exit=$status"; cat /tmp/err
++```
++
++**Expect**: `stdout=[] exit=1`, and the message names both the row and the value `abc`.
++
++### V9 — Only the first problem is reported (FR-010a, acceptance 2.8)
++
++```bash
++printf 'payer,amount,description\nAlice,abc,X\nDave,xyz,Y\n' > /tmp/v9.csv
++python -m splitter /tmp/v9.csv --participants "Alice,Bob" 2>&1 | wc -l
++```
++
++**Expect**: `1` — exactly one message, concerning line 2 (`abc`), with nothing about line 3.
++
++### V10 — The expenses file is never modified (FR-021, SC-008)
++
++```bash
++md5sum /tmp/v2.csv > /tmp/before
++python -m splitter /tmp/v2.csv --participants "Alice,Bob,Carol" >/dev/null
++python -m splitter /tmp/e2.csv --participants "Alice,Bob" 2>/dev/null
++md5sum -c /tmp/before && echo "unchanged"
++```
++
++**Expect**: `unchanged` after both a successful and a failed run.
++
++### V11 — Performance ceiling (SC-006)
++
++```bash
++python - <<'EOF'
++import random
++names = [f"P{i:02d}" for i in range(50)]
++with open("/tmp/big.csv", "w", encoding="utf-8") as fh:
++    fh.write("payer,amount,description\n")
++    for i in range(1000):
++        fh.write(f"{random.choice(names)},{random.randint(1, 50000)/100:.2f},item{i}\n")
++EOF
++time python -m splitter /tmp/big.csv --participants "$(python -c 'print(",".join(f"P{i:02d}" for i in range(50)))')" | tail -1
++```
++
++**Expect**: completes in well under two seconds; at most 49 payment lines.
++
++## Done when
++
++- [ ] `pytest` passes from the repository root with no arguments
++- [ ] V1–V11 each produce the expected result
++- [ ] No third-party module is imported by anything under `src/`
++- [ ] `git status` is clean after a run — the tool created and changed nothing
+diff --git a/specs/001-expense-splitter/research.md b/specs/001-expense-splitter/research.md
+new file mode 100644
+index 0000000..e110a05
+--- /dev/null
++++ b/specs/001-expense-splitter/research.md
+@@ -0,0 +1,292 @@
++# Phase 0 Research: Shared Expense Settle-Up
++
++**Feature**: `001-expense-splitter` | **Date**: 2026-11-03
++
++## Status of unknowns
++
++The specification's clarification session (2026-11-03) settled header strictness, name ordering,
++file encoding, multi-error reporting, and empty participant elements. The planning input settled the
++remaining three: **Python 3.11 or newer**, **standard library only**, **pytest for tests**.
++
++**No `NEEDS CLARIFICATION` markers remain in the Technical Context.** What follows is therefore
++design research — the decisions the specification leaves to the implementer, each with the
++alternatives that were considered and rejected.
++
++---
++
++## D1. Money representation: integer cents
++
++**Decision**: Represent every monetary value as a Python `int` number of cents, from the moment an
++amount is parsed to the moment it is formatted for printing. Format for output with integer
++arithmetic — `f"{cents // 100}.{cents % 100:02d}"` — not with float formatting.
++
++**Rationale**: FR-014 and SC-002 require that printed payments sum to exactly the total imbalance.
++Integers make that a property of the arithmetic rather than a property of a rounding policy: shares,
++balances, and transfers are all exact, and the only division in the design (`total // n` with
++remainder) has its remainder explicitly redistributed by FR-011. There is no step at which a
++fractional cent can exist, so there is no step at which one can be lost.
++
++**Alternatives considered**:
++
++- **`float`** — rejected outright. `0.1 + 0.2 != 0.3`; summing a thousand amounts accumulates
++  representation error, and SC-002 admits no error at all.
++- **`decimal.Decimal`** — rejected, though it is stdlib and exact. It would still require an
++  explicit quantization policy at every division, re-introducing the rounding question integers
++  avoid. It is also a worse *validator* (see D2) and a heavier object to carry through the
++  pipeline. Principle IV: integers are the design with fewer moving parts that still meets the
++  spec.
++- **`fractions.Fraction`** — rejected: exact but needless, since the domain is quantized to cents by
++  FR-003 anyway.
++
++## D2. Amount validation: explicit regular expression, not a numeric parser
++
++**Decision**: Accept an amount field only if, after surrounding whitespace is stripped, it matches
++`^\+?\d+(?:\.\d{1,2})?$`. Convert by `int(whole) * 100 + int(frac.ljust(2, "0"))` when `frac` is
++present, else `int(whole) * 100`.
++
++**Rationale**: FR-003 states the grammar positively and FR-004 enumerates what must be rejected:
++non-numeric text, negatives, more than two decimal places, currency symbols, thousands separators,
++exponent form, and `inf`/`nan`. One anchored pattern rejects all eight categories as a consequence
++of the same rule, so there is no list of special cases to keep in step with FR-004. The conversion
++is then pure integer arithmetic (D1).
++
++**Alternatives considered**:
++
++- **`Decimal(field)` plus post-checks** — rejected. `Decimal` happily accepts `1e3`, `Infinity`,
++  `NaN`, `-5.00`, and `1.005`, so each FR-004 category would need its own follow-up check
++  (`is_finite()`, sign test, exponent test). That is more code and more ways to be incomplete than
++  the single pattern.
++- **`float(field)` plus post-checks** — rejected for the same reason plus D1's precision problem.
++- **Hand-written character loop** — rejected: the same semantics as the regex with more lines and
++  more edge cases to test.
++
++**Decision detail (whitespace)**: surrounding whitespace in the amount field is stripped before
++matching, consistent with FR-006's trimming of payer names. A spreadsheet export writing `30.00 `
++is the same ordinary artefact FR-006 already tolerates for names; interior whitespace (`3 0.00`)
++still fails the pattern and is rejected.
++
++## D3. Encoding: `encoding="utf-8-sig"`, strict errors
++
++**Decision**: `open(path, newline="", encoding="utf-8-sig")`. Catch `UnicodeDecodeError` and convert
++it to the FR-002a rejection naming the path. Do not pass `errors=`.
++
++**Rationale**: `utf-8-sig` consumes a leading BOM if present and is a plain UTF-8 decoder otherwise,
++which is exactly FR-002a — one codec name covers both acceptance scenario 1.7 (BOM and non-BOM
++files produce identical output) and the strict-rejection requirement, because the default
++`errors="strict"` raises rather than substituting `U+FFFD`. `newline=""` is what the `csv` module
++documents as required so that quoted fields containing newlines are read correctly.
++
++**Alternatives considered**:
++
++- **`encoding="utf-8"` plus manual `﻿` stripping** — rejected: equivalent behaviour, extra
++  code, and easy to get wrong when the BOM lands inside the first header field.
++- **`errors="replace"`** — rejected: FR-002a explicitly forbids substituting replacement
++  characters, and it is precisely the silent-wrong-answer failure Principle II prohibits.
++- **Encoding detection / `chardet`-style guessing** — rejected: a third-party dependency
++  (Principle I) and forbidden by FR-002a's "MUST NOT … guess another encoding".
++
++## D4. CSV reading: `csv.reader` with the default dialect
++
++**Decision**: Read with `csv.reader(fh)` (default comma dialect, double-quote quoting). Report row
++positions with `reader.line_num`. Treat as blank — and skip — any row that `csv.reader` yields as
++`[]` or as a single field that is empty after stripping. The first non-blank row is the header; it
++must equal `["payer", "amount", "description"]` by exact list comparison, with no trimming or
++case-folding.
++
++**Rationale**: The default dialect is precisely what the spec assumes ("standard quoting available
++for descriptions containing commas"). `line_num` tracks physical lines, so a message points at a
++real line in the user's file even when a quoted description spans lines; for a multi-line record it
++names the record's last line, which is the position the user's editor will show for that record's
++end. Strict header comparison is the clarified answer: `Payer,Amount,Description`,
++`amount,payer,description`, and `payer,amount,description,date` are each a single unambiguous
++rejection with one message to verify.
++
++**Alternatives considered**:
++
++- **`csv.DictReader`** — rejected: it would map fields by name, which quietly tolerates reordering
++  and extra columns — the opposite of FR-002's strict rule — and it hides the row length so FR-010's
++  field-count check becomes awkward.
++- **`str.split(",")`** — rejected: breaks quoted descriptions containing commas, which the spec
++  requires to work.
++- **Treating `,,` as a blank line** — rejected: it is a three-field row whose payer is empty, so it
++  belongs in the data-row error path (reported as an unknown payer) rather than being silently
++  dropped. Only a genuinely empty or whitespace-only line is skipped.
++- **Deciding blankness before CSV parsing (raw line inspection)** — rejected: it would mis-handle a
++  blank line inside a quoted field.
++
++## D5. Ordering: Python's default `str` comparison
++
++**Decision**: Order names with plain `sorted(...)` / `<` on `str`, and tie-break with the name as a
++sort key component. Do not import `locale`, do not call `locale.strcoll`, `casefold`, or
++`unicodedata.normalize`.
++
++**Rationale**: FR-011a demands ascending Unicode code-point order with no locale collation, no case
++folding, and no accent folding, identical on every machine. CPython's `str` comparison *is*
++code-point lexicographic comparison and is unaffected by `LC_ALL`/`LC_COLLATE`, so the requirement
++is met by using the language default and importing nothing — `Alice` < `Bob` < `alice`, and `José`
++sorts by its code points like any other name. This is what makes SC-005's "byte-identical under
++different locale settings" true by construction rather than by testing.
++
++**Alternatives considered**:
++
++- **`locale.strxfrm` / `functools.cmp_to_key(locale.strcoll)`** — rejected: explicitly forbidden by
++  FR-011a and would make output depend on the environment.
++- **`key=str.casefold`** — rejected: FR-006 treats `alice` and `Alice` as different people, and
++  case-folding would make the leftover-cent tie-break ambiguous between them.
++
++## D6. Share allocation: floor division plus ordered remainder
++
++**Decision**: `base, remainder = divmod(total_cents, n)`. Every participant is charged `base`; the
++first `remainder` participants in ascending code-point name order (D5) are charged one cent more.
++
++**Rationale**: Directly implements FR-011 with shares that sum to exactly `total_cents` by
++construction: `n * base + remainder == total_cents` is `divmod`'s own invariant, so no reconciliation
++pass is needed. Choosing the extra-cent recipients by name order makes the choice deterministic and
++explainable to a user ("the earliest names alphabetically absorb the odd cents"), which is what
++acceptance scenario 3.1 pins down: 10.00 three ways gives Alice 334, Bob 333, Carol 333 cents, and
++the printed payments sum to exactly 6.67.
++
++**Alternatives considered**:
++
++- **`round(total / n)` per participant** — rejected: float, and the rounded shares need not sum to
++  the total, which is the precise failure SC-002 forbids.
++- **Largest-remainder / Hamilton apportionment** — rejected as pointless here: with an equal split
++  every participant's fractional remainder is identical, so the method degenerates to an arbitrary
++  tie-break and FR-011a already specifies which one to use.
++- **Randomized or insertion-order allocation** — rejected: violates FR-015/SC-005 determinism.
++
++## D7. Settlement: greedy largest-debt against largest-credit, re-selected each step
++
++**Decision**: Hold the non-zero balances in a dict. While any balance is negative, select the
++debtor minimizing `(balance, name)` (most negative first, then ascending name) and the creditor
++minimizing `(-balance, name)` (largest credit first, then ascending name); emit a payment of
++`min(-debt, credit)`; apply it to both balances. Repeat. Print payments in generation order.
++
++**Rationale**: This is FR-015 transcribed, including its tie-break. Each iteration drives at least
++one participant to exactly zero (the final one drives two), so at most `n - 1` payments are emitted —
++FR-013 and SC-003 hold structurally rather than by assertion. Because balances sum to zero (FR-012),
++a negative balance guarantees a positive one exists, so the loop cannot stall; and every emitted
++amount is `min` of two positive cent counts, hence at least one cent, so no `0.00` line can appear.
++The amounts emitted sum to the total positive balance, giving FR-014 for free.
++
++Re-selecting the extremes by scanning the dict each iteration is O(n²) overall. At the 50
++participants of SC-006 that is a few thousand integer comparisons — far inside the two-second
++budget — so a heap is not worth its weight.
++
++**Alternatives considered**:
++
++- **Two `heapq` priority queues** — rejected under Principle IV: O(n log n) buys nothing at this
++  scale, and the name tie-break would need negated/wrapped keys that are easy to get subtly wrong
++  and harder to read against FR-015's wording.
++- **Pre-sorting both sides once and walking with two pointers** — rejected: it happens to produce
++  the same payments for the greedy rule, but it no longer *reads* as "re-select the largest each
++  time", so FR-015 compliance would have to be argued rather than seen.
++- **Provably-minimal transfer count (subset-partition search)** — rejected: NP-hard, and the spec's
++  Assumptions explicitly place it out of scope in favour of this greedy rule.
++
++## D8. Error handling: one exception type, one place that prints
++
++**Decision**: A single `SplitterError(Exception)` carrying a finished human-readable message.
++Everything that validates raises it; only `cli.main` catches it, writes `splitter: error: <message>`
++to stderr, and returns exit status 1. `argparse` keeps its own behaviour for malformed command
++lines, which already prints usage to stderr and exits 2.
++
++**Rationale**: FR-019 wants exactly one message on stderr and nothing on stdout; FR-020 wants
++status 1 for validation failures and 2 for command-line misuse. One exception type and one handler
++make "nothing is printed to stdout on failure" a structural property — payments are formatted and
++written only after all validation has returned successfully — rather than something each error path
++must remember. Using `argparse`'s native exit code for misuse means FR-020's status 2 needs no
++custom code at all. Per Principle II there are only two `except` clauses in the whole design,
++`OSError` and `UnicodeDecodeError`, each immediately re-raised as a `SplitterError`; neither
++swallows anything.
++
++**Alternatives considered**:
++
++- **An exception subclass per failure category** — rejected: the CLI treats them identically, so the
++  hierarchy would be unused generality (Principle IV).
++- **Returning `(result, error)` tuples** — rejected: it makes ignoring an error the easy path,
++  which is the silent-failure mode Principle II prohibits.
++- **`sys.exit(message)` at the point of detection** — rejected: it makes the computation
++  untestable without a subprocess, against Principle III.
++
++## D9. Validation order: fail fast in a fixed, documented sequence
++
++**Decision**: Validate in exactly this order and stop at the first failure — (1) argparse surface;
++(2) the participant list (empty, empty element, duplicate); (3) opening and decoding the file;
++(4) the header; (5) data rows by increasing line number. Within one data row: field count, then
++payer, then amount.
++
++**Rationale**: FR-010a names the first three levels ("command line first, then the header, then data
++rows by increasing line number"); the participant list is a command-line value, so it belongs with
++level 1, and it must be known before any payer can be checked anyway. Within a row the order is
++left-to-right by column — payer is column 1, amount is column 2 — which is the rule a user can
++predict from looking at their own file. Stopping at the first problem keeps error output
++deterministic (SC-004: exactly one message, concerning the earliest problem) with no
++error-collection machinery.
++
++**Alternatives considered**:
++
++- **Collect and rank all problems** — rejected: more machinery than the spec asks for, and
++  FR-010a forbids listing further problems.
++- **Amount before payer within a row** — rejected arbitrarily-tied; column order is the version
++  that can be explained to a user without reference to the implementation.
++
++## D10. Packaging and import path: `pytest.ini` with `pythonpath = src`
++
++**Decision**: No build system and no install step. Commit a `pytest.ini` containing
++`[pytest]` / `pythonpath = src`. Document manual runs as
++`PYTHONPATH=src python -m splitter …` from the repository root.
++
++**Rationale**: The spec's Given Constraints fix both the invocation (`python -m splitter …`) and the
++location (`src/splitter`), which means something must put `src` on the import path. `pythonpath` is
++a core `pytest` ini option — no plugin, no third-party dependency — so the constitution's "tests are
++discoverable by `pytest` from the repository root with no configuration beyond what is committed"
++holds with a two-line file.
++
++**Alternatives considered**:
++
++- **`pyproject.toml` + `pip install -e .`** — rejected: it introduces `setuptools` as a build
++  dependency and an install step before the tool can run, against Principle I's spirit and the
++  "installs and runs anywhere `python3` exists" rationale.
++- **`sys.path` manipulation in `conftest.py`** — rejected: it works, but it is hand-rolled
++  machinery where a committed one-line setting does the same job, and it does nothing for manual
++  command-line runs.
++- **Flattening the package to the repository root** — rejected: the spec requires `src/`.
++
++## D11. Test strategy: in-process `main()` for breadth, subprocess for the contract
++
++**Decision**: Most CLI tests call `cli.main(argv)` in process and assert on its return value plus
++`capsys`-captured streams. A small number of end-to-end tests run
++`[sys.executable, "-m", "splitter", …]` via `subprocess.run` with `PYTHONPATH` pointing at `src`, to
++prove the documented invocation and exit codes work as published.
++
++**Rationale**: Principle III requires every error path to assert both message content and exit
++status; in-process calls make that fast and precise for the dozen-plus rejection cases, while the
++subprocess tests are what actually verify FR-001's `python -m splitter` contract and FR-020's
++status codes as a user would see them. `main(argv)` returning an `int` rather than calling
++`sys.exit` is what makes the in-process half possible.
++
++**Alternatives considered**:
++
++- **Subprocess for every case** — rejected: a process launch per assertion, for no extra coverage
++  on the cases that are not about process boundaries.
++- **In-process only** — rejected: it would never execute `__main__.py` or confirm the published
++  command line.
++
++---
++
++## Consolidated decisions
++
++| # | Area | Decision |
++|---|------|----------|
++| D1 | Money | Integer cents throughout; integer-arithmetic formatting |
++| D2 | Amount validation | Anchored regex `^\+?\d+(?:\.\d{1,2})?$`, whitespace stripped |
++| D3 | Encoding | `utf-8-sig`, strict errors, `UnicodeDecodeError` → rejection |
++| D4 | CSV | `csv.reader` default dialect, `line_num` for messages, strict header equality |
++| D5 | Ordering | Default `str` comparison (code point); no `locale`, no case/accent folding |
++| D6 | Shares | `divmod(total, n)`; first `remainder` names in order pay one cent more |
++| D7 | Settlement | Greedy max-debt × max-credit, re-selected each step, O(n²) |
++| D8 | Errors | One `SplitterError`; `cli.main` prints to stderr and returns 1; argparse gives 2 |
++| D9 | Order of checks | CLI → participants → open/decode → header → rows; in-row: count, payer, amount |
++| D10 | Import path | `pytest.ini` with `pythonpath = src`; `PYTHONPATH=src` for manual runs |
++| D11 | Tests | In-process `main(argv)` for breadth; subprocess for the published contract |

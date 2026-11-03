@@ -5,7 +5,7 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | Run | Date | Task | Condition | verify | Follow-ups | Cap reached? | Status | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | R002 | 2026-11-03 | T-SPLIT-01 | unstructured | OK | 0 | no | ok | mechanics check; operated by Claude; 1 LISTED, no questions; 7.9 min active, 1.86M tokens, about $2.49 (Claude Code's estimate) |
-| R003 | | T-SPLIT-01 | sdd_clarify | | | | | mechanics check |
+| R003 | 2026-11-03 | T-SPLIT-01 | sdd_clarify | OK | 0 | no | ok | mechanics check; operated by Claude; 1 question (clarify, NOPREF), 6 LISTED; the agent took the NOPREF reply as delegating all remaining clarify questions; 32.8 min active, 8.5M tokens, about $12.19 (Claude Code's estimate) |
 | R024 | | T-QCOUNT-01 | unstructured | | | | | Java mechanics check |
 | R025 | | T-QCOUNT-01 | sdd_clarify | | | | | Java mechanics check |
 | R004 | | T-ACCOUNTS-01 | sdd_secure | | | | |  |
