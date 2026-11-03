@@ -17,9 +17,9 @@ before any study run.
     builds are therefore at least five runs apart.
   * Run IDs: rounds 1-3 are R004-R018 and round 4 is R034-R038 (R019-R033
     were already assigned). Change requests take the build's ID plus "C".
-  * Optional replication (R021-R023, R039): one task, drawn now, is re-run
-    under all four conditions after the main study if time allows, to
-    estimate run-to-run variability within a cell. R019-R020 are spare IDs.
+  * Replication (R021-R023, R039; required since Week 8): one task, drawn
+    now, is re-run under all four conditions after the main study, with its
+    change requests, to estimate run-to-run variability within a cell. R019-R020 are spare IDs.
 
 Java/Quarkus extension (added in Week 7, before freezing; see
 docs/PREREGISTRATION-JAVA.md): 2 tasks x 3 conditions = 6 runs (R026-R031),
@@ -81,7 +81,7 @@ def build(seed):
     order = list(rng.choice(perms))
     for run_id, condition in zip(REPLICATION_IDS, order):
         rows.append(dict(run_id=run_id, task_id=replicate, condition=condition,
-                         round="R", purpose="replication-optional"))
+                         round="R", purpose="replication"))
     return rows, tasks, chosen
 
 

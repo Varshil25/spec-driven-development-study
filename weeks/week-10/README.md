@@ -19,7 +19,7 @@ Each build is run with [run_build.py](../../tools/study/run_build.py) in a fresh
 | R030 | T-QNOTES-01 | sdd | to do |
 | R031 | T-QIMPORT-01 | unstructured | to do |
 
-## Optional replication (only if round 4 is done by Thursday)
+## Replication (required since Week 8)
 
 | Run | Project | Approach | Change request | Status |
 | --- | --- | --- | --- | --- |

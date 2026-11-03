@@ -54,11 +54,11 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R037C | | T-PASTE-01-CR | sdd | | | | | change request on R037 |
 | R038 | | T-BOOKMARKS-01 | sdd_secure | | | | |  |
 | R038C | | T-BOOKMARKS-01-CR | sdd_secure | | | | | change request on R038 |
-| R021 | | T-REDACT-01 | sdd_clarify | | | | | optional replication |
+| R021 | | T-REDACT-01 | sdd_clarify | | | | | replication |
 | R021C | | T-REDACT-01-CR | sdd_clarify | | | | | change request on R021 |
-| R022 | | T-REDACT-01 | sdd | | | | | optional replication |
+| R022 | | T-REDACT-01 | sdd | | | | | replication |
 | R022C | | T-REDACT-01-CR | sdd | | | | | change request on R022 |
-| R023 | | T-REDACT-01 | unstructured | | | | | optional replication |
+| R023 | | T-REDACT-01 | unstructured | | | | | replication |
 | R023C | | T-REDACT-01-CR | unstructured | | | | | change request on R023 |
-| R039 | | T-REDACT-01 | sdd_secure | | | | | optional replication |
+| R039 | | T-REDACT-01 | sdd_secure | | | | | replication |
 | R039C | | T-REDACT-01-CR | sdd_secure | | | | | change request on R039 |

@@ -22,7 +22,9 @@ def main(argv):
     message = argv[argv.index("-p") + 1]
     session = argv[argv.index("--resume") + 1] if "--resume" in argv else "sess-" + uuid.uuid4().hex[:8]
     with open(os.environ["FAKE_CALLS"], "a") as handle:
-        handle.write(json.dumps({"argv": argv, "message": message, "session": session}) + "\n")
+        handle.write(json.dumps({"argv": argv, "message": message, "session": session,
+                                 "env": {k: v for k, v in os.environ.items()
+                                         if k.startswith(("CLAUDE", "ANTHROPIC"))}}) + "\n")
 
     fail_flag = os.environ.get("FAKE_FAIL_ONCE")
     if fail_flag and not Path(fail_flag).exists():

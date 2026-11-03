@@ -98,11 +98,20 @@ finished. The operator never types into the agent.
 Every run is recorded by `sddlog` (prompts, tool calls, edits, time, tokens,
 and a snapshot of every specification document after each phase).
 
+The analysis script (`tools/study/analyze.py`) was written and frozen with the
+plan, before the first study run, so the analysis cannot be chosen after
+seeing the results.
+
 ## Scale and schedule
 
 - 20 builds (5 projects × 4 approaches) and 20 change requests, in four
-  counterbalanced rounds, plus 6 Java builds in a separately registered
-  extension.
+  counterbalanced rounds, plus a replication: the smallest project built again
+  under all four approaches, with its change requests (8 runs), to measure how
+  much results vary between two runs of the same approach.
+- 6 Java builds in a separately registered extension.
+- The Python runs are operated by Claude, the AI assistant that drafted the
+  study materials, in a cloud workspace; the author reviews every operator
+  decision. The Java runs are operated by the author.
 - Study runs: Weeks 8–10. Scoring and coding: Week 11. Writing: Week 12.
   Report due 5 December 2026.
 
