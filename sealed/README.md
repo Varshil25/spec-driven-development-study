@@ -5,8 +5,8 @@ tasks, encrypted. It holds 157 held-out test cases in three tiers, the five
 reference implementations, and the validation evidence (naive variants, their
 scores, and the validation report).
 
-It stays encrypted until the last study run (R038, or R039 if the optional
-replication is run) is finished. The study's author keeps the passphrase;
+It stays encrypted until the last Python study run (R039C, the last
+replication change request) is finished. The study's author keeps the passphrase;
 it is not stored anywhere in this repository.
 
 | File | SHA-256 |

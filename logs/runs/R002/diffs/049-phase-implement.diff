@@ -1,0 +1,1645 @@
+diff --git a/.gitignore b/.gitignore
+index 75c6182..d51ad4a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,3 +1,6 @@
+ __pycache__/
+ *.pyc
+ .pytest_cache/
++*.egg-info/
++build/
++dist/
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..28f2836
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,103 @@
++# splitter
++
++Reads a CSV of shared group expenses and prints who owes whom to settle up.
++Python 3.10+, standard library only.
++
++## Usage
++
++```
++python -m splitter EXPENSES.csv --participants NAMES
++```
++
++The package lives under `src/`, so either put it on the import path:
++
++```sh
++PYTHONPATH=src python -m splitter trip.csv --participants Alice,Bob
++```
++
++or install it once and run it from anywhere:
++
++```sh
++pip install -e .
++python -m splitter trip.csv --participants Alice,Bob
++```
++
++The CSV needs a header row with `payer`, `amount`, and `description` columns
++(matched by name, so order does not matter; extra columns are ignored).
++Participants are given separately as a comma-separated list — everyone in that
++list owes an equal share of the group total, including people who paid nothing
++and who therefore never appear in the file.
++
++```
++$ cat trip.csv
++payer,amount,description
++Alice,30.00,Hotel
++
++$ python -m splitter trip.csv --participants Alice,Bob
++Bob pays Alice 15.00
++```
++
++Each payment prints on its own line as `PAYER pays PAYEE AMOUNT`, to two decimal
++places, sorted by payer then payee. When everyone is already square, nothing is
++printed and the exit status is 0.
++
++## How the money works
++
++Every amount is converted to a whole number of cents on the way in and kept as
++an `int` throughout; floats never touch it. Three properties hold exactly, and
++are covered by tests that check them against brute-force oracles:
++
++- **Shares sum to the total.** When the total does not divide evenly, the
++  remainder is handed out one cent at a time in participant order — 10.00 across
++  three people is 3.34 / 3.33 / 3.33, never three times 3.3333.
++- **Balances sum to zero.** Each person's balance is what they paid minus their
++  share.
++- **Payments sum to the total imbalance.** Nothing is lost or invented between
++  the balances and the printed lines.
++
++Amounts finer than a cent (`0.005`) are rejected rather than rounded, because
++rounding them is exactly how a total stops adding up.
++
++### Minimal payments
++
++The payment list is the shortest one possible. The people with a non-zero
++balance are split into the largest possible number of subgroups that each sum
++to zero, and each subgroup is settled separately; a subgroup of `k` people
++containing no smaller zero-sum subgroup needs exactly `k - 1` payments, so
++maximising the number of subgroups minimises the total.
++
++That decomposition is NP-hard in general, so above `EXACT_LIMIT` (13) people
++with a non-zero balance the tool falls back to a greedy pass — largest debtor
++pays largest creditor — which still settles everyone correctly in at most
++`n - 1` payments. The exact search takes about 75 ms at the limit; real groups
++sharing expenses are far smaller than that.
++
++## Errors
++
++Malformed input prints a single line to stderr and exits 2, naming the file and
++line number where it applies:
++
++```
++$ python -m splitter missing.csv --participants Alice,Bob
++splitter: error: no such file: missing.csv
++
++$ python -m splitter trip.csv --participants Bob,Carol
++splitter: error: trip.csv, line 2: payer 'Alice' is not in the participant list (Bob, Carol)
++```
++
++Rejected: a missing, unreadable, empty, or non-UTF-8 file; a header missing a
++required column; a payer not in the participant list; an empty payer; an amount
++that is non-numeric, negative, or finer than a cent; an empty participant list
++or one with a blank or repeated name; and a row with more populated fields than
++the header declares (an unquoted comma, which would otherwise shift `1,000`
++into an amount of `1`).
++
++## Tests
++
++```sh
++python -m pytest
++```
++
++694 tests. Beyond the usual cases, the suite checks the money invariants on
++randomised expense sets, and checks the payment count against an independent
++brute-force search over set partitions.
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..31b94f4
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,17 @@
++[build-system]
++requires = ["setuptools>=61"]
++build-backend = "setuptools.build_meta"
++
++[project]
++name = "splitter"
++version = "1.0.0"
++description = "Split shared group expenses and print who owes whom"
++requires-python = ">=3.10"
++dependencies = []
++
++[tool.setuptools.packages.find]
++where = ["src"]
++
++[tool.pytest.ini_options]
++testpaths = ["tests"]
++pythonpath = ["src"]
+diff --git a/src/splitter/__init__.py b/src/splitter/__init__.py
+new file mode 100644
+index 0000000..7bfc6aa
+--- /dev/null
++++ b/src/splitter/__init__.py
+@@ -0,0 +1,25 @@
++"""Split shared group expenses and work out who owes whom.
++
++All money is handled as whole integer cents end to end; see ``splitter.money``.
++"""
++
++from .errors import SplitterError
++from .expenses import Expense, load_expenses, parse_participants
++from .money import format_cents, parse_cents
++from .settle import Payment, compute_balances, equal_shares, plan_settlement, settle
++
++__version__ = "1.0.0"
++
++__all__ = [
++    "Expense",
++    "Payment",
++    "SplitterError",
++    "compute_balances",
++    "equal_shares",
++    "format_cents",
++    "load_expenses",
++    "parse_cents",
++    "parse_participants",
++    "plan_settlement",
++    "settle",
++]
+diff --git a/src/splitter/__main__.py b/src/splitter/__main__.py
+new file mode 100644
+index 0000000..fc027ec
+--- /dev/null
++++ b/src/splitter/__main__.py
+@@ -0,0 +1,8 @@
++"""Support ``python -m splitter``."""
++
++import sys
++
++from .cli import main
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/splitter/cli.py b/src/splitter/cli.py
+new file mode 100644
+index 0000000..aab2af4
+--- /dev/null
++++ b/src/splitter/cli.py
+@@ -0,0 +1,64 @@
++"""Command-line entry point."""
++
++from __future__ import annotations
++
++import argparse
++import sys
++from collections.abc import Sequence
++
++from .errors import SplitterError
++from .expenses import load_expenses, parse_participants
++from .money import format_cents
++from .settle import Payment, plan_settlement
++
++PROGRAM = "splitter"
++
++EXIT_OK = 0
++EXIT_ERROR = 2  # matches argparse's own exit status for bad usage
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        prog=f"python -m {PROGRAM}",
++        description=(
++            "Split shared group expenses and print who owes whom. "
++            "Every participant owes an equal share of the group total."
++        ),
++        epilog="example: python -m splitter trip.csv --participants Alice,Bob",
++    )
++    parser.add_argument(
++        "csv_file",
++        metavar="EXPENSES.csv",
++        help="CSV file with a header row and columns payer, amount, description",
++    )
++    parser.add_argument(
++        "--participants",
++        metavar="NAMES",
++        required=True,
++        help="comma-separated list of everyone sharing the costs, e.g. Alice,Bob",
++    )
++    return parser
++
++
++def format_payment(payment: Payment) -> str:
++    """Render one payment as ``PAYER pays PAYEE AMOUNT``."""
++    return f"{payment.payer} pays {payment.payee} {format_cents(payment.cents)}"
++
++
++def main(argv: Sequence[str] | None = None) -> int:
++    """Run the tool. Returns the process exit status."""
++    args = build_parser().parse_args(argv)
++
++    try:
++        participants = parse_participants(args.participants)
++        expenses = load_expenses(args.csv_file, participants)
++        payments = plan_settlement(expenses, participants)
++    except SplitterError as exc:
++        print(f"{PROGRAM}: error: {exc}", file=sys.stderr)
++        return EXIT_ERROR
++
++    # Nothing to print when everyone already paid their share; that is success.
++    for payment in payments:
++        print(format_payment(payment))
++
++    return EXIT_OK
+diff --git a/src/splitter/errors.py b/src/splitter/errors.py
+new file mode 100644
+index 0000000..f57e2d9
+--- /dev/null
++++ b/src/splitter/errors.py
+@@ -0,0 +1,11 @@
++"""Error type for all user-facing failures."""
++
++
++class SplitterError(Exception):
++    """A problem with the user's input.
++
++    Raised for anything the user can fix: a missing file, a malformed row, an
++    empty participant list. The CLI turns these into a message on stderr and a
++    non-zero exit status. Anything *not* a SplitterError is a bug in this tool
++    and is allowed to propagate as a traceback.
++    """
+diff --git a/src/splitter/expenses.py b/src/splitter/expenses.py
+new file mode 100644
+index 0000000..3d415b8
+--- /dev/null
++++ b/src/splitter/expenses.py
+@@ -0,0 +1,160 @@
++"""Reading the inputs: the participant list and the expenses CSV."""
++
++from __future__ import annotations
++
++import csv
++from dataclasses import dataclass
++from pathlib import Path
++
++from .errors import SplitterError
++from .money import parse_cents
++
++REQUIRED_COLUMNS = ("payer", "amount", "description")
++
++
++@dataclass(frozen=True)
++class Expense:
++    """One row of the CSV: who paid, how much (in cents), and what for."""
++
++    payer: str
++    cents: int
++    description: str
++
++
++def parse_participants(text: str) -> list[str]:
++    """Split the ``--participants`` argument into an ordered list of names.
++
++    Surrounding whitespace on each name is ignored, so ``"Alice, Bob"`` works.
++    Order is preserved because it decides who absorbs the leftover cents when
++    the total does not divide evenly.
++
++    Raises:
++        SplitterError: if the list is empty, has an empty name, or repeats a name.
++    """
++    names = [part.strip() for part in text.split(",")]
++
++    if all(not name for name in names):
++        raise SplitterError("participant list is empty")
++    if any(not name for name in names):
++        raise SplitterError(
++            f"participant list {text!r} has an empty name; "
++            f"check for a stray or doubled comma"
++        )
++
++    seen: set[str] = set()
++    for name in names:
++        if name in seen:
++            # Silently accepting this would charge the person two shares.
++            raise SplitterError(f"participant {name!r} is listed more than once")
++        seen.add(name)
++
++    return names
++
++
++def load_expenses(path: str | Path, participants: list[str]) -> list[Expense]:
++    """Read and validate the expenses CSV.
++
++    Every payer must be one of ``participants``; every amount must be a
++    non-negative whole number of cents. A header-only file is valid and yields
++    no expenses.
++
++    Raises:
++        SplitterError: if the file cannot be read or any row is malformed.
++    """
++    known = set(participants)
++
++    try:
++        with open(path, newline="", encoding="utf-8-sig") as handle:
++            rows = list(csv.reader(handle))
++    except FileNotFoundError:
++        raise SplitterError(f"no such file: {path}") from None
++    except IsADirectoryError:
++        raise SplitterError(f"{path} is a directory, not a CSV file") from None
++    except PermissionError:
++        raise SplitterError(f"cannot read {path}: permission denied") from None
++    except UnicodeDecodeError:
++        raise SplitterError(
++            f"cannot read {path}: not valid UTF-8 text (is it really a CSV?)"
++        ) from None
++    except OSError as exc:
++        raise SplitterError(f"cannot read {path}: {exc.strerror or exc}") from None
++
++    if not rows:
++        raise SplitterError(f"{path} is empty; expected a header row")
++
++    index = _column_index(rows[0], path)
++    expenses = []
++
++    for line_number, row in enumerate(rows[1:], start=2):
++        if not any(field.strip() for field in row):
++            continue  # tolerate blank separator lines
++
++        try:
++            expense = _parse_row(row, index, known, width=len(rows[0]))
++        except SplitterError as exc:
++            raise SplitterError(f"{path}, line {line_number}: {exc}") from None
++        expenses.append(expense)
++
++    return expenses
++
++
++def _column_index(header: list[str], path: str | Path) -> dict[str, int]:
++    """Locate the required columns in the header row.
++
++    Matched case-insensitively and whitespace-trimmed, by name rather than by
++    position, so column order in the file does not matter.
++    """
++    positions: dict[str, int] = {}
++    for position, name in enumerate(header):
++        key = name.strip().lower()
++        if key in REQUIRED_COLUMNS and key not in positions:
++            positions[key] = position
++
++    missing = [name for name in REQUIRED_COLUMNS if name not in positions]
++    if missing:
++        found = ", ".join(name.strip() for name in header) or "(nothing)"
++        raise SplitterError(
++            f"{path}: header row is missing column(s) {', '.join(missing)}; "
++            f"found: {found}"
++        )
++
++    return positions
++
++
++def _parse_row(
++    row: list[str], index: dict[str, int], known: set[str], width: int
++) -> Expense:
++    """Turn one CSV row into an Expense, or raise SplitterError explaining why not."""
++    needed = max(index.values()) + 1
++    if len(row) < needed:
++        raise SplitterError(
++            f"expected at least {needed} fields, found {len(row)}: {row!r}"
++        )
++
++    # More populated fields than the header declares means the row does not line
++    # up with its columns, and the values have shifted into the wrong slots. The
++    # usual cause is an unquoted comma -- "Alice,1,000,Hotel" reads as an amount
++    # of 1 and a description of "000", quietly turning $1000 into $1. Trailing
++    # empty fields are just a stray comma and carry no data, so they are allowed.
++    if len(row) > width and any(field.strip() for field in row[width:]):
++        raise SplitterError(
++            f"found {len(row)} fields but the header declares {width}: {row!r}; "
++            f"a value containing a comma must be quoted"
++        )
++
++    payer = row[index["payer"]].strip()
++    if not payer:
++        raise SplitterError("payer is empty")
++    if payer not in known:
++        roster = ", ".join(sorted(known))
++        raise SplitterError(
++            f"payer {payer!r} is not in the participant list ({roster})"
++        )
++
++    cents = parse_cents(row[index["amount"]], what="amount")
++
++    return Expense(
++        payer=payer,
++        cents=cents,
++        description=row[index["description"]].strip(),
++    )
+diff --git a/src/splitter/money.py b/src/splitter/money.py
+new file mode 100644
+index 0000000..6174302
+--- /dev/null
++++ b/src/splitter/money.py
+@@ -0,0 +1,85 @@
++"""Money handling.
++
++Every amount in this program is an ``int`` number of cents. Floats never touch
++money: ``0.1 + 0.2 != 0.3`` is not a property you want in a ledger. Parsing goes
++through ``decimal.Decimal`` and then to an exact integer, and formatting goes
++back out by integer division, so no value is ever rounded on the way in or out.
++"""
++
++from decimal import Decimal, InvalidOperation
++
++from .errors import SplitterError
++
++CENTS_PER_UNIT = 100
++
++
++def parse_cents(text: str, *, what: str = "amount") -> int:
++    """Parse a decimal money string into a whole number of cents.
++
++    Accepts the forms a person actually types: ``30``, ``30.00``, ``.5``,
++    ``+1.25``, ``1e3``. Rejects anything that is not a finite non-negative
++    number, and rejects amounts finer than a cent (``0.005``) rather than
++    silently rounding them -- rounding here would mean the printed payments no
++    longer sum to the real total.
++
++    Raises:
++        SplitterError: if ``text`` is not a usable amount.
++    """
++    stripped = text.strip()
++    if not stripped:
++        raise SplitterError(f"{what} is empty")
++
++    try:
++        value = Decimal(stripped)
++    except InvalidOperation:
++        raise SplitterError(f"{what} {stripped!r} is not a number") from None
++
++    if not value.is_finite():
++        # Decimal happily parses "nan" and "Infinity".
++        raise SplitterError(f"{what} {stripped!r} is not a finite number")
++    if value < 0:
++        raise SplitterError(f"{what} {stripped!r} is negative")
++
++    cents = _to_cents_exact(value)
++    if cents is None:
++        raise SplitterError(
++            f"{what} {stripped!r} is finer than one cent; "
++            f"use at most two decimal places"
++        )
++    return cents
++
++
++def _to_cents_exact(value: Decimal) -> int | None:
++    """Multiply a finite Decimal by 100, exactly, or return None if it cannot be.
++
++    Done on the digit tuple rather than as ``value * 100`` so that the active
++    decimal context's precision cannot quietly round a large amount.
++    """
++    sign, digits, exponent = value.as_tuple()
++    assert isinstance(exponent, int)  # guaranteed: caller checked is_finite()
++
++    magnitude = int("".join(map(str, digits)) or "0")
++    shift = exponent + 2  # multiply by 10**2 == 100
++
++    if shift >= 0:
++        cents = magnitude * 10**shift
++    else:
++        divisor = 10 ** -shift
++        if magnitude % divisor:
++            return None  # would need a fraction of a cent
++        cents = magnitude // divisor
++
++    return -cents if sign else cents
++
++
++def format_cents(cents: int) -> str:
++    """Render cents as a decimal string with exactly two places.
++
++    Integer-only, so the output is an exact transcription of the stored value.
++
++        >>> format_cents(1500), format_cents(5), format_cents(-1234)
++        ('15.00', '0.05', '-12.34')
++    """
++    sign = "-" if cents < 0 else ""
++    whole, fraction = divmod(abs(cents), CENTS_PER_UNIT)
++    return f"{sign}{whole}.{fraction:02d}"
+diff --git a/src/splitter/settle.py b/src/splitter/settle.py
+new file mode 100644
+index 0000000..42ada43
+--- /dev/null
++++ b/src/splitter/settle.py
+@@ -0,0 +1,193 @@
++"""Turning expenses into a list of payments that settles everyone up.
++
++Three steps, all in integer cents:
++
++1. ``equal_shares``    -- split the group total evenly, distributing the
++   indivisible remainder cent by cent.
++2. ``compute_balances`` -- what each person paid, minus what they owe.
++3. ``settle``          -- the shortest list of payments that drives every
++   balance to zero.
++
++The invariant that matters for money: shares sum to the total, balances sum to
++zero, and payments sum to the total imbalance. Every step is integer-only, so
++there is nowhere for a rounding error to hide.
++"""
++
++from __future__ import annotations
++
++import heapq
++from dataclasses import dataclass
++
++from .expenses import Expense
++
++# Above this many people with a non-zero balance, fall back to the greedy
++# heuristic. The exact search is O(3^n); see _plan_groups for the reasoning.
++EXACT_LIMIT = 13
++
++
++@dataclass(frozen=True)
++class Payment:
++    """One transfer: ``payer`` hands ``cents`` to ``payee``. Always positive."""
++
++    payer: str
++    payee: str
++    cents: int
++
++
++def equal_shares(total_cents: int, participants: list[str]) -> dict[str, int]:
++    """Divide ``total_cents`` as evenly as possible among ``participants``.
++
++    A total of 10.00 across 3 people is 3.34 / 3.33 / 3.33, not three times
++    3.3333: the remainder is handed out one cent at a time, in participant
++    order, so the shares add up to exactly the total. Someone has to get the
++    odd cent; doing it by list order makes it predictable rather than arbitrary.
++    """
++    count = len(participants)
++    if count == 0:
++        raise ValueError("participants must not be empty")
++
++    base, remainder = divmod(total_cents, count)
++    return {
++        name: base + (1 if position < remainder else 0)
++        for position, name in enumerate(participants)
++    }
++
++
++def compute_balances(
++    expenses: list[Expense], participants: list[str]
++) -> dict[str, int]:
++    """Net position of each participant, in cents.
++
++    Positive means the group owes them; negative means they owe the group.
++    The values sum to exactly zero.
++    """
++    paid = dict.fromkeys(participants, 0)
++    for expense in expenses:
++        paid[expense.payer] += expense.cents
++
++    owed = equal_shares(sum(paid.values()), participants)
++    return {name: paid[name] - owed[name] for name in participants}
++
++
++def settle(balances: dict[str, int]) -> list[Payment]:
++    """Produce the shortest list of payments that brings every balance to zero.
++
++    Anyone already square is left out of it. The rest are split into the largest
++    possible number of subgroups that each sum to zero, and each subgroup is
++    settled on its own. A subgroup of ``k`` people that contains no smaller
++    zero-sum subgroup cannot be settled in fewer than ``k - 1`` payments, and
++    the greedy pass inside it achieves exactly that -- so maximising the number
++    of subgroups minimises the total number of payments.
++
++    Finding that decomposition is NP-hard in general (it contains the partition
++    problem), so for a large number of non-zero balances this falls back to the
++    greedy heuristic alone, which still settles everyone correctly in at most
++    ``n - 1`` payments. See ``EXACT_LIMIT``.
++
++    Output is sorted by payer then payee, so it does not depend on the order the
++    balances happened to be built in.
++    """
++    total = sum(balances.values())
++    if total != 0:
++        raise ValueError(f"balances must sum to zero, got {total}")
++
++    # Sorted so that ties anywhere downstream resolve by name, not dict order.
++    active = sorted((name, value) for name, value in balances.items() if value)
++    if not active:
++        return []
++
++    payments: list[Payment] = []
++    for group in _plan_groups(active):
++        payments.extend(_settle_greedily(group))
++
++    payments.sort(key=lambda payment: (payment.payer, payment.payee))
++    return payments
++
++
++def _plan_groups(active: list[tuple[str, int]]) -> list[list[tuple[str, int]]]:
++    """Split the non-zero balances into as many zero-sum subgroups as possible.
++
++    Exact subset dynamic programming: ``best[mask]`` is the largest number of
++    disjoint zero-sum subgroups that the people in ``mask`` can be carved into.
++    Iterating the sub-masks of every mask costs O(3^n), which is instant for the
++    group sizes a shared-expenses tool actually sees (a house share, a trip) and
++    hopeless beyond that -- hence the fallback.
++    """
++    count = len(active)
++    if count > EXACT_LIMIT:
++        return [active]
++
++    values = [value for _, value in active]
++    full = (1 << count) - 1
++
++    # Sum of each subset, built up by peeling off the lowest set bit.
++    subset_sum = [0] * (1 << count)
++    for mask in range(1, 1 << count):
++        lowest = mask & -mask
++        subset_sum[mask] = subset_sum[mask ^ lowest] + values[lowest.bit_length() - 1]
++
++    best = [-1] * (1 << count)  # -1 == this mask cannot be partitioned
++    best[0] = 0
++    chosen = [0] * (1 << count)  # the zero-sum subgroup to peel off at each step
++
++    for mask in range(1, 1 << count):
++        # Anchor on the lowest set bit so each partition is counted once.
++        lowest = mask & -mask
++        subset = mask
++        while subset:
++            if (
++                subset & lowest
++                and subset_sum[subset] == 0
++                and best[mask ^ subset] >= 0
++                and best[mask ^ subset] + 1 > best[mask]
++            ):
++                best[mask] = best[mask ^ subset] + 1
++                chosen[mask] = subset
++            subset = (subset - 1) & mask
++
++    # The full set sums to zero, so it is always partitionable (worst case: into
++    # itself), and walking the recorded choices always terminates.
++    groups = []
++    remaining = full
++    while remaining:
++        subset = chosen[remaining]
++        groups.append([active[i] for i in range(count) if subset >> i & 1])
++        remaining ^= subset
++
++    return groups
++
++
++def _settle_greedily(group: list[tuple[str, int]]) -> list[Payment]:
++    """Settle one zero-sum group: largest debtor pays largest creditor, repeat.
++
++    Each payment zeroes out at least one person, so a group of ``k`` needs at
++    most ``k - 1`` payments.
++    """
++    # Max-heaps keyed on amount owed/due, then on name for deterministic ties.
++    debtors = [(value, name) for name, value in group if value < 0]
++    creditors = [(-value, name) for name, value in group if value > 0]
++    heapq.heapify(debtors)
++    heapq.heapify(creditors)
++
++    payments = []
++    while debtors and creditors:
++        negated_debt, debtor = heapq.heappop(debtors)
++        negated_credit, creditor = heapq.heappop(creditors)
++        debt, credit = -negated_debt, -negated_credit
++
++        amount = min(debt, credit)
++        payments.append(Payment(payer=debtor, payee=creditor, cents=amount))
++
++        if debt > amount:
++            heapq.heappush(debtors, (amount - debt, debtor))
++        if credit > amount:
++            heapq.heappush(creditors, (amount - credit, creditor))
++
++    return payments
++
++
++def plan_settlement(
++    expenses: list[Expense], participants: list[str]
++) -> list[Payment]:
++    """Convenience wrapper: expenses and participants straight to payments."""
++    return settle(compute_balances(expenses, participants))
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+new file mode 100644
+index 0000000..76550ae
+--- /dev/null
++++ b/tests/test_cli.py
+@@ -0,0 +1,210 @@
++"""End-to-end behaviour: output format, exit codes, stderr."""
++
++import os
++import subprocess
++import sys
++from pathlib import Path
++
++import pytest
++
++from splitter.cli import EXIT_ERROR, EXIT_OK, main
++
++SRC = str(Path(__file__).resolve().parents[1] / "src")
++
++
++def write_csv(tmp_path, text, name="expenses.csv"):
++    path = tmp_path / name
++    path.write_text(text, encoding="utf-8")
++    return path
++
++
++def run(tmp_path, capsys, csv_text, participants, name="expenses.csv"):
++    """Invoke main() in-process and return (exit code, stdout lines, stderr)."""
++    path = write_csv(tmp_path, csv_text, name)
++    code = main([str(path), "--participants", participants])
++    captured = capsys.readouterr()
++    lines = captured.out.splitlines()
++    return code, lines, captured.err
++
++
++# --- the documented examples ------------------------------------------------
++
++
++def test_spec_example_output(tmp_path, capsys):
++    code, lines, err = run(
++        tmp_path, capsys, "payer,amount,description\nAlice,30.00,Hotel\n", "Alice,Bob"
++    )
++    assert code == EXIT_OK
++    assert lines == ["Bob pays Alice 15.00"]
++    assert err == ""
++
++
++def test_spec_example_missing_file(capsys):
++    code = main(["missing.csv", "--participants", "Alice,Bob"])
++    captured = capsys.readouterr()
++    assert code == EXIT_ERROR
++    assert captured.out == ""
++    assert "missing.csv" in captured.err
++
++
++# --- output format ----------------------------------------------------------
++
++
++def test_each_payment_on_its_own_line_with_two_decimals(tmp_path, capsys):
++    code, lines, _ = run(
++        tmp_path,
++        capsys,
++        "payer,amount,description\nAlice,30.00,Hotel\nBob,15.00,Taxi\n",
++        "Alice,Bob,Carol",
++    )
++    assert code == EXIT_OK
++    for line in lines:
++        payer, pays, payee, amount = line.split()
++        assert pays == "pays"
++        assert payer != payee
++        assert len(amount.split(".")[1]) == 2
++
++
++def test_amount_keeps_two_decimals_for_whole_and_sub_unit_values(tmp_path, capsys):
++    _, lines, _ = run(
++        tmp_path, capsys, "payer,amount,description\nAlice,0.02,Gum\n", "Alice,Bob"
++    )
++    assert lines == ["Bob pays Alice 0.01"]
++
++
++def test_nothing_printed_when_everyone_is_square(tmp_path, capsys):
++    code, lines, err = run(
++        tmp_path,
++        capsys,
++        "payer,amount,description\nAlice,10.00,A\nBob,10.00,B\n",
++        "Alice,Bob",
++    )
++    assert code == EXIT_OK
++    assert lines == []
++    assert err == ""
++
++
++def test_nothing_printed_for_a_header_only_file(tmp_path, capsys):
++    code, lines, _ = run(tmp_path, capsys, "payer,amount,description\n", "Alice,Bob")
++    assert code == EXIT_OK
++    assert lines == []
++
++
++def test_printed_amounts_sum_to_the_total_imbalance(tmp_path, capsys):
++    """The headline guarantee, checked on the printed text rather than internals."""
++    csv_text = (
++        "payer,amount,description\n"
++        "Alice,100.00,Hotel\n"
++        "Bob,33.33,Taxi\n"
++        "Carol,0.01,Gum\n"
++    )
++    _, lines, _ = run(tmp_path, capsys, csv_text, "Alice,Bob,Carol")
++
++    printed = sum(round(float(line.split()[-1]) * 100) for line in lines)
++    total = 10000 + 3333 + 1
++    share = total // 3
++    # Alice is the only creditor here; the imbalance is what she overpaid.
++    imbalance = (10000 - (share + (1 if total % 3 > 0 else 0)))
++    assert printed == imbalance
++
++
++def test_three_way_split_with_an_awkward_remainder(tmp_path, capsys):
++    """10.00 over three is 3.34/3.33/3.33 -- the cent must not vanish."""
++    code, lines, _ = run(
++        tmp_path, capsys, "payer,amount,description\nAlice,10.00,Lunch\n", "Alice,Bob,Carol"
++    )
++    assert code == EXIT_OK
++    amounts = sorted(line.split()[-1] for line in lines)
++    assert amounts == ["3.33", "3.33"]
++    assert sum(round(float(a) * 100) for a in amounts) == 666
++
++
++def test_participant_who_paid_nothing_appears_as_a_payer(tmp_path, capsys):
++    _, lines, _ = run(
++        tmp_path, capsys, "payer,amount,description\nAlice,9.00,Pizza\n", "Alice,Bob,Carol"
++    )
++    payers = {line.split()[0] for line in lines}
++    assert payers == {"Bob", "Carol"}
++
++
++# --- error handling ---------------------------------------------------------
++
++
++@pytest.mark.parametrize(
++    ("csv_text", "participants", "fragment"),
++    [
++        ("payer,amount,description\nZara,30.00,Hotel\n", "Alice,Bob", "Zara"),
++        ("payer,amount,description\nAlice,abc,Hotel\n", "Alice", "not a number"),
++        ("payer,amount,description\nAlice,-5.00,Hotel\n", "Alice", "negative"),
++        ("payer,amount,description\nAlice,30.00,Hotel\n", "", "empty"),
++        ("payer,amount\nAlice,30.00\n", "Alice", "description"),
++        ("", "Alice", "empty"),
++    ],
++)
++def test_malformed_input_errors_on_stderr_with_nonzero_exit(
++    tmp_path, capsys, csv_text, participants, fragment
++):
++    code, lines, err = run(tmp_path, capsys, csv_text, participants)
++    assert code != EXIT_OK
++    assert lines == [], "no partial results should be printed on error"
++    assert fragment in err
++
++
++def test_errors_are_prefixed_and_single_line(tmp_path, capsys):
++    _, _, err = run(
++        tmp_path, capsys, "payer,amount,description\nAlice,abc,Hotel\n", "Alice"
++    )
++    assert err.startswith("splitter: error: ")
++    assert err.count("\n") == 1
++
++
++def test_error_has_no_traceback(tmp_path, capsys):
++    _, _, err = run(tmp_path, capsys, "payer,amount,description\nAlice,abc,X\n", "Alice")
++    assert "Traceback" not in err
++
++
++# --- the real command line --------------------------------------------------
++
++
++def module_run(args, cwd):
++    env = {**os.environ, "PYTHONPATH": SRC}
++    return subprocess.run(
++        [sys.executable, "-m", "splitter", *args],
++        capture_output=True,
++        text=True,
++        cwd=cwd,
++        env=env,
++    )
++
++
++def test_python_dash_m_invocation(tmp_path):
++    write_csv(tmp_path, "payer,amount,description\nAlice,30.00,Hotel\n", "trip.csv")
++    result = module_run(["trip.csv", "--participants", "Alice,Bob"], tmp_path)
++    assert result.returncode == 0
++    assert result.stdout == "Bob pays Alice 15.00\n"
++    assert result.stderr == ""
++
++
++def test_python_dash_m_missing_file_exit_status(tmp_path):
++    result = module_run(["missing.csv", "--participants", "Alice,Bob"], tmp_path)
++    assert result.returncode != 0
++    assert result.stdout == ""
++    assert result.stderr.strip() != ""
++
++
++def test_missing_participants_argument_is_a_usage_error(tmp_path):
++    write_csv(tmp_path, "payer,amount,description\n", "trip.csv")
++    result = module_run(["trip.csv"], tmp_path)
++    assert result.returncode != 0
++    assert "participants" in result.stderr
++
++
++def test_no_arguments_is_a_usage_error(tmp_path):
++    result = module_run([], tmp_path)
++    assert result.returncode != 0
++
++
++def test_help_works(tmp_path):
++    result = module_run(["--help"], tmp_path)
++    assert result.returncode == 0
++    assert "participants" in result.stdout
+diff --git a/tests/test_expenses.py b/tests/test_expenses.py
+new file mode 100644
+index 0000000..4b97aa9
+--- /dev/null
++++ b/tests/test_expenses.py
+@@ -0,0 +1,263 @@
++"""Parsing the participant list and loading the expenses CSV."""
++
++import pytest
++
++from splitter.errors import SplitterError
++from splitter.expenses import Expense, load_expenses, parse_participants
++
++
++def write_csv(tmp_path, text, name="expenses.csv"):
++    path = tmp_path / name
++    path.write_text(text, encoding="utf-8")
++    return path
++
++
++# --- participants -----------------------------------------------------------
++
++
++def test_parses_a_simple_list():
++    assert parse_participants("Alice,Bob") == ["Alice", "Bob"]
++
++
++def test_strips_whitespace_around_names():
++    assert parse_participants(" Alice , Bob ,Carol") == ["Alice", "Bob", "Carol"]
++
++
++def test_single_participant_is_allowed():
++    assert parse_participants("Alice") == ["Alice"]
++
++
++def test_preserves_the_given_order():
++    assert parse_participants("Carol,Alice,Bob") == ["Carol", "Alice", "Bob"]
++
++
++def test_names_with_internal_spaces_are_kept():
++    assert parse_participants("Alice Smith,Bob Jones") == ["Alice Smith", "Bob Jones"]
++
++
++@pytest.mark.parametrize("text", ["", "   ", ",", ",,", " , "])
++def test_rejects_an_empty_participant_list(text):
++    with pytest.raises(SplitterError, match="empty"):
++        parse_participants(text)
++
++
++@pytest.mark.parametrize("text", ["Alice,", ",Bob", "Alice,,Bob", "Alice, ,Bob"])
++def test_rejects_an_empty_name_among_real_ones(text):
++    with pytest.raises(SplitterError, match="empty name"):
++        parse_participants(text)
++
++
++def test_rejects_a_duplicated_name():
++    """Counting someone twice would charge them two shares."""
++    with pytest.raises(SplitterError, match="more than once"):
++        parse_participants("Alice,Bob,Alice")
++
++
++# --- loading the CSV --------------------------------------------------------
++
++
++def test_loads_the_spec_example(tmp_path):
++    path = write_csv(tmp_path, "payer,amount,description\nAlice,30.00,Hotel\n")
++    assert load_expenses(path, ["Alice", "Bob"]) == [
++        Expense(payer="Alice", cents=3000, description="Hotel")
++    ]
++
++
++def test_loads_multiple_rows(tmp_path):
++    path = write_csv(
++        tmp_path,
++        "payer,amount,description\nAlice,30.00,Hotel\nBob,10.50,Taxi\n",
++    )
++    expenses = load_expenses(path, ["Alice", "Bob"])
++    assert [(e.payer, e.cents) for e in expenses] == [("Alice", 3000), ("Bob", 1050)]
++
++
++def test_header_only_file_is_valid_and_yields_nothing(tmp_path):
++    path = write_csv(tmp_path, "payer,amount,description\n")
++    assert load_expenses(path, ["Alice"]) == []
++
++
++def test_column_order_does_not_matter(tmp_path):
++    path = write_csv(tmp_path, "description,payer,amount\nHotel,Alice,30.00\n")
++    assert load_expenses(path, ["Alice"]) == [
++        Expense(payer="Alice", cents=3000, description="Hotel")
++    ]
++
++
++def test_header_matching_ignores_case_and_whitespace(tmp_path):
++    path = write_csv(tmp_path, " Payer , AMOUNT , Description \nAlice,30.00,Hotel\n")
++    assert load_expenses(path, ["Alice"])[0].cents == 3000
++
++
++def test_extra_columns_are_ignored(tmp_path):
++    path = write_csv(
++        tmp_path, "payer,amount,description,notes\nAlice,30.00,Hotel,paid cash\n"
++    )
++    assert load_expenses(path, ["Alice"])[0].description == "Hotel"
++
++
++def test_blank_lines_are_skipped(tmp_path):
++    path = write_csv(
++        tmp_path, "payer,amount,description\nAlice,30.00,Hotel\n\nBob,5.00,Snacks\n"
++    )
++    assert len(load_expenses(path, ["Alice", "Bob"])) == 2
++
++
++def test_quoted_commas_in_description(tmp_path):
++    path = write_csv(
++        tmp_path, 'payer,amount,description\nAlice,30.00,"Hotel, two nights"\n'
++    )
++    assert load_expenses(path, ["Alice"])[0].description == "Hotel, two nights"
++
++
++def test_a_utf8_bom_does_not_break_the_header(tmp_path):
++    path = tmp_path / "bom.csv"
++    path.write_text("payer,amount,description\nAlice,30.00,Hotel\n", encoding="utf-8-sig")
++    assert load_expenses(path, ["Alice"])[0].cents == 3000
++
++
++def test_non_ascii_names_work(tmp_path):
++    path = write_csv(tmp_path, "payer,amount,description\nZoë,30.00,Café\n")
++    assert load_expenses(path, ["Zoë"])[0].description == "Café"
++
++
++def test_zero_amount_is_allowed(tmp_path):
++    path = write_csv(tmp_path, "payer,amount,description\nAlice,0.00,Free sample\n")
++    assert load_expenses(path, ["Alice"])[0].cents == 0
++
++
++def test_empty_description_is_allowed(tmp_path):
++    path = write_csv(tmp_path, "payer,amount,description\nAlice,30.00,\n")
++    assert load_expenses(path, ["Alice"])[0].description == ""
++
++
++# --- malformed input --------------------------------------------------------
++
++
++def test_missing_file(tmp_path):
++    with pytest.raises(SplitterError, match="no such file"):
++        load_expenses(tmp_path / "nope.csv", ["Alice"])
++
++
++def test_directory_instead_of_file(tmp_path):
++    with pytest.raises(SplitterError, match="directory"):
++        load_expenses(tmp_path, ["Alice"])
++
++
++def test_completely_empty_file(tmp_path):
++    path = write_csv(tmp_path, "")
++    with pytest.raises(SplitterError, match="empty"):
++        load_expenses(path, ["Alice"])
++
++
++def test_missing_required_column(tmp_path):
++    path = write_csv(tmp_path, "payer,amount\nAlice,30.00\n")
++    with pytest.raises(SplitterError, match="description"):
++        load_expenses(path, ["Alice"])
++
++
++def test_header_that_looks_like_data(tmp_path):
++    """A file without a header row should complain, not silently drop a row."""
++    path = write_csv(tmp_path, "Alice,30.00,Hotel\nBob,5.00,Snacks\n")
++    with pytest.raises(SplitterError, match="header row is missing"):
++        load_expenses(path, ["Alice", "Bob"])
++
++
++def test_unknown_payer(tmp_path):
++    path = write_csv(tmp_path, "payer,amount,description\nZara,30.00,Hotel\n")
++    with pytest.raises(SplitterError, match="not in the participant list"):
++        load_expenses(path, ["Alice", "Bob"])
++
++
++def test_unknown_payer_error_names_the_row_and_the_roster(tmp_path):
++    path = write_csv(
++        tmp_path, "payer,amount,description\nAlice,30.00,Hotel\nZara,5.00,Taxi\n"
++    )
++    with pytest.raises(SplitterError) as info:
++        load_expenses(path, ["Alice", "Bob"])
++    message = str(info.value)
++    assert "line 3" in message
++    assert "Zara" in message
++    assert "Alice, Bob" in message
++
++
++def test_payer_matching_is_case_sensitive(tmp_path):
++    path = write_csv(tmp_path, "payer,amount,description\nalice,30.00,Hotel\n")
++    with pytest.raises(SplitterError, match="not in the participant list"):
++        load_expenses(path, ["Alice"])
++
++
++def test_empty_payer(tmp_path):
++    path = write_csv(tmp_path, "payer,amount,description\n,30.00,Hotel\n")
++    with pytest.raises(SplitterError, match="payer is empty"):
++        load_expenses(path, ["Alice"])
++
++
++@pytest.mark.parametrize("amount", ["abc", "", "   ", "$30", "nan", "12 34"])
++def test_non_numeric_amount(tmp_path, amount):
++    path = write_csv(tmp_path, f"payer,amount,description\nAlice,{amount},Hotel\n")
++    with pytest.raises(SplitterError, match="amount"):
++        load_expenses(path, ["Alice"])
++
++
++def test_quoted_thousands_separator_is_rejected(tmp_path):
++    path = write_csv(tmp_path, 'payer,amount,description\nAlice,"1,000",Hotel\n')
++    with pytest.raises(SplitterError, match="not a number"):
++        load_expenses(path, ["Alice"])
++
++
++def test_unquoted_comma_in_amount_is_rejected(tmp_path):
++    """Alice,1,000,Hotel would otherwise read as $1.00 with description '000'."""
++    path = write_csv(tmp_path, "payer,amount,description\nAlice,1,000,Hotel\n")
++    with pytest.raises(SplitterError, match="must be quoted"):
++        load_expenses(path, ["Alice"])
++
++
++def test_unquoted_comma_in_description_is_rejected(tmp_path):
++    path = write_csv(tmp_path, "payer,amount,description\nAlice,30.00,Hotel, 2 nights\n")
++    with pytest.raises(SplitterError, match="must be quoted"):
++        load_expenses(path, ["Alice"])
++
++
++def test_a_trailing_comma_is_tolerated(tmp_path):
++    """An empty extra field carries no data, so it is not a column mismatch."""
++    path = write_csv(tmp_path, "payer,amount,description\nAlice,30.00,Hotel,\n")
++    assert load_expenses(path, ["Alice"])[0].cents == 3000
++
++
++@pytest.mark.parametrize("amount", ["-30.00", "-0.01"])
++def test_negative_amount(tmp_path, amount):
++    path = write_csv(tmp_path, f"payer,amount,description\nAlice,{amount},Hotel\n")
++    with pytest.raises(SplitterError, match="negative"):
++        load_expenses(path, ["Alice"])
++
++
++def test_sub_cent_amount(tmp_path):
++    path = write_csv(tmp_path, "payer,amount,description\nAlice,0.005,Hotel\n")
++    with pytest.raises(SplitterError, match="finer than one cent"):
++        load_expenses(path, ["Alice"])
++
++
++def test_row_with_too_few_fields(tmp_path):
++    path = write_csv(tmp_path, "payer,amount,description\nAlice,30.00\n")
++    with pytest.raises(SplitterError, match="expected at least 3 fields"):
++        load_expenses(path, ["Alice"])
++
++
++def test_row_errors_report_the_line_number(tmp_path):
++    path = write_csv(
++        tmp_path,
++        "payer,amount,description\n"
++        "Alice,30.00,Hotel\n"
++        "Bob,10.00,Taxi\n"
++        "Alice,oops,Dinner\n",
++    )
++    with pytest.raises(SplitterError, match="line 4"):
++        load_expenses(path, ["Alice", "Bob"])
++
++
++def test_invalid_utf8_file(tmp_path):
++    path = tmp_path / "binary.csv"
++    path.write_bytes(b"payer,amount,description\n\xff\xfe\x00bad,30.00,x\n")
++    with pytest.raises(SplitterError, match="UTF-8"):
++        load_expenses(path, ["Alice"])
+diff --git a/tests/test_money.py b/tests/test_money.py
+new file mode 100644
+index 0000000..4970f68
+--- /dev/null
++++ b/tests/test_money.py
+@@ -0,0 +1,113 @@
++"""Money parsing and formatting: the layer that must never lose a cent."""
++
++import pytest
++
++from splitter.errors import SplitterError
++from splitter.money import format_cents, parse_cents
++
++
++@pytest.mark.parametrize(
++    ("text", "expected"),
++    [
++        ("30.00", 3000),
++        ("30", 3000),
++        ("0", 0),
++        ("0.00", 0),
++        ("0.01", 1),
++        (".5", 50),
++        ("+1.25", 125),
++        ("  7.77  ", 777),  # surrounding whitespace is fine
++        ("1e3", 100_000),  # exponent notation
++        ("1E2", 10_000),
++        ("0.10", 10),
++        ("12345678901234567890.99", 1234567890123456789099),  # beyond float precision
++    ],
++)
++def test_parse_cents_accepts_valid_amounts(text, expected):
++    assert parse_cents(text) == expected
++
++
++@pytest.mark.parametrize(
++    "text",
++    [
++        "abc",
++        "",
++        "   ",
++        "1.2.3",
++        "$5.00",
++        "5 dollars",
++        "1,000.00",  # thousands separators are not money syntax here
++        "nan",
++        "NaN",
++        "Infinity",
++        "-Infinity",
++        "inf",
++    ],
++)
++def test_parse_cents_rejects_non_numbers(text):
++    with pytest.raises(SplitterError):
++        parse_cents(text)
++
++
++@pytest.mark.parametrize("text", ["-1", "-0.01", "-30.00", " -5 "])
++def test_parse_cents_rejects_negative(text):
++    with pytest.raises(SplitterError, match="negative"):
++        parse_cents(text)
++
++
++@pytest.mark.parametrize("text", ["0.005", "1.234", "0.001", "1e-3"])
++def test_parse_cents_rejects_sub_cent_precision(text):
++    """Rounding these would silently change the group total."""
++    with pytest.raises(SplitterError, match="finer than one cent"):
++        parse_cents(text)
++
++
++def test_parse_cents_allows_trailing_zeros_beyond_two_places():
++    """0.5000 is exactly 50 cents, so it is representable and accepted."""
++    assert parse_cents("0.5000") == 50
++    assert parse_cents("30.000000") == 3000
++
++
++def test_negative_zero_is_zero():
++    assert parse_cents("-0.00") == 0
++
++
++def test_parse_cents_error_mentions_the_field_name():
++    with pytest.raises(SplitterError, match="amount"):
++        parse_cents("abc", what="amount")
++
++
++@pytest.mark.parametrize(
++    ("cents", "expected"),
++    [
++        (0, "0.00"),
++        (1, "0.01"),
++        (5, "0.05"),
++        (10, "0.10"),
++        (100, "1.00"),
++        (1500, "15.00"),
++        (333, "3.33"),
++        (-1234, "-12.34"),
++        (-1, "-0.01"),
++        (123456789, "1234567.89"),
++    ],
++)
++def test_format_cents(cents, expected):
++    assert format_cents(cents) == expected
++
++
++def test_format_cents_always_has_two_decimal_places():
++    for cents in range(0, 1000):
++        assert format_cents(cents).split(".")[1] == f"{cents % 100:02d}"
++
++
++def test_parse_and_format_round_trip():
++    for cents in range(0, 2000):
++        assert parse_cents(format_cents(cents)) == cents
++
++
++def test_no_float_rounding_on_classic_trap_values():
++    """0.1 + 0.2 == 0.30000000000000004 as floats; not here."""
++    assert parse_cents("0.1") + parse_cents("0.2") == parse_cents("0.3")
++    total = sum(parse_cents("0.01") for _ in range(100))
++    assert total == parse_cents("1.00")
+diff --git a/tests/test_settle.py b/tests/test_settle.py
+new file mode 100644
+index 0000000..aecc575
+--- /dev/null
++++ b/tests/test_settle.py
+@@ -0,0 +1,296 @@
++"""Share splitting, balances, and the settlement plan."""
++
++import random
++from itertools import combinations
++
++import pytest
++
++from splitter.expenses import Expense
++from splitter.settle import (
++    EXACT_LIMIT,
++    Payment,
++    compute_balances,
++    equal_shares,
++    plan_settlement,
++    settle,
++)
++
++
++def expense(payer, cents):
++    return Expense(payer=payer, cents=cents, description="")
++
++
++# --- equal_shares -----------------------------------------------------------
++
++
++def test_shares_divide_evenly_when_possible():
++    assert equal_shares(3000, ["Alice", "Bob"]) == {"Alice": 1500, "Bob": 1500}
++
++
++def test_shares_distribute_indivisible_remainder_in_list_order():
++    """10.00 over three people is 3.34 / 3.33 / 3.33, summing to exactly 10.00."""
++    shares = equal_shares(1000, ["Alice", "Bob", "Carol"])
++    assert shares == {"Alice": 334, "Bob": 333, "Carol": 333}
++    assert sum(shares.values()) == 1000
++
++
++def test_shares_remainder_goes_to_the_first_names():
++    shares = equal_shares(1001, ["A", "B", "C", "D"])  # 1001 = 4*250 + 1
++    assert shares == {"A": 251, "B": 250, "C": 250, "D": 250}
++
++
++def test_shares_always_sum_to_the_total():
++    for total in range(0, 500):
++        for count in range(1, 12):
++            names = [f"P{i}" for i in range(count)]
++            assert sum(equal_shares(total, names).values()) == total
++
++
++def test_shares_of_zero():
++    assert equal_shares(0, ["Alice", "Bob"]) == {"Alice": 0, "Bob": 0}
++
++
++def test_shares_rejects_empty_participants():
++    with pytest.raises(ValueError):
++        equal_shares(100, [])
++
++
++# --- compute_balances -------------------------------------------------------
++
++
++def test_balances_for_the_spec_example():
++    balances = compute_balances([expense("Alice", 3000)], ["Alice", "Bob"])
++    assert balances == {"Alice": 1500, "Bob": -1500}
++
++
++def test_balances_include_participants_who_never_paid():
++    balances = compute_balances([expense("Alice", 3000)], ["Alice", "Bob", "Carol"])
++    assert balances["Bob"] == -1000
++    assert balances["Carol"] == -1000
++
++
++def test_balances_sum_to_zero_even_with_an_awkward_remainder():
++    balances = compute_balances([expense("Alice", 1000)], ["Alice", "Bob", "Carol"])
++    assert sum(balances.values()) == 0
++    assert balances == {"Alice": 666, "Bob": -333, "Carol": -333}
++
++
++def test_balances_accumulate_multiple_expenses_per_payer():
++    expenses = [expense("Alice", 1000), expense("Alice", 500), expense("Bob", 300)]
++    balances = compute_balances(expenses, ["Alice", "Bob"])
++    assert balances == {"Alice": 600, "Bob": -600}
++
++
++def test_everyone_square_yields_zero_balances():
++    expenses = [expense("Alice", 1000), expense("Bob", 1000)]
++    assert compute_balances(expenses, ["Alice", "Bob"]) == {"Alice": 0, "Bob": 0}
++
++
++def test_no_expenses_yields_zero_balances():
++    assert compute_balances([], ["Alice", "Bob"]) == {"Alice": 0, "Bob": 0}
++
++
++# --- settle -----------------------------------------------------------------
++
++
++def test_settle_simple_two_person_case():
++    payments = settle({"Alice": 1500, "Bob": -1500})
++    assert payments == [Payment(payer="Bob", payee="Alice", cents=1500)]
++
++
++def test_settle_returns_nothing_when_all_square():
++    assert settle({"Alice": 0, "Bob": 0}) == []
++    assert settle({}) == []
++
++
++def test_settle_never_emits_a_zero_or_negative_payment():
++    balances = {"A": 1000, "B": 0, "C": -400, "D": -600}
++    assert all(payment.cents > 0 for payment in settle(balances))
++
++
++def test_settle_matches_equal_and_opposite_pairs_first():
++    """Two independent debts should not be shuffled through a third party."""
++    balances = {"A": 500, "B": -500, "C": 300, "D": -300}
++    payments = settle(balances)
++    assert len(payments) == 2
++    assert {(p.payer, p.payee, p.cents) for p in payments} == {
++        ("B", "A", 500),
++        ("D", "C", 300),
++    }
++
++
++def test_settle_uses_at_most_n_minus_1_payments():
++    balances = {"A": -1000, "B": -600, "C": 700, "D": 900}
++    payments = settle(balances)
++    assert len(payments) <= len(balances) - 1
++
++
++def test_settle_splits_into_independent_zero_sum_subgroups():
++    """Two self-contained pairs need two payments, not three."""
++    balances = {"A": 500, "B": -500, "C": 300, "D": -300}
++    assert len(settle(balances)) == 2
++
++
++def test_settle_finds_a_subgroup_greedy_alone_would_miss():
++    """Greedy largest-first takes 4 payments here; the optimum is 3."""
++    balances = {"A": 5, "B": 4, "C": 6, "D": -6, "E": -9}
++    assert len(settle(balances)) == 3
++
++
++def test_settle_output_is_sorted_by_payer_then_payee():
++    balances = {"A": -300, "B": -200, "C": 500}
++    payments = settle(balances)
++    keys = [(p.payer, p.payee) for p in payments]
++    assert keys == sorted(keys)
++
++
++def test_settle_rejects_balances_that_do_not_sum_to_zero():
++    with pytest.raises(ValueError, match="sum to zero"):
++        settle({"Alice": 100, "Bob": -50})
++
++
++def test_settle_is_deterministic_under_dict_reordering():
++    """Tie-breaking by name means output does not depend on insertion order."""
++    balances = {"A": -500, "B": -500, "C": 500, "D": 500}
++    expected = settle(balances)
++    for _ in range(20):
++        items = list(balances.items())
++        random.shuffle(items)
++        assert settle(dict(items)) == expected
++
++
++# --- the core invariants ----------------------------------------------------
++
++
++def apply_payments(balances, payments):
++    """Replay the payments against the balances; everything should land on zero."""
++    final = dict(balances)
++    for payment in payments:
++        final[payment.payer] += payment.cents
++        final[payment.payee] -= payment.cents
++    return final
++
++
++def test_payments_zero_out_every_balance():
++    balances = {"A": -1000, "B": -600, "C": 700, "D": 900}
++    assert all(value == 0 for value in apply_payments(balances, settle(balances)).values())
++
++
++def test_payments_sum_exactly_to_the_total_imbalance():
++    balances = {"A": -1000, "B": -600, "C": 700, "D": 900}
++    payments = settle(balances)
++    imbalance = sum(value for value in balances.values() if value > 0)
++    assert sum(payment.cents for payment in payments) == imbalance
++
++
++@pytest.mark.parametrize("seed", range(300))
++def test_randomised_settlements_conserve_money_exactly(seed):
++    """No set of expenses may create, destroy, or misroute a single cent."""
++    rng = random.Random(seed)
++    count = rng.randint(1, 9)
++    participants = [f"P{i}" for i in range(count)]
++    expenses = [
++        expense(rng.choice(participants), rng.randint(0, 100_000))
++        for _ in range(rng.randint(0, 12))
++    ]
++
++    balances = compute_balances(expenses, participants)
++    payments = plan_settlement(expenses, participants)
++
++    # Shares exhaust the total: nothing unallocated.
++    assert sum(balances.values()) == 0
++    assert sum(e.cents for e in expenses) == sum(
++        equal_shares(sum(e.cents for e in expenses), participants).values()
++    )
++
++    # Payments are well formed.
++    assert all(p.cents > 0 for p in payments)
++    assert all(p.payer != p.payee for p in payments)
++    assert len(payments) <= max(len(participants) - 1, 0)
++
++    # Payments settle everyone to zero and move exactly the imbalance.
++    assert all(value == 0 for value in apply_payments(balances, payments).values())
++    assert sum(p.cents for p in payments) == sum(
++        value for value in balances.values() if value > 0
++    )
++
++
++def fewest_possible_payments(balances):
++    """Brute-force oracle for the minimum number of transfers.
++
++    The minimum equals (people with a non-zero balance) minus (the largest
++    number of disjoint zero-sum subgroups they can be split into). Computed here
++    by exhaustive search over set partitions, independently of the
++    implementation under test.
++    """
++    values = [value for value in balances.values() if value != 0]
++    count = len(values)
++    if count == 0:
++        return 0
++
++    def most_groups(remaining):
++        if not remaining:
++            return 0
++        best = None
++        first = remaining[0]
++        rest = remaining[1:]
++        for size in range(len(rest) + 1):
++            for companions in combinations(rest, size):
++                group = (first, *companions)
++                if sum(value for _, value in group) != 0:
++                    continue
++                leftover = [item for item in rest if item not in companions]
++                deeper = most_groups(leftover)
++                if deeper is not None:
++                    best = 1 + deeper if best is None else max(best, 1 + deeper)
++        return best
++
++    indexed = list(enumerate(values))
++    return count - most_groups(indexed)
++
++
++@pytest.mark.parametrize("seed", range(200))
++def test_settle_uses_the_fewest_possible_payments(seed):
++    """Checked against an independent brute-force oracle on small instances."""
++    rng = random.Random(seed)
++    count = rng.randint(2, 7)
++    # Small magnitudes so that zero-sum subgroups actually occur.
++    values = [rng.randint(-6, 6) for _ in range(count - 1)]
++    values.append(-sum(values))
++    balances = {f"P{i}": value for i, value in enumerate(values)}
++
++    assert len(settle(balances)) == fewest_possible_payments(balances)
++
++
++@pytest.mark.parametrize("count", [1, 2, 3, 7, 11, 13, 97])
++def test_indivisible_totals_across_group_sizes(count):
++    """A total of 1 cent split N ways still settles exactly."""
++    participants = [f"P{i}" for i in range(count)]
++    expenses = [expense("P0", 1)]
++    balances = compute_balances(expenses, participants)
++    payments = plan_settlement(expenses, participants)
++
++    assert sum(balances.values()) == 0
++    assert all(value == 0 for value in apply_payments(balances, payments).values())
++
++
++@pytest.mark.parametrize("seed", range(40))
++def test_large_groups_take_the_fallback_path_and_still_settle_exactly(seed):
++    """Above EXACT_LIMIT the exact search is skipped; correctness must not be."""
++    rng = random.Random(seed)
++    count = EXACT_LIMIT + rng.randint(1, 40)
++    values = [rng.randint(-100_000, 100_000) for _ in range(count - 1)]
++    values.append(-sum(values))
++    balances = {f"P{i:03d}": value for i, value in enumerate(values)}
++
++    payments = settle(balances)
++    assert all(value == 0 for value in apply_payments(balances, payments).values())
++    assert sum(p.cents for p in payments) == sum(
++        v for v in balances.values() if v > 0
++    )
++    assert len(payments) <= sum(1 for v in balances.values() if v != 0) - 1
++
++
++def test_single_participant_owes_nothing():
++    expenses = [expense("Alice", 5000)]
++    assert plan_settlement(expenses, ["Alice"]) == []
+diff --git a/trip.csv b/trip.csv
+new file mode 100644
+index 0000000..257b1af
+--- /dev/null
++++ b/trip.csv
+@@ -0,0 +1,2 @@
++payer,amount,description
++Alice,30.00,Hotel

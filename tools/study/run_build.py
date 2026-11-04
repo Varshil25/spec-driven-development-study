@@ -54,8 +54,8 @@ PERMISSION_MODE = "acceptEdits"
 MAX_FOLLOW_UPS = 5
 IMPLEMENT_CAP_SECONDS = 90 * 60
 
-SAFETY = "It should be handled safely; the details are up to you."
-NOPREF = "No preference. Use your judgement."
+SAFETY = "On this question: it should be handled safely; the details are up to you."
+NOPREF = "No preference on this question. Use your judgement."
 PERMIT = "Yes, go ahead."
 RESUME = "Please continue from where you stopped."
 
@@ -70,6 +70,15 @@ PHASES = {
 # session (for example when this tool is started from inside one).
 STRIP_ENV = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
              "CLAUDE_CODE_ENTRYPOINT")
+
+# With --clean-env, a child session gets only these variables plus its own
+# CLAUDE_CONFIG_DIR, so nothing from the machine's own Claude setup (user
+# skills, plugins, hooks, MCP servers, effort settings, a host's extra tools)
+# reaches the agent under test, and nothing carries over between runs.
+CLEAN_ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER", "SHELL", "TMPDIR",
+                  "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
+                  "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "GIT_SSL_CAINFO", "REQUESTS_CA_BUNDLE",
+                  "PIP_CERT", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY")
 
 
 class Abort(Exception):
@@ -99,6 +108,18 @@ def phases_for(condition, stage):
     if stage == "change":
         phases = [p for p in phases if p != "constitution"]
     return phases
+
+
+def phase_range(phases, start_at, stop_after):
+    """Indexes of the first and last phase to run in this invocation."""
+    for name in (start_at, stop_after):
+        if name is not None and name not in phases:
+            raise Abort("this run's phases are %s, not %s" % (", ".join(phases), name))
+    first = phases.index(start_at) if start_at else 0
+    last = phases.index(stop_after) if stop_after else len(phases) - 1
+    if first > last:
+        raise Abort("--start-at %s comes after --stop-after %s" % (start_at, stop_after))
+    return first, last
 
 
 def read_text(path):
@@ -154,6 +175,23 @@ def answer_sheets(kit, task):
 # ---------------------------------------------------------------------------
 
 
+def child_env(args):
+    """The environment of each `claude -p` call."""
+    if args.clean_env:
+        env = {k: os.environ[k] for k in CLEAN_ENV_KEEP if k in os.environ}
+        env["CLAUDE_CONFIG_DIR"] = str(config_dir(args))
+        return env
+    return {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
+
+
+def config_dir(args):
+    """A run's own Claude Code configuration folder under --clean-env (build and change request share
+    nothing: each run ID gets a new one)."""
+    path = Path(args.clean_env).resolve() / args.run_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 class Agent:
     """One `claude -p` session per phase, continued with --resume."""
 
@@ -173,7 +211,7 @@ class Agent:
         return cmd
 
     def send(self, message, phase):
-        env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
+        env = child_env(self.args)
         started = time.time()
         proc = subprocess.run(self._command(message), capture_output=True, text=True, env=env)
         self.calls += 1
@@ -328,11 +366,12 @@ def environment_note(args):
             return subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout.strip() or "?"
         except (OSError, subprocess.TimeoutExpired):
             return "not found"
-    return "env: claude %s | %s | %s | headless run_build.py, permission mode %s, allowed tools %s" % (
+    return "env: claude %s | %s | %s | headless run_build.py, permission mode %s, allowed tools %s%s" % (
         version(shlex.split(args.claude) + ["--version"]),
         version(["specify", "--version"]),
         version([sys.executable, "--version"]),
-        args.permission_mode, args.allowed_tools)
+        args.permission_mode, args.allowed_tools,
+        " | clean environment, own config folder" if args.clean_env else "")
 
 
 def prepare_repository(condition, stage, args):
@@ -372,6 +411,13 @@ def main(argv=None):
     parser.add_argument("--no-spec-kit-setup", action="store_true",
                         help="fail instead of running `specify init` when Spec Kit is missing")
     parser.add_argument("--no-commit", action="store_true", help="do not commit the clone at the end")
+    parser.add_argument("--start-at", metavar="PHASE", default=None,
+                        help="continue an open run from PHASE (the run was stopped with --stop-after)")
+    parser.add_argument("--stop-after", metavar="PHASE", default=None,
+                        help="leave the run open after PHASE; continue later with --start-at")
+    parser.add_argument("--clean-env", metavar="DIR", default=None,
+                        help="give each claude call only a minimal environment and a fresh config "
+                             "folder DIR/<run id> (no user skills, plugins, hooks or host tools)")
     args = parser.parse_args(argv)
 
     kit = Path(args.kit).resolve()
@@ -379,16 +425,27 @@ def main(argv=None):
     operator = Operator(script)
     try:
         task, condition, stage = schedule_row(kit, args.run_id)
-        prepare_repository(condition, stage, args)
+        phases = phases_for(condition, stage)
+        first, last = phase_range(phases, args.start_at, args.stop_after)
         answers = answer_sheets(kit, task)
-        sddlog("run-start", "--run-id", args.run_id, "--task", task, "--condition", condition,
-               "--stage", stage, "--model", args.model)
-        note(environment_note(args))
         log_dir = Path("logs") / "runs" / args.run_id / "headless"
+        if first == 0:
+            prepare_repository(condition, stage, args)
+            sddlog("run-start", "--run-id", args.run_id, "--task", task, "--condition", condition,
+                   "--stage", stage, "--model", args.model)
+            note(environment_note(args))
+        else:
+            active = Path("logs") / "ACTIVE_RUN"
+            if not active.exists() or active.read_text().strip() != args.run_id:
+                raise Abort("--start-at needs %s to be the open run in this clone" % args.run_id)
         print("Run %s: %s, %s, %s stage. Phases: %s" % (
-            args.run_id, task, condition, stage, " -> ".join(phases_for(condition, stage))))
-        for phase in phases_for(condition, stage):
+            args.run_id, task, condition, stage, " -> ".join(phases)))
+        for phase in phases[first:last + 1]:
             run_phase(args, kit, task, condition, phase, operator, answers, log_dir)
+        if last < len(phases) - 1:
+            print("\nRun %s left open after %s. Continue with: run_build.py %s --start-at %s" % (
+                args.run_id, phases[last], args.run_id, phases[last + 1]))
+            return 0
         sddlog("run-end", "--status", "completed")
     except Abort as exc:
         print("\nrun_build: %s" % exc, file=sys.stderr)

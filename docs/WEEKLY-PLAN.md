@@ -14,7 +14,7 @@ Part IV all finish by Week 11, and Week 12 is for writing.
 | **7** | Mon 26 Oct – Sun 1 Nov | Java/Quarkus extension built and validated; pre-registration frozen; mechanics checks | Hashes sent to the advisor; no study run before this |
 | **8** | Mon 2 Nov – Sun 8 Nov | Rounds 1–2: R004–R013 and their change requests (Python) + R026–R027 (Java) | Rounds 1–2 logged, every run `verify` OK |
 | **9** | Mon 9 Nov – Sun 15 Nov | Round 3: R014–R018 and change requests + R028–R029; Part IV specs written | Round 3 logged; seven `ai_specs/` files exist |
-| **10** | Mon 16 Nov – Sun 22 Nov | Round 4: R034–R038 and change requests + R030–R031; Part IV pipeline run | All 46 study runs done (20 builds, 20 change requests, 6 Java); distilled wiki built |
+| **10** | Mon 16 Nov – Sun 22 Nov | Round 4: R034–R038 and change requests + R030–R031; Part IV pipeline run | All 54 study runs done (20 builds, 20 change requests, 8 replication, 6 Java); distilled wiki built |
 | **11** | Mon 23 Nov – Sun 29 Nov (Thanksgiving 26 Nov) | Unseal, score, code (Part III); OpenKB comparison (Part IV) | All results tables final |
 | **12** | Mon 30 Nov – Sat 5 Dec | Write, advisor review, submit | Report submitted 5 Dec |
 
@@ -55,8 +55,8 @@ mechanics runs.
 
 | # | Work | Who |
 | --- | --- | --- |
-| 8.1 | Rounds 1 and 2 in schedule order, each build followed by its change request (`run_build.py R004`, then `run_build.py R004C`): R004–R008, then Java R026–R027, then R009–R013. See [weeks/week-08](../weeks/week-08/README.md) | You |
-| 8.2 | After each run: `verify`, run log line, bundle, copy logs into the repository (runbook step 4) | You |
+| 8.1 | Rounds 1 and 2 in schedule order, each build followed by its change request (`run_build.py R004`, then `run_build.py R004C`): R004–R008, then Java R026–R027, then R009–R013. See [weeks/week-08](../weeks/week-08/README.md) | Claude operates the Python runs; you run Java and review the operator log |
+| 8.2 | After each run: `verify`, run log line, bundle, copy logs into the repository (runbook step 4) | Claude (Python), you (Java) |
 | 8.3 | Report skeleton: title page, abstract placeholder, introduction, background and the study design chapter, drafted from the proposal, the pre-registration and the research brief | Claude |
 
 **Pacing.** Expect about 20–40 min of agent time for an `unstructured` run and
@@ -73,7 +73,7 @@ pre-registered.
 
 | # | Work | Who |
 | --- | --- | --- |
-| 9.1 | Round 3: R014–R018 with their change requests, then Java R028–R029. See [weeks/week-09](../weeks/week-09/README.md) | You |
+| 9.1 | Round 3: R014–R018 with their change requests, then Java R028–R029. See [weeks/week-09](../weeks/week-09/README.md) | Claude (Python), you (Java) |
 | 9.2 | Part IV step 1: declare the Oracle for the SDD research literature, name at least 3 sources it rejects, and list its key questions | You |
 | 9.3 | Part IV step 2: write the seven `ai_specs/` files (overview, domain knowledge, oracle, collection, distillation, output format, batch process) | You, Claude drafts |
 | 9.4 | Part IV corpus list: 15–20 sources (preprints, the Spec Kit docs and blog posts, practitioner reports), each with its URL and licence noted | Claude drafts, you approve |
@@ -85,12 +85,12 @@ pre-registered.
 
 | # | Work | Who |
 | --- | --- | --- |
-| 10.1 | Round 4: R034–R038 with their change requests, then Java R030–R031. See [weeks/week-10](../weeks/week-10/README.md) | You |
-| 10.2 | Optional replication R021–R023 and R039 (T-REDACT-01), **only if** round 4 is finished by Thursday 19 Nov | You |
+| 10.1 | Round 4: R034–R038 with their change requests, then Java R030–R031. See [weeks/week-10](../weeks/week-10/README.md) | Claude (Python), you (Java) |
+| 10.2 | Replication R021–R023 and R039 (T-REDACT-01) with their change requests, after round 4 (required since Week 8) | Claude |
 | 10.3 | Part IV steps 3–4: `collect.py` and `distill.py`; run one source by hand and fix the **spec**, not the output, until the article matches the Oracle's voice and format; then the whole corpus, and the index | You, Claude scaffolds the scripts |
-| 10.4 | Analysis scripts: per-task tables, paired differences, the 4-of-5 consistency rule, Friedman and Wilcoxon (reported, not relied on), and the Java cross-stack table | Claude |
+| 10.4 | Java cross-stack table. The Python analysis script (`tools/study/analyze.py`) was written and frozen in Week 8, before the first study run | Claude |
 
-**Gate:** all 46 study runs (20 builds, 20 change requests, 6 Java builds) are done and logged. The held-out suites stay
+**Gate:** all 54 study runs (20 builds, 20 change requests, 8 replication runs, 6 Java builds) are done and logged. The held-out suites stay
 sealed until the last run is closed.
 
 ---
@@ -136,11 +136,12 @@ constitution, rubrics, raw data link).
 
 Cuts are made in this order, and each one is logged in the deviations log:
 
-1. Drop the optional replication R021–R023 and R039 (already optional).
-2. Part IV: compare the two wikis only structurally (proposal Table 1), without
+1. Part IV: compare the two wikis only structurally (proposal Table 1), without
    asking them the key questions.
-3. Drop the Java runs of the last round not yet run (R030–R031), and report the
+2. Drop the Java runs of the last round not yet run (R030–R031), and report the
    Java extension as two tasks with an incomplete round.
-4. Drop the change requests of round 4 (R034C–R038C), and report the change
-   requests with one task missing from each condition pair. The 20 Python
-   builds are never cut: they are the core of RQ1–RQ4.
+3. Drop the change requests of round 4 (R034C–R038C), and report the change
+   requests with one task missing from each condition pair.
+4. Drop the replication's change requests (R021C–R023C, R039C), keeping its four
+   builds. The 20 Python builds and the four replication builds are never cut:
+   they are the core of RQ1–RQ4 and of the estimate of run-to-run variation.

@@ -33,6 +33,12 @@ report against this document found gaps, now closed:
 - Every Python build is followed by a **change request** on its own repository, so that the study also covers work on an existing project (sections 3, 4 and 7.1). The change requests' held-out suites are sealed in a second archive (section 11).
 - Runs are driven by `tools/study/run_build.py` with Claude Code in headless mode, and the schedule was regenerated from the same seed for four conditions (sections 3, 5 and 6).
 
+**Changes made in Week 8, before freezing:**
+
+- The Python study runs are operated by Claude, the AI assistant that drafted the study materials, in Anthropic's cloud workspace, instead of by the author (section 6.0). The author reviews every operator decision afterwards. The Java runs stay with the author on their own computer, because Maven Central cannot be reached from that workspace (section 13).
+- The replication runs R021–R023 and R039 are required, not optional (section 3).
+- Every agent session gets a clean environment and a configuration folder of its own, so nothing from the machine's own Claude Code setup reaches the agent or carries over between runs (section 5).
+
 ## 2. Research questions and measures
 
 - **RQ1 (outcomes).** Does an SDD workflow change the functional correctness and security of an agent's code, compared with plain prompting of the same agent on the same task?
@@ -77,7 +83,7 @@ RQ1 and RQ3 also compare `sdd_secure` with `sdd`: does writing security requirem
 
 **Within-subject, task-matched.** 5 tasks × 4 conditions = 20 study builds,
 each followed in the same repository by the task's change request (20 change
-requests). There is one operator (the author), one agent harness (Claude Code,
+requests). There is one operator (Claude, for the Python runs; section 6.0), one agent harness (Claude Code,
 driven in headless mode by `run_build.py`), one model (`claude-opus-5`, the
 same model string as R001), and Spec Kit 1.0.6 throughout.
 
@@ -124,7 +130,7 @@ conditions in Week 7, before any study run):
 
 If either check reveals a defect, it is fixed, logged as a deviation, and the check is repeated before R004.
 
-**Spare and replication IDs.** R019 and R020 are spares for reruns (section 9). R021–R023 and R039 are an *optional* replication of one task under all four conditions, drawn now (T-REDACT-01), to be run after round 4 if time allows. With one run per cell, model randomness cannot otherwise be separated from condition effects.
+**Spare and replication IDs.** R019 and R020 are spares for reruns (section 9). R021–R023 and R039 are a **required** replication of one task under all four conditions, drawn now (T-REDACT-01), run after round 4. *Changed before freezing:* the draft made them optional. With one run per cell, model randomness cannot otherwise be separated from condition effects.
 
 ## 4. Tasks
 
@@ -192,6 +198,8 @@ since both draw on the same weakness catalogues.
 - `/speckit-analyze`, `/speckit-checklist` and `/speckit-converge` are not used in any condition, so they are held constant at "off".
 - The model string, permission mode and Claude Code version are identical for every run and recorded in each run's environment note.
 - **Headless mode.** Every run is driven by `tools/study/run_build.py`, which calls `claude -p` with `--model claude-opus-5`, `--permission-mode acceptEdits` and a fixed list of allowed tools, and continues a session with `--resume`. Hooks, and so `sddlog`, work as in interactive mode. If the mechanics checks show that the Spec Kit commands do not work in headless mode, every run uses interactive sessions instead, decided before R004 and logged as a deviation.
+- **A clean environment for every agent session.** `run_build.py --clean-env` gives each `claude -p` call only a minimal set of environment variables (paths, locale, network proxy and certificates) and a new, empty Claude Code configuration folder for each run ID. No user-level skills, plugins, hooks, MCP servers, memory files, effort settings or host-specific tools reach the agent, and nothing carries over between runs. The agent sees Claude Code's built-in tools and bundled skills only, as in a fresh installation.
+- **Runs may be split by phase.** A run can be driven in several invocations (`--stop-after`, then `--start-at`), one phase or more at a time, because every phase already starts a fresh session. The prompts, answers and stopping rule are unchanged.
 - **Web tools are off in every run** (Claude Code's `WebFetch` and `WebSearch` denied in the run's settings). The task texts and answer sheets are in a public repository, so an agent with web access could otherwise look them up.
 - **The repository starts from one base commit for every run** (instrument and hooks only). The SDD conditions add Spec Kit in a single setup commit before `run-start`. Spec Kit installs its commands as model-invocable Claude Code skills, so having them in the `unstructured` repository would contaminate that condition.
 
@@ -207,6 +215,10 @@ The full checklist is `RUNBOOK.md`. `run_build.py` sends every message; the
 operator's only input is to classify each agent turn (an answer-sheet entry, a
 fallback, permission, listed assumptions, or done), under the rules below.
 
+**6.0 Who operates.** The Python study runs (R004–R023, R034–R039 and their change requests) are operated by Claude, Anthropic's AI assistant, which drafted the study materials. It runs `run_build.py` in Anthropic's cloud workspace and classifies each agent turn under sections 6.1–6.2 exactly as a human operator would. It types nothing else. The author reviews every classification afterwards from the logged `ANSWER`, `LISTED` and `RESUME` notes and the headless logs, which hold each agent message and the reply it got. Any disagreement is reported. The Java runs (section 13) are operated by the author.
+
+The operator also wrote the held-out suites, so it knows what they test. It cannot pass that knowledge to the agent: its only input is one of the fixed choices, and every reply is an answer-sheet entry or a fixed fallback, logged next to the message it answered. The remaining risk is in matching a question to an entry or deciding whether a turn is a question at all. Every such decision is auditable.
+
 **6.1 What the operator may type.** Only the messages in section 5, the follow-ups printed by the stopping-rule checker, replies from the answer sheet, `Yes, go ahead.` in reply to a request for permission to continue, and the resume message below. Nothing else.
 
 **Resuming an interrupted session.** If a session stops before the agent has finished its turn (usage limit, crash, network outage) and the same session can be resumed, the operator resumes it and sends exactly `Please continue from where you stopped.`, then logs `note --text "RESUME: <reason>"`. `sddlog` records it as a human turn; each run's resumes are reported, and RQ3's turn counts are also given without them. Interruptions that cannot be resumed follow section 9.
@@ -217,9 +229,12 @@ fallback, permission, listed assumptions, or done), under the rules below.
 
 - Answer only what is asked, and never volunteer.
 - Reply with the covering entry's answer verbatim.
-- A safety question not covered by an entry (identified by a fixed keyword list) gets *"It should be handled safely; the details are up to you."*
-- Any other uncovered question gets *"No preference. Use your judgement."*
+- A safety question not covered by an entry (identified by a fixed keyword list) gets *"On this question: it should be handled safely; the details are up to you."*
+- Any other uncovered question gets *"No preference on this question. Use your judgement."*
 - Every answer is logged as an `sddlog` note naming the entry.
+- *Changed before freezing:* both fallbacks are scoped to the one question. In mechanics check R003 the unscoped wording ("No preference. Use your judgement.") was read as handing over every remaining clarification question, and the agent answered four of its five itself.
+- Spec Kit's optional-hook messages printed at the end of a phase (for example "Commit constitution changes?") are not questions.
+- A turn that ends with an offer ("say the word if you'd rather…") but asks for nothing is classified `listed`, not as a question.
 
 **6.3 Stopping rule: what "done" means.** A run is done when `tools/study/check_examples.py` reports that every example in the task text behaves as shown. If some fail, the checker prints a follow-up in fixed wording, which is pasted verbatim. Caps: 5 follow-ups or 90 minutes after `implement` opened, whichever comes first. The same rule applies to every condition. For a change request, the checker runs the original task's examples and then the change request's (`check_examples.py <task>-CR`), so breaking earlier behaviour also counts as not done. In the SDD conditions, follow-ups happen inside the `implement` phase, and the agent decides whether to fix the spec or the code. That is itself part of the RQ4 data.
 
@@ -310,7 +325,7 @@ The coder cannot be blind to condition, because `specs/` reveals it. To limit dr
 
 - primary measure: `totals.active_seconds`, the sum over phases of the time from each phase's start to its last hook-observed agent activity, so a late phase-end marker adds nothing;
 - check: `totals.active_seconds_reliable_phases_only`, which leaves out any phase flagged unreliable (end marker more than 300 s after the last activity, no hook events, or never closed). *Changed before freezing:* this was the primary measure in the draft, but it drops a whole phase's real work when only its end marker was late. In R001 it dropped the 16-minute plan phase, and the share of time before `implement` fell from 74% to about 42%. Because SDD runs have five or six phases and unstructured runs one, it would bias the comparison against SDD;
-- tokens, from the session transcripts' per-message usage records, including subagents (`sddlog` 1.2): output tokens, and all input tokens (fresh, cache-write and cache-read). Each API message is counted once;
+- tokens, from the session transcripts' per-message usage records, including subagents (`sddlog` 1.2): output tokens, and all input tokens (fresh, cache-write and cache-read). Each API message is counted once. The token measure in the decision rule (section 8.4) is their sum, all input plus output tokens; both parts are also reported;
 - human turns (`human_prompts`) and human prompt words;
 - per-phase active time;
 - for the SDD conditions, the share of active time before `implement`;
@@ -353,7 +368,7 @@ The coder cannot be blind to condition, because `specs/` reveals it. To limit dr
 
 P6, P7 and P11 are counts or categories that are expected to be small, so they are reported run by run and the decision rule (section 8.4) is not applied to them.
 
-**8.3 Statistics.** Report per-task paired differences, their median, and the matched-pairs rank-biserial correlation.
+**8.3 Statistics.** Report per-task paired differences, their median, and the matched-pairs rank-biserial correlation. Every table, verdict and test in this section is produced by `tools/study/analyze.py`, committed with this document before the first study run and tested against the exact values below; its output is reported unedited.
 
 - **Omnibus test:** Friedman across the four conditions (exact; with n = 5 and k = 4 the smallest attainable p is about 0.000003).
 - **Pairwise tests:** exact Wilcoxon signed-rank with Holm correction across the six pairs. *With five pairs the smallest two-sided exact p is 0.0625, so no pairwise test can reach α = 0.05. These p-values are reported for completeness, not as evidence.*
@@ -380,19 +395,19 @@ Otherwise the result is **"no consistent difference"**. Minimum differences: pas
 
 ## 10. Threats to validity specific to this design
 
-- **Operator = researcher, unblinded.** Mitigated by fixed prompts, machine-generated follow-ups, verbatim answers with fixed fallbacks, a fixed definition of a question, and caps. The operator also grows familiar with each task over its runs, which could change how a question is matched to the answer sheet; every match is logged with the entry used, so it can be audited.
-- **One run per cell.** Model output varies between runs, so a single-cell difference may be noise. The optional replication (R021–R023) estimates this, and section 8.4 requires consistency across tasks.
+- **Operator unblinded.** The Python runs are operated by the AI assistant that wrote the held-out suites (section 6.0). Mitigated by fixed prompts, machine-generated follow-ups, verbatim answers with fixed fallbacks, a fixed definition of a question, caps, and the author's review of every classification. Every match is logged with the entry used, so it can be audited.
+- **One run per cell.** Model output varies between runs, so a single-cell difference may be noise. The replication (R021–R023, R039) gives a second run of one task under every condition, so the size of run-to-run variation can be set beside the differences between conditions; section 8.4 also requires consistency across tasks.
 - **One harness and one model.** Results apply to Claude Code with that model, not to SDD in general.
 - **Who built the instrument.** The tasks, reference implementations and held-out suites were drafted with an AI assistant (Claude, from Anthropic). This is the same model family as the agent under test, and the tasks may suit that family's habits. The suites were written and frozen without seeing any agent output from this study, and the author reviewed them before freezing.
 - **Probe heuristics.** Thresholds such as "ids of at least 8 characters" and "tokens of at least 16", and black-box salt detection, can misclassify. Every probe failure is therefore confirmed by hand before it counts (section 7.2).
 - **Traceability partly built in.** The constitution prompt asks for testable requirements and the plan prompt for pytest, while no task text mentions tests. A score of 2 needs an agent-written test, so both traceability measures partly reflect these prompts.
-- **Carry-over.** Web tools are denied, but earlier run folders and the study repository are on the same machine. The agent is never pointed to them; any access outside the run folder appears in the tool-call log and is reported.
+- **Carry-over.** Web tools are denied and each run has its own Claude Code configuration, but earlier run folders and the study repository are on the same machine. The agent is never pointed to them; any access outside the run folder appears in the tool-call log and is reported.
 - **SDD without human review** (section 6.5). The results do not show what careful human review of specs would add, and the time cost of SDD practised that way would be higher.
 - **Agent latency** is included in active time and varies with API load. Each run's start time is in its manifest, so time-of-day effects can be checked.
 - **Python version dependence** (section 7.1) is fixed by scoring with 3.13.x.
 - **The secure constitution and the probes share sources.** Both draw on OWASP and CWE, so `sdd_secure` is told about the kinds of weakness the probes look for, though not about any probe. This is what a security-enriched specification is meant to do; the results show its effect, not the effect of security knowledge the agent did not get.
 - **Change requests depend on their build.** A change request runs on the code its build produced, so a weak build can make the change harder, and change-request outcomes are partly outcomes of the build. Builds and changes are reported side by side for every run.
-- **Headless mode.** Runs use Claude Code's headless mode rather than interactive sessions. The agent, model, tools and hooks are the same; the mechanics checks confirm that the Spec Kit commands work this way before the first study run (section 5).
+- **Headless mode in a cloud workspace.** Python runs use Claude Code's headless mode in Anthropic's cloud workspace, not interactive sessions on the author's computer. The agent, model and hooks are the same, the environment is cleaned (section 5), and the mechanics checks confirm that the Spec Kit commands work this way before the first study run. Agent latency there may differ from a personal computer, but it is the same for every Python run.
 
 ## 11. Sealing and environment record
 
@@ -407,13 +422,13 @@ Otherwise the result is **"no consistent difference"**. Minimum differences: pas
 | Change-request encrypted copy | `sealed/sealed-heldout-cr-v1.zip.enc`, SHA-256 `84fc2f37da12cdf344ee0cd52b12936891472ce864fa92ddb209560558151ba2` (same cipher settings; a separate passphrase held by the author) |
 | Change-request archive contents | `sealed-cr/heldout/` (107 test cases), `sealed-cr/reference/` (5 reference implementations), `sealed-cr/validation/` (5 naive variants, 5 alternative implementations from the review, their scores, and the validation report) |
 | Instrument | `sddlog` 1.3, 80 tests |
-| Base repository commit | ______________________ (from `make_base.sh`) |
+| Base repository commit | `c5bf43871701d6efe640d112d73da363d093f4e7` (from `make_base.sh`, tag `base-v1`; bundle `logs/bundles/base-v1.bundle`) |
 | Spec Kit | 1.0.6 |
-| Claude Code version | ______________________ |
+| Claude Code version | 2.1.317 |
 | Model string | `claude-opus-5` (same as R001) |
-| Permission mode | ______________________ (same as R001) |
-| Scoring interpreter | Python 3.13.__ · pytest ____ · Bandit 1.9.4 |
-| Frozen in `$PILOT` commit | ______________ on ____-__-__ |
+| Permission mode | `acceptEdits` with `run_build.py`'s allowed-tools list, headless (`claude -p`), `--clean-env` |
+| Scoring interpreter | Python 3.13.17 · pytest 9.1.1 · Bandit 1.9.4 |
+| Frozen in `$PILOT` commit | The commit that merges the freeze pull request into `main`; its commit time is the freeze time |
 | Hashes sent to advisor (Yan Wang) | ____-__-__ |
 
 ## 12. Deviations log

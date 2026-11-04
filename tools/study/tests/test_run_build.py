@@ -273,3 +273,39 @@ def test_schedule_maps_change_requests():
     task, condition, stage = run_build.schedule_row(REPO, "R004")
     assert stage == "build" and not task.endswith("-CR")
     assert run_build.schedule_row(REPO, "R004C")[0] == task + "-CR"
+
+
+def test_clean_env_gives_each_run_its_own_config_and_drops_other_variables(kit, clone, tmp_path,
+                                                                            monkeypatch):
+    monkeypatch.setenv("CLAUDE_EFFORT", "max")
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    monkeypatch.setattr(run_build, "CLEAN_ENV_KEEP", run_build.CLEAN_ENV_KEEP + ("FAKE_CALLS",))
+    config = tmp_path / "configs"
+    assert run_tool(kit, tmp_path, "R005", ["done"], "--clean-env", str(config)) == 0
+    sent = calls(tmp_path)
+    assert sent and all(c["env"]["CLAUDE_CONFIG_DIR"] == str((config / "R005").resolve()) for c in sent)
+    assert all("CLAUDE_EFFORT" not in c["env"] and "CLAUDE_CODE_REMOTE" not in c["env"] for c in sent)
+    assert any("clean environment" in n for n in notes(clone, "R005"))
+
+
+def test_a_run_can_be_split_into_pieces_by_phase(kit, clone, tmp_path):
+    add_spec_kit(clone)
+    assert run_tool(kit, tmp_path, "R004", ["done", "done"], "--stop-after", "specify") == 0
+    assert (clone / "logs" / "ACTIVE_RUN").read_text().strip() == "R004"
+    assert run_tool(kit, tmp_path, "R004", ["done", "I1", "done"], "--start-at", "clarify",
+                    "--stop-after", "plan") == 0
+    assert run_tool(kit, tmp_path, "R004", ["done", "done"], "--start-at", "tasks") == 0
+    sent = [c["message"] for c in calls(tmp_path)]
+    assert sent == ["/speckit-constitution plain principles", "/speckit-specify " + TASK_TEXT,
+                    "/speckit-clarify", "/speckit-plan ASK-ME use the standard library",
+                    "Names are case-sensitive.", "/speckit-tasks", "/speckit-implement"]
+    kinds = [e["type"] for e in events(clone, "R004")]
+    assert kinds.count("run_start") == 1 and kinds.count("run_end") == 1
+    phases = [e["phase"] for e in events(clone, "R004") if e["type"] == "phase_end"]
+    assert phases == ["constitution", "specify", "clarify", "plan", "tasks", "implement"]
+
+
+def test_start_at_needs_the_run_to_be_open(kit, clone, tmp_path):
+    add_spec_kit(clone)
+    assert run_tool(kit, tmp_path, "R004", ["done"], "--start-at", "plan") == 2
+

@@ -69,7 +69,29 @@ python3 $KIT/tools/study/run_build.py ${RUN}C   # then the change request, same 
 ```
 
 Then archive each (step 4). If the session stops with an error (a usage limit,
-say), the tool asks whether to resume it with the fixed resume message. The
+say), the tool asks whether to resume it with the fixed resume message.
+
+### Python runs in the cloud workspace (from Week 8)
+
+The Python runs are operated by Claude in Anthropic's cloud workspace
+(pre-registration section 6.0). Two options keep them clean and within that
+workspace's limits:
+
+- `--clean-env DIR` gives every `claude -p` call a minimal environment and a new
+  Claude Code configuration folder `DIR/<run id>`, so no user skills, plugins,
+  hooks, MCP servers or host tools reach the agent.
+- `--stop-after PHASE` leaves a run open after a phase, and `--start-at PHASE`
+  continues it, so a long SDD run can be driven in pieces of at most two hours.
+  Every phase is a fresh session anyway, so nothing else changes.
+
+```bash
+python3 $KIT/tools/study/run_build.py R005 --clean-env ~/sdd-study/claude-configs --stop-after plan
+python3 $KIT/tools/study/run_build.py R005 --clean-env ~/sdd-study/claude-configs --start-at tasks
+```
+
+The operator's choices are read from standard input as usual, so they can be
+fed one line at a time; each choice and the agent message it answered are kept
+in the run's notes and `headless/` logs for the author's review. The
 manual steps below do the same thing by hand; use them only if the
 mechanics checks show that headless mode cannot run the Spec Kit commands.
 
@@ -170,7 +192,7 @@ mkdir -p ~/sdd-study/bundles && git bundle create ~/sdd-study/bundles/$RUN.bundl
 cp -r logs/runs/$RUN $PILOT/logs/runs/
 ```
 
-Add a line to `schedule/run-log.md` in `$PILOT`. **Keep the run directory**: Part III scores it.
+Add a line to `schedule/run-log.md` in `$PILOT`. **Keep the run directory**: Part III scores it. In the cloud workspace, whose folders do not last, also copy the bundle into the repository (`cp ~/sdd-study/bundles/$RUN.bundle $PILOT/logs/bundles/`): Part III then scores a clone of the bundle.
 
 ---
 
