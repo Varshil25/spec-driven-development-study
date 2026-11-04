@@ -83,7 +83,7 @@ RQ1 and RQ3 also compare `sdd_secure` with `sdd`: does writing security requirem
 
 **Within-subject, task-matched.** 5 tasks × 4 conditions = 20 study builds,
 each followed in the same repository by the task's change request (20 change
-requests). There is one operator (the author), one agent harness (Claude Code,
+requests). There is one operator (Claude, for the Python runs; section 6.0), one agent harness (Claude Code,
 driven in headless mode by `run_build.py`), one model (`claude-opus-5`, the
 same model string as R001), and Spec Kit 1.0.6 throughout.
 
