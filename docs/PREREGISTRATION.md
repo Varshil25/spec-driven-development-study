@@ -229,9 +229,12 @@ The operator also wrote the held-out suites, so it knows what they test. It cann
 
 - Answer only what is asked, and never volunteer.
 - Reply with the covering entry's answer verbatim.
-- A safety question not covered by an entry (identified by a fixed keyword list) gets *"It should be handled safely; the details are up to you."*
-- Any other uncovered question gets *"No preference. Use your judgement."*
+- A safety question not covered by an entry (identified by a fixed keyword list) gets *"On this question: it should be handled safely; the details are up to you."*
+- Any other uncovered question gets *"No preference on this question. Use your judgement."*
 - Every answer is logged as an `sddlog` note naming the entry.
+- *Changed before freezing:* both fallbacks are scoped to the one question. In mechanics check R003 the unscoped wording ("No preference. Use your judgement.") was read as handing over every remaining clarification question, and the agent answered four of its five itself.
+- Spec Kit's optional-hook messages printed at the end of a phase (for example "Commit constitution changes?") are not questions.
+- A turn that ends with an offer ("say the word if you'd rather…") but asks for nothing is classified `listed`, not as a question.
 
 **6.3 Stopping rule: what "done" means.** A run is done when `tools/study/check_examples.py` reports that every example in the task text behaves as shown. If some fail, the checker prints a follow-up in fixed wording, which is pasted verbatim. Caps: 5 follow-ups or 90 minutes after `implement` opened, whichever comes first. The same rule applies to every condition. For a change request, the checker runs the original task's examples and then the change request's (`check_examples.py <task>-CR`), so breaking earlier behaviour also counts as not done. In the SDD conditions, follow-ups happen inside the `implement` phase, and the agent decides whether to fix the spec or the code. That is itself part of the RQ4 data.
 
@@ -419,13 +422,13 @@ Otherwise the result is **"no consistent difference"**. Minimum differences: pas
 | Change-request encrypted copy | `sealed/sealed-heldout-cr-v1.zip.enc`, SHA-256 `84fc2f37da12cdf344ee0cd52b12936891472ce864fa92ddb209560558151ba2` (same cipher settings; a separate passphrase held by the author) |
 | Change-request archive contents | `sealed-cr/heldout/` (107 test cases), `sealed-cr/reference/` (5 reference implementations), `sealed-cr/validation/` (5 naive variants, 5 alternative implementations from the review, their scores, and the validation report) |
 | Instrument | `sddlog` 1.3, 80 tests |
-| Base repository commit | ______________________ (from `make_base.sh`) |
+| Base repository commit | `c5bf43871701d6efe640d112d73da363d093f4e7` (from `make_base.sh`, tag `base-v1`; bundle `logs/bundles/base-v1.bundle`) |
 | Spec Kit | 1.0.6 |
-| Claude Code version | ______________________ |
+| Claude Code version | 2.1.317 |
 | Model string | `claude-opus-5` (same as R001) |
-| Permission mode | ______________________ (same as R001) |
-| Scoring interpreter | Python 3.13.__ · pytest ____ · Bandit 1.9.4 |
-| Frozen in `$PILOT` commit | ______________ on ____-__-__ |
+| Permission mode | `acceptEdits` with `run_build.py`'s allowed-tools list, headless (`claude -p`), `--clean-env` |
+| Scoring interpreter | Python 3.13.17 · pytest 9.1.1 · Bandit 1.9.4 |
+| Frozen in `$PILOT` commit | The commit that merges the freeze pull request into `main`; its commit time is the freeze time |
 | Hashes sent to advisor (Yan Wang) | ____-__-__ |
 
 ## 12. Deviations log

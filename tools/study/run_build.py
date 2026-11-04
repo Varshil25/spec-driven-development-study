@@ -54,8 +54,8 @@ PERMISSION_MODE = "acceptEdits"
 MAX_FOLLOW_UPS = 5
 IMPLEMENT_CAP_SECONDS = 90 * 60
 
-SAFETY = "It should be handled safely; the details are up to you."
-NOPREF = "No preference. Use your judgement."
+SAFETY = "On this question: it should be handled safely; the details are up to you."
+NOPREF = "No preference on this question. Use your judgement."
 PERMIT = "Yes, go ahead."
 RESUME = "Please continue from where you stopped."
 
