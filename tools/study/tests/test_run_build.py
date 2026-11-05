@@ -309,3 +309,18 @@ def test_start_at_needs_the_run_to_be_open(kit, clone, tmp_path):
     add_spec_kit(clone)
     assert run_tool(kit, tmp_path, "R004", ["done"], "--start-at", "plan") == 2
 
+
+def test_an_interrupted_phase_is_resumed_in_its_own_session(kit, clone, tmp_path):
+    add_spec_kit(clone)
+    assert run_tool(kit, tmp_path, "R004", ["done", "done", "done", "I1", "done"], "--stop-after", "plan") == 0
+    run_build.sddlog("phase", "tasks", "--start")          # tasks opened, then the workspace died
+    assert run_tool(kit, tmp_path, "R004", ["done", "done"], "--start-at", "tasks",
+                    "--resume-session", "sess-lost") == 0
+    sent = calls(tmp_path)
+    resumed = [c for c in sent if c["message"] == run_build.RESUME]
+    assert len(resumed) == 1 and resumed[0]["session"] == "sess-lost"
+    assert sent[sent.index(resumed[0]) - 1]["message"] == "Names are case-sensitive."
+    assert any(n.startswith("RESUME: tasks") for n in notes(clone, "R004"))
+    starts = [e["phase"] for e in events(clone, "R004") if e["type"] == "phase_start"]
+    assert starts.count("tasks") == 1
+

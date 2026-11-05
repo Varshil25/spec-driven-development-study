@@ -435,6 +435,7 @@ Otherwise the result is **"no consistent difference"**. Minimum differences: pas
 
 | Date | Run | Deviation | Reason | Effect on analysis |
 | --- | --- | --- | --- | --- |
+| 2026-11-05 | R004 | The operator's cloud workspace restarted during `implement`, killing `run_build.py`. The same agent session was resumed with the fixed resume message (section 6.1), using a new `run_build.py --resume-session` option that does only that. | Pre-registered handling of an interrupted session; the run stays in. The interrupted call's usage is in the transcripts (`sddlog` tokens) but missing from Claude Code's cost figure. | The 2.8-minute gap is inside active time; reported with the run. |
 | | | | | |
 
 ## 13. Java/Quarkus extension (added in Week 7, before freezing)
