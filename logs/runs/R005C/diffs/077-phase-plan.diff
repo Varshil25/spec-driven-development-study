@@ -1,0 +1,1483 @@
+diff --git a/specs/002-create-command/contracts/create-contract.md b/specs/002-create-command/contracts/create-contract.md
+new file mode 100644
+index 0000000..477f45f
+--- /dev/null
++++ b/specs/002-create-command/contracts/create-contract.md
+@@ -0,0 +1,183 @@
++# CLI Contract: `tarx create`
++
++**Feature**: `002-create-command` | **Date**: 2026-11-05 | **Spec**: [../spec.md](../spec.md)
++
++This document extends the project's only external interface, the `tarx` command line, with a third
++subcommand. It is normative: the test suite asserts against these exact strings and statuses, and
++nothing outside this document and
++[001's contract](../../001-tar-archive-cli/contracts/cli-contract.md) is part of the public surface.
++
++[001's contract](../../001-tar-archive-cli/contracts/cli-contract.md) remains in force **verbatim**
++for `list` and `extract`. FR-049 and SC-015 forbid any change to it, including to the diagnostics
++table, the exit statuses, and the validation order recorded there.
++
++## Invocation
++
++```text
++python -m tarx list    ARCHIVE
++python -m tarx extract ARCHIVE DEST [--overwrite]
++python -m tarx create  ARCHIVE PATH... [--overwrite]      # new in this feature
++```
++
++- Requires `src/` on `PYTHONPATH` (the package lives at `src/tarx/`).
++- `prog` remains `tarx`, so usage text reads `usage: tarx ...` (001 research R7). Adding a third
++  subparser does not change the top-level usage line, which uses `metavar="COMMAND"`.
++- Exactly three subcommands now exist; all are spelled in full (FR-029).
++- No environment variables, config files, or stdin input affect behavior (FR-029 … FR-056).
++
++## Command: `create ARCHIVE PATH... [--overwrite]`
++
++| | |
++|---|---|
++| Positionals | `ARCHIVE` — the archive to write; then one or more `PATH` arguments (`nargs="+"`) (FR-030) |
++| Options | `--overwrite` — replace an existing regular file at `ARCHIVE` (FR-044) |
++| stdout | exactly one line: `created ARCHIVE with N files\n` (FR-038) |
++| `ARCHIVE` in that line | the archive path **exactly as typed**, unnormalised (FR-038) |
++| `N` | decimal count of regular-file members stored (FR-039) |
++| Word after `N` | the literal `files`, for every `N` including `0` and `1` (FR-039) |
++| stderr on success | empty (FR-038) |
++| Exit on success | `0` (FR-038) |
++
++### What is stored
++
++- Each `PATH` naming a regular file → one regular-file member, content byte-identical (FR-032).
++- Each `PATH` naming a directory → a directory member for it, plus a member for every entry at any
++  depth beneath it (FR-033). An empty directory is stored as a directory member, so it survives a
++  create-then-extract round trip.
++- Recorded member names are the normalised relative path: no leading `./`, no absolute prefix, `/`
++  as the separator (FR-034). Directory headers carry tar's conventional trailing `/`, which
++  `list` and every other tar reader strip or display per their own convention — see
++  [research R17](../research.md#r17--directory-member-names-the-trailing-separator-and-the-archive-format).
++- Entries that are neither regular files nor directories (symbolic links, FIFOs, device nodes,
++  sockets) are **skipped** — not stored, not counted, not an error — whether named directly or met
++  while walking (FR-036).
++- The archive being written is never stored inside itself, even when `ARCHIVE` falls inside a named
++  directory (FR-037).
++- No de-duplication: a path named twice, or a directory and a file inside it both named, stores the
++  overlapping entries more than once and counts each stored regular file.
++
++### Member order
++
++Deterministic for a given invocation and tree (FR-035):
++
++1. `PATH` arguments in command-line order.
++2. Within a directory: its own member first, then its entries in `sorted()` (code-point) order,
++   files and subdirectories interleaved by name.
++
++### Compression
++
++| `ARCHIVE` ends in (case-insensitive) | Written as |
++|---|---|
++| `.tar.gz`, `.tgz` | gzip-compressed tar (FR-040) |
++| anything else, including no suffix | plain, uncompressed tar (FR-041) |
++
++The suffix of the typed archive path is the **only** input to this choice; the names and contents of
++the `PATH` arguments are irrelevant (FR-042). This is deliberately asymmetric with `list` and
++`extract`, which sniff compression from content (FR-018) — and harmless, because a content-sniffing
++reader accepts a name-driven writer's output.
++
++### Interoperability
++
++| Guarantee | Requirement |
++|---|---|
++| Every archive `create` writes, compressed or not, is readable by `list`, whose output is the recorded member names in archive order | FR-047 |
++| Every archive `create` writes is extractable by `extract`, reproducing each regular file at its recorded relative path with byte-identical content and each directory as a directory | FR-048 |
++| `list` and `extract` behave **identically** to before this feature, for every input — FR-001 … FR-028 all still hold | FR-049 |
++
++**Scope restriction on FR-048's count equality** — `extract`'s reported count equals `create`'s
++reported count whenever the named `PATH` arguments do not overlap. When they do overlap, `create`
++counts each stored member while `extract` counts each distinct destination path written (FR-015), so
++`create` reports the larger number. This is a specification-internal conflict resolved in the plan;
++see [research R22](../research.md#r22--counting-regularfile-members-and-the-fr048-countequality-ambiguity).
++
++## Exit statuses
++
++Used consistently and exclusively across all three subcommands (FR-056, FR-028):
++
++| Status | Meaning for `create` |
++|---|---|
++| `0` | Success — the archive was written and the summary line printed |
++| `2` | Every failure except an existing archive path without `--overwrite`: missing source path, source path outside the current directory, archive path that is a directory, archive location unwritable, unreadable source, mid-write error, invocation error |
++| `3` | `ARCHIVE` already exists and `--overwrite` was not given |
++
++Status `3` is reserved for the one condition that re-running with `--overwrite` resolves. When a
++status-2 condition and the status-3 condition are both present, **status 2 is reported** (FR-056) —
++the same rule 001 adopted for `extract` (001 research R8).
++
++### Validation order within `create`
++
++```text
++1. argv parses: a subcommand, an ARCHIVE, at least one PATH, no unknown option  → else usage, 2
++2. every PATH is relative, stays inside the current directory, and is not "."   → else 2
++3. every PATH exists                                                            → else 2
++4. ARCHIVE does not exist as a directory                                        → else 2
++5. ARCHIVE does not exist, or --overwrite was given                             → else 3
++6. if ARCHIVE exists and --overwrite was given, it is a regular file            → else 2
++───────────────────────────────────────────────────────────── nothing above touches a file
++7. ARCHIVE opens for writing (created or truncated here)                        → else 2
++8. members are walked, classified, streamed, and counted                        → else 2
++9. summary line on stdout, exit 0
++```
++
++Steps 1–6 touch no files, so any failure in them leaves the filesystem exactly as it was: **no new
++archive, and any pre-existing archive byte-for-byte unmodified** (FR-050, FR-051). This matters —
++`tarfile.open(path, "w")` truncates immediately, so a design that opened the archive before
++validating would destroy the user's archive in precisely the case FR-050 protects
++([research R18](../research.md#r18--all-validation-must-precede-opening-the-archive)).
++
++Step 4 precedes step 5 because status 2 outranks status 3 (FR-045 with FR-056). Steps 2–3 precede
++step 4 for the same reason, so a run with both a bad `PATH` and an existing `ARCHIVE` reports the
++`PATH` and exits 2.
++
++A failure at step 7 or 8 leaves a partial or truncated archive on disk, but **never** prints the
++summary line — the run is reported as a failure, which is what FR-053 requires ("MUST NOT report
++success"). No temporary file or rollback is used; see
++[research R21](../research.md#r21--failure-partway-through-writing-no-temporary-file-no-rollback).
++
++## Diagnostics
++
++Every failure writes a short, human-readable, **single-line** diagnostic to stderr naming the
++offending path, and writes nothing to stdout (FR-055). No failure is signalled by exit status alone,
++and no internal traceback ever reaches the user.
++
++Format, unchanged from 001: `tarx: <message>` on one line.
++
++| Condition | Message | Status | Requirement |
++|---|---|---|---|
++| Source path is absolute, or reaches outside the current directory | `refusing to add '<path>' outside the current directory` | 2 | FR-052 |
++| Source path is `.` or empty | `refusing to add '<path>': not an entry inside the current directory` | 2 | FR-052 / R19 |
++| Source path does not exist | `cannot add '<path>': No such file or directory` | 2 | FR-050 |
++| Source path exists but cannot be read | `cannot add '<path>': Permission denied` | 2 | FR-054 |
++| Other error while adding a source path | `cannot add '<path>': <reason>` | 2 | FR-053, FR-054 |
++| `ARCHIVE` exists as a directory | `cannot write archive '<archive>': is a directory` | 2 | FR-045 |
++| `ARCHIVE` exists, `--overwrite` given, not a regular file | `cannot replace archive '<archive>': not a regular file` | 2 | FR-044 / R20 |
++| `ARCHIVE`'s containing directory does not exist | `cannot write archive '<archive>': No such file or directory` | 2 | FR-053 |
++| `ARCHIVE` location not writable | `cannot write archive '<archive>': Permission denied` | 2 | FR-053 |
++| Other error while writing the archive | `cannot write archive '<archive>': <reason>` | 2 | FR-053 |
++| `ARCHIVE` exists and `--overwrite` not given | `'<archive>' already exists; use --overwrite to replace it` | 3 | FR-043 |
++
++Conventions, carried over from 001's contract:
++
++- `<path>` and `<archive>` are shown **as typed on the command line**, never normalised or resolved,
++  so the message is actionable without the user re-deriving it.
++- `<reason>` is the operating system's `strerror` text, capitalised as the OS supplies it (e.g.
++  `No such file or directory`) — matching 001's `cannot write to destination '<path>': <reason>`.
++- During the write pass, an `OSError` is attributed to `exc.filename` when the OS supplies one, and
++  rendered with the archive message when that filename is the archive path, otherwise with the
++  `cannot add` message.
++- The "already exists" wording is character-for-character the same as `extract`'s overwrite
++  conflict, so the two commands' recovery advice reads identically.
++
++Invocation errors — no `PATH` given, an unknown option, a missing `ARCHIVE` — produce `argparse`'s
++own usage guidance on stderr and exit `2`, with no other action taken (FR-031). This is `argparse`'s
++default behavior and is therefore not restated in the table above.
++
++## Out of contract
++
++Not provided by `create`, and asserted nowhere: compression formats other than gzip; exclusion,
++inclusion, or glob filtering of entries; appending to or updating an existing archive; writing the
++archive to stdout or reading source data from stdin; following symbolic links; preserving or
++reproducing permissions, ownership, or modification times as a *guarantee* (whatever `tarfile`
++records is incidental and unasserted); de-duplicating overlapping source paths; creating the
++archive's containing directory; progress output, per-file listing, colors, headers, or any total
++beyond the single summary line; more than one archive per invocation; non-local destinations.
+diff --git a/specs/002-create-command/data-model.md b/specs/002-create-command/data-model.md
+new file mode 100644
+index 0000000..d2a6b04
+--- /dev/null
++++ b/specs/002-create-command/data-model.md
+@@ -0,0 +1,263 @@
++# Data Model: Tar Archive Create Command
++
++**Feature**: `002-create-command` | **Date**: 2026-11-05 | **Spec**: [spec.md](./spec.md)
++
++This feature has no persistent data store and no schema. "Data model" here means the three
++entities the specification names, the shape each one takes in the running program, and the
++validation rules and ordering that govern them. It is the reference the contract's exit statuses
++and diagnostics are derived from.
++
++Per Constitution Principle IV, **no entity is given a class of its own**. Each is either a plain
++string, a stdlib object (`TarInfo`, `TarFile`), or a tuple of those. The only class involved is the
++pre-existing `TarxError`, reused unchanged from 001.
++
++---
++
++## Entity: Archive
++
++The tar container being written, identified by the path the user typed.
++
++| Attribute | Representation | Source | Requirements |
++|---|---|---|---|
++| Typed path | `str`, exactly as given on the command line | `args.archive` | FR-030, FR-038 |
++| Compression form | `bool` derived from the typed path's lower-cased suffix | `path.lower().endswith((".tar.gz", ".tgz"))` | FR-040, FR-041, FR-042 |
++| Write mode | `"w:gz"` when compressed, else `"w"` | derived from the above | FR-040, FR-041 |
++| Prior existence | `Path(path).exists()` | filesystem, read-only | FR-043, FR-046 |
++| Prior kind | `Path(path).is_dir()`, `Path(path).is_file()` | filesystem, read-only | FR-044, FR-045 |
++| Open handle | `tarfile.TarFile` | `tarfile.open(path, mode)` | FR-032, FR-033 |
++
++**Invariants**
++
++1. The typed path is never normalised, resolved, or rewritten. The summary line echoes it verbatim
++   (FR-038), so `./photos.tar` prints as `./photos.tar`.
++2. The compression form depends on the typed path **only** — never on any source path's name or
++   content (FR-042).
++3. The archive is never a member of itself (FR-037). Guaranteed by `TarFile.add`'s comparison of
++   `os.path.abspath(name)` against `TarFile.name`, not by code in this project
++   ([research R14](./research.md#r14--the-archive-is-never-stored-inside-itself)).
++4. The archive file is **created or truncated at open time**, which is therefore the first
++   observable filesystem effect of a `create` run. Every validation rule below runs before it
++   ([research R18](./research.md#r18--all-validation-must-precede-opening-the-archive)).
++
++### Archive target validation
++
++Evaluated in this order, before the archive is opened. Each row's condition is checked against the
++filesystem but writes nothing.
++
++| # | Condition | Outcome | Requirement |
++|---|---|---|---|
++| A1 | Path exists and is a directory | exit 2, diagnostic names the path; applies with and without `--overwrite` | FR-045 |
++| A2 | Path exists and `--overwrite` not given | exit 3, diagnostic names the path; the existing file is left byte-for-byte unmodified | FR-043 |
++| A3 | Path exists, `--overwrite` given, and it is not a regular file | exit 2, diagnostic names the path | FR-044 (gap resolved in [research R20](./research.md#r20--the-archive-paths-prior-existence-and-kind-exit-2-versus-exit-3)) |
++| A4 | Path does not exist | proceed; `--overwrite` is accepted without complaint | FR-046 |
++| A5 | `tarfile.open` raises `OSError` (missing parent directory, not writable, …) | exit 2, diagnostic names the path | FR-053 |
++
++A1 precedes A2 because FR-056 gives status 2 priority over status 3, so status 3 always means
++"re-run with `--overwrite`".
++
++---
++
++## Entity: Source path
++
++One path named on the command line, relative to the current directory.
++
++| Attribute | Representation | Source | Requirements |
++|---|---|---|---|
++| Typed path | `str`, as given | `args.paths[i]` | FR-030 |
++| Normalised relative path | `str` from `posixpath.normpath(typed)` | derived, purely lexical | FR-034, FR-052 |
++| Kind | not recorded; `TarFile.add` re-stats each entry as it walks | filesystem | FR-032, FR-033, FR-036 |
++
++**Invariants**
++
++1. The *typed* path appears in diagnostics (so the message echoes what the user wrote); the
++   *normalised* path becomes the `arcname`, and hence the recorded member name (FR-034).
++2. Normalisation is purely lexical — no `realpath`, no `Path.resolve()`, no filesystem access. A
++   symbolic link is therefore never followed to decide containment; it is skipped as a member
++   instead (FR-036), which closes the same hole from the other side
++   ([research R19](./research.md#r19--sourcepath-containment-and-the-current-directory-as-a-source)).
++3. Order is significant: paths are processed in command-line order (FR-035), and validation reports
++   the **first** offending path in that order.
++4. No de-duplication. The same path named twice, or a directory and a file inside it, is stored
++   twice and counted twice (specification edge case *A path named twice*; see
++   [research R22](./research.md#r22--counting-regularfile-members-and-the-fr048-countequality-ambiguity)).
++
++### Source path validation
++
++Both passes below run over **all** source paths before the archive is opened, so a rejected
++invocation creates no archive and leaves any pre-existing archive untouched (FR-050, FR-051).
++Containment is checked first for every path, then existence for every path; within each pass, paths
++are visited in command-line order.
++
++| # | Condition on the typed path `p` | Outcome | Requirement |
++|---|---|---|---|
++| S1 | `posixpath.isabs(p)` | exit 2, diagnostic names `p` | FR-052 |
++| S2 | `posixpath.normpath(p)` is `..` or starts with `../` | exit 2, diagnostic names `p` | FR-052 |
++| S3 | `posixpath.normpath(p)` is `.` (which includes `p == ""`) | exit 2, diagnostic names `p` | FR-034 + FR-052, gap resolved in [research R19](./research.md#r19--sourcepath-containment-and-the-current-directory-as-a-source) |
++| S4 | `not os.path.lexists(p)` | exit 2, diagnostic names `p` | FR-050 |
++| S5 | `p` exists but cannot be read (detected only when the walk reaches it) | exit 2, diagnostic names the unreadable path | FR-054 |
++
++S1–S4 are checked ahead of the archive target rules A1–A3, so a run with both a bad source path and
++an existing archive reports the source path and exits 2 — which FR-056 requires, since status 2
++outranks status 3.
++
++S5 cannot be pre-checked reliably (`os.access` lies under `root` and races under any user), so it is
++handled as a backstop during the write pass, converted to a named diagnostic and exit 2 — never
++swallowed, and never reported as success
++([research R24](./research.md#r24--permissiondenied-cases-are-untestable-as-root)).
++
++**Accepted forms** (verified, [research R19](./research.md#r19--sourcepath-containment-and-the-current-directory-as-a-source)):
++
++| Typed | Normalised / `arcname` | Note |
++|---|---|---|
++| `notes.txt` | `notes.txt` | regular file |
++| `photos` | `photos` | directory |
++| `photos/` | `photos` | trailing separator is immaterial |
++| `./photos` | `photos` | leading `./` stripped, satisfying FR-034 |
++| `photos/../photos` | `photos` | normalises back inside; accepted |
++| `a/b/c.txt` | `a/b/c.txt` | nested path, no intermediate directory members created for `a` or `b` |
++
++**Refused forms**: `/etc/passwd` (S1), `../outside` and `a/../../outside` (S2), `.` and `""` (S3),
++`missing-folder` (S4).
++
++---
++
++## Entity: Member
++
++One entry written into the archive. Represented by a stdlib `tarfile.TarInfo`, produced by
++`TarFile.gettarinfo` during the walk. This project constructs none of its own.
++
++| Attribute | Representation | Requirements |
++|---|---|---|
++| Recorded name | `TarInfo.name` — the `arcname` joined with each path component below it, separators normalised to `/`, any leading `/` stripped | FR-034 |
++| Kind | `TarInfo.isreg()` / `TarInfo.isdir()` / neither | FR-032, FR-033, FR-036 |
++| Content | streamed from the file by `TarFile.addfile` in `bufsize` chunks, never materialised | FR-032, SC-017 |
++| Counted | yes iff `isreg()` | FR-039 |
++
++### Member classification
++
++Exactly three cases, decided by the `filter` callable passed to `TarFile.add`
++([research R16](./research.md#r16--skipping-entries-that-are-neither-regular-files-nor-directories)):
++
++| Case | Action | Counted in `N` | Requirement |
++|---|---|---|---|
++| Regular file | store the member with its content | **yes** | FR-032, FR-039 |
++| Directory | store a directory member, then recurse into its entries in `sorted()` order | no | FR-033, FR-035, FR-039 |
++| Anything else (symlink, FIFO, device node, socket) | return `None` — member dropped, run continues | no | FR-036, FR-039 |
++
++The third case applies identically to a directly-named source path and to an entry found while
++walking, which is what FR-036 requires. A source path of the third kind therefore contributes
++nothing to the archive and nothing to `N`, and the run still succeeds.
++
++### Member naming
++
++The recorded name is the normalised relative path of the entry, built by `TarFile.add` from the
++`arcname` this project supplies. Verified end to end
++([research R17](./research.md#r17--directory-member-names-the-trailing-separator-and-the-archive-format)):
++
++| Source tree entry | Recorded name as this tool's `list` prints it | On-wire header |
++|---|---|---|
++| `photos` (directory) | `photos` | `photos/` |
++| `photos/a.jpg` | `photos/a.jpg` | `photos/a.jpg` |
++| `photos/empty` (empty directory) | `photos/empty` | `photos/empty/` |
++| `notes.txt` | `notes.txt` | `notes.txt` |
++
++The trailing `/` on directory headers is the universal tar convention — GNU `tar` writes it, and
++`tarfile` strips it again when reading (001 research R3), which is why `list` satisfies FR-008 with
++no code. FR-034's "no trailing separator" therefore holds at the level every acceptance scenario
++observes. An independent reader such as GNU `tar -tf` displays directory entries with the
++separator and file entries character-for-character identical.
++
++### Member order
++
++Deterministic for a given invocation and tree (FR-035):
++
++1. Source paths in command-line order.
++2. Within a directory: the directory's own member first, then its entries in
++   `sorted(os.listdir(...))` order — code-point order, independent of locale and of filesystem
++   readdir order. Files and subdirectories interleave by name.
++
++Example, for `create photos.tar photos notes.txt` over
++`photos/{a.jpg, b.jpg, empty/, raw/r.cr2}` and `notes.txt` (verified):
++
++```text
++photos
++photos/a.jpg
++photos/b.jpg
++photos/empty
++photos/raw
++photos/raw/r.cr2
++notes.txt
++```
++
++---
++
++## Derived value: the reported count `N`
++
++| Property | Value |
++|---|---|
++| Type | `int`, a plain counter incremented in the classification filter |
++| Counts | regular-file members actually stored |
++| Excludes | directory members, dropped members (FR-036), the archive itself (FR-037) |
++| Duplicates | counted **once per stored member**, so an overlapping source path inflates `N` by design |
++| Rendered as | `created ARCHIVE with N files` — the word `files` for every `N`, including `0` and `1` (FR-039) |
++
++A counter rather than 001's set-of-paths, because `create` and `extract` count different things:
++`create` counts members stored (duplicates count twice), `extract` counts distinct destination paths
++written (duplicates count once). Both are specified explicitly, and the divergence between them for
++overlapping source paths is the FR-048 ambiguity recorded in
++[research R22](./research.md#r22--counting-regularfile-members-and-the-fr048-countequality-ambiguity).
++
++---
++
++## Run state machine
++
++```text
++                         parse argv  ──unrecognised/no paths──▶  usage on stderr, exit 2  (FR-031)
++                              │
++                              ▼
++          validate source paths  S1,S2,S3  ──fail──▶  diagnostic, exit 2  (FR-052)
++                              │
++                              ▼
++          validate source paths  S4        ──fail──▶  diagnostic, exit 2  (FR-050)
++                              │
++                              ▼
++          validate archive target A1       ──fail──▶  diagnostic, exit 2  (FR-045)
++                              │
++                              ▼
++          validate archive target A2       ──fail──▶  diagnostic, exit 3  (FR-043)
++                              │
++                              ▼
++          validate archive target A3       ──fail──▶  diagnostic, exit 2  (FR-044/R20)
++                              │
++          ════════════════════╪════════════════════  nothing above touches a file
++                              ▼
++          open archive (create/truncate)   ──OSError──▶  diagnostic, exit 2  (FR-053, A5)
++                              │
++                              ▼
++          add each source path in order    ──OSError──▶  diagnostic, exit 2  (FR-053, FR-054, S5)
++          (walk, classify, stream, count)
++                              │
++                              ▼
++          print  created ARCHIVE with N files , exit 0   (FR-038)
++```
++
++Every transition above the double line is read-only with respect to the filesystem. That is what
++makes FR-051 ("a rejected invocation never leaves a new or partially rebuilt archive behind") a
++structural property of the design rather than a promise — the same split 001 used to make FR-020
++structural for `extract`.
++
++Below the line, a failure leaves a partial archive on disk but never prints the summary line, which
++is exactly what FR-053 and the specification's *Failure after writing has begun* edge case require
++— no rollback machinery, per
++[research R21](./research.md#r21--failure-partway-through-writing-no-temporary-file-no-rollback).
++
++---
++
++## Reused, unchanged from 001
++
++| Thing | Why it needs no change |
++|---|---|
++| `TarxError(message, code)` | Carries a one-line diagnostic plus an exit status; FR-055 and FR-056 are the same obligations as FR-027 and FR-028 |
++| `EXIT_OK` / `EXIT_ERROR` / `EXIT_CONFLICT` | FR-056 assigns `create` the same three statuses with the same meanings |
++| `main`'s single `except TarxError` site | Keeps "exactly one place formats a diagnostic and chooses a status" true for three subcommands instead of two |
++| `cmd_list`, `cmd_extract`, `open_archive`, `build_plan`, `write_members`, `escapes_destination` | Untouched. FR-049 and SC-015 require their behaviour to be bit-identical, verified by running the pre-existing suite unmodified |
+diff --git a/specs/002-create-command/plan.md b/specs/002-create-command/plan.md
+new file mode 100644
+index 0000000..7207bd6
+--- /dev/null
++++ b/specs/002-create-command/plan.md
+@@ -0,0 +1,266 @@
++# Implementation Plan: Tar Archive Create Command
++
++**Branch**: `002-create-command` | **Date**: 2026-11-05 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/002-create-command/spec.md`
++
++## Summary
++
++Add a third subcommand to the existing zero-dependency CLI: `python -m tarx create ARCHIVE PATH...
++[--overwrite]` packs each named file or directory into a tar archive at `ARCHIVE`, naming members by
++their path relative to the current directory, gzip-compressing when the archive name ends in
++`.tar.gz` or `.tgz`, and printing `created ARCHIVE with N files`. Exit statuses match the rest of
++the tool: 0 on success, 3 when `ARCHIVE` exists and `--overwrite` was not given, 2 for every other
++failure, each with a one-line diagnostic on stderr naming the offending path. `list` and `extract`
++are not touched.
++
++Technical approach: three decisions carry the feature, all validated in Phase 0 against the real
++interpreter and the real existing commands.
++
++1. **One `tar.add(source, arcname=normalized, recursive=True, filter=classify)` call per source
++   path.** That single stdlib call already delivers recursive expansion with a directory member for
++   each directory (FR-033), relative member naming (FR-034), deterministic `sorted()` order
++   (FR-035), skipping of entries that are neither files nor directories via a filter returning
++   `None` (FR-036), refusal to archive the archive into itself (FR-037), and chunked streaming that
++   keeps memory flat (SC-017). A hand-written `os.walk` would re-implement all six — Principle IV
++   makes `add` the required choice, not just the convenient one
++   ([research R13](./research.md#r13--tarfileaddrecursivetrue-filter-instead-of-a-handwritten-walk)).
++2. **Validate everything before opening the archive.** Phase 0 verified that
++   `tarfile.open(path, "w")` truncates an existing file *immediately* — a 140-byte archive became
++   0 bytes even though the following `add` failed at once. Validating after opening would therefore
++   destroy the user's archive in exactly the case FR-050 and US4 scenario 3 protect, and leave a
++   0-byte file where FR-050 requires none. Source-path and archive-target validation form a pass
++   that writes nothing, which turns FR-051 into a structural property rather than a promise — the
++   same split 001 used to make FR-020 structural for `extract`
++   ([research R18](./research.md#r18--all-validation-must-precede-opening-the-archive)).
++3. **Compression from the typed suffix, nothing else.** `path.lower().endswith((".tar.gz", ".tgz"))`
++   selects `"w:gz"` over `"w"` (FR-040 … FR-042). Deliberately asymmetric with the read commands,
++   which sniff content — and harmless, because a content-sniffing reader accepts whatever a
++   name-driven writer produces, which is why the round trip in FR-047/FR-048 holds even for an
++   unconventional archive name ([research R12](./research.md#r12--choosing-the-write-mode-from-the-archive-name)).
++
++The whole design was run end to end in Phase 0 — a prototype archive was created, then listed and
++extracted by the **real, unmodified** `list` and `extract` — before any of it was written up. Both
++the plain and gzip forms listed the expected seven member names in order, extracted byte-identical
++contents, recreated the empty directory, and reported a count equal to the one creation reported.
++See the round-trip table at the end of [research.md](./research.md).
++
++Phase 0 left no `NEEDS CLARIFICATION` in Technical Context — the spec's *Assumptions* section
++already fixed language, dependencies, package location, and scope. It did surface **three points
++where the specification is silent or self-conflicting**, each resolved here and flagged for a
++reviewer: the meaning of `.` as a source path (R19), `--overwrite` onto an existing non-regular file
++(R20), and FR-048's count equality versus the *A path named twice* edge case (R22). These are the
++direct counterpart of 001's research R8.
++
++## Technical Context
++
++**Language/Version**: Python 3.11+ (per the spec's mandated constraints and the user's planning
++input); developed and verified against CPython 3.13.17. No syntax or stdlib API newer than 3.11 is
++used — `TarFile.add`'s keyword-only `filter` has existed since 3.2 and its `sorted(os.listdir(...))`
++recursion since 3.7.
++
++**Primary Dependencies**: None at runtime — standard library only (Constitution Principle I, spec
++assumption, user input). This feature adds **no** new imports: `tarfile`, `argparse`, `posixpath`,
++`pathlib`, and `sys` are already imported by `src/tarx/cli.py`. `os` is needed for
++`os.path.lexists`.
++
++**Storage**: N/A. Writes one archive file; reads files and directories under the current directory.
++No database, no state carried between invocations, no configuration surface.
++
++**Testing**: `pytest` (test-only, never imported by runtime code; verified 9.1.1). New tests join
++the existing suite under `tests/`, runnable as a bare `pytest` from the repository root via
++`pythonpath = src` in `pytest.ini`. The pre-existing tests are **not** modified (SC-015).
++
++**Target Platform**: POSIX-like systems with CPython 3.11+ (developed on Linux 6.18). No
++platform-specific APIs. Note that the development environment runs as `euid 0`, where `chmod 0o000`
++denies nothing — permission-denied requirements are covered by tests that skip under root, the
++pattern `tests/test_failures.py` already uses
++([research R24](./research.md#r24--permissiondenied-cases-are-untestable-as-root)).
++
++**Project Type**: Single-package CLI tool, source under `src/`. This feature extends the existing
++package rather than adding to the structure.
++
++**Performance Goals**: SC-017 — 10,000 regular files archived in under 30 s, with memory that does
++not grow with the size of the largest file. Measured in Phase 0: **0.97 s** plain and **1.98 s**
++gzip for 10,001 files, a 15–30× margin, so no optimisation work is planned. Memory flatness is
++structural: `TarFile.addfile` streams each member through `shutil.copyfileobj` in `bufsize` chunks
++([research R23](./research.md#r23--performance-sc017)).
++
++**Constraints**: No third-party runtime imports. No change to `list` or `extract` behavior for any
++input (FR-049). No configuration surface — behavior is fully determined by the command line. Output
++is plain, unformatted, pipe-friendly text; exactly one summary line. File metadata is not a
++guarantee. No uncaught traceback may ever reach the user. A rejected invocation must leave no new
++archive and must not modify a pre-existing one.
++
++**Scale/Scope**: One new subcommand, 28 functional requirements (FR-029 … FR-056), 10 success
++criteria (SC-009 … SC-018). Roughly 60 lines added to one existing runtime file plus three new test
++modules; one archive per invocation, local filesystem only.
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++Constitution version 1.0.0.
++
++### Pre-Phase-0 evaluation
++
++| Principle | Gate | Verdict |
++|---|---|---|
++| I. Standard Library Only | Runtime imports resolve only to stdlib or first-party modules; `pytest` is test-only and never imported by runtime code | **PASS** — the feature is `tarfile` plus `argparse`; the spec's mandated constraints and the user's planning input both say stdlib only |
++| II. Fail Loudly | Every invalid input produces a specific diagnostic on stderr naming the offending value, plus a non-zero exit; no swallowed exceptions; no partial result in place of failure | **PASS** — FR-050 … FR-056 specify exactly this; the existing single `TarxError` type and single formatting site in `main` are reused, so no new path can exit silently |
++| III. Every Requirement Is Testable | Each FR maps to ≥ 1 `pytest` test that fails when unmet, traceable by requirement id; error paths asserted on both diagnostic and status | **PASS** — all 28 FRs are stated as observable input → output/status; SC-016 restates the traceability duty, and the spec's requirement-numbering note keeps identifiers unique repository-wide |
++| IV. Simplicity | Smallest design satisfying the spec; no speculative abstraction, config hook, or plugin seam; prefer function over class, module over package | **PASS** — see justifications below |
++
++### Simplicity justifications (Principle IV requires these in writing)
++
++This feature adds **no new structure at all** — no module, no package, no class, no configuration
++surface. The three 001 structures it reuses (the `tarx` package, the single `TarxError` class, the
++exit-status constants) were justified in [001's plan](../001-tar-archive-cli/plan.md) and are not
++re-litigated here. What is new is four functions and a subparser block inside the existing
++`src/tarx/cli.py`, each traced to a forcing requirement:
++
++1. **`cmd_create(args)`** — the subcommand handler, parallel to `cmd_list` and `cmd_extract`.
++   Forced by FR-029.
++2. **A validation pass separate from the write pass.** Forced by FR-050 + FR-051 + FR-043: a
++   rejected invocation must create no archive and must leave a pre-existing archive unmodified, and
++   Phase 0 verified that opening the archive truncates it immediately. A single-pass design cannot
++   satisfy this. The pass produces no objects — it raises `TarxError` or returns.
++3. **A `classify` filter closure passed to `TarFile.add`.** Forced by FR-036 (skip entries of other
++   kinds) and FR-039 (count regular-file members only). It is the one hook `TarFile.add` offers that
++   sees exactly the members that will be written, so one closure satisfies both. A closure over a
++   local counter rather than a class with a `count` attribute, per "prefer a function to a class".
++4. **A plain integer counter, not 001's set of written paths.** Forced by FR-039 together with the
++   spec's *A path named twice* edge case: `create` counts each stored regular file, including
++   duplicates, whereas `extract` counts distinct destination paths. Different specified semantics,
++   so the simpler structure is also the correct one
++   ([research R22](./research.md#r22--counting-regularfile-members-and-the-fr048-countequality-ambiguity)).
++
++Explicitly **not** built, per Principle IV: no `os.walk` traversal of our own (R13); no self-exclusion
++check of our own (R14); no sorting of our own (R15); no temp-file-and-rename or rollback machinery
++(R21); no de-duplication of overlapping source paths (spec edge case says not to); no
++`format=`/`compresslevel`/`bufsize` tuning (R12, R23); no new `create.py` module or `tarx.archive`
++subpackage (R25); no `Archive`/`SourcePath`/`Member` wrapper types over `TarFile` and `TarInfo`
++(data-model.md records each as a plain string, stdlib object, or tuple).
++
++### Post-Phase-1 re-evaluation
++
++Re-checked against the generated design artifacts ([research.md](./research.md),
++[data-model.md](./data-model.md),
++[contracts/create-contract.md](./contracts/create-contract.md), [quickstart.md](./quickstart.md)).
++
++| Principle | Verdict after design | Evidence |
++|---|---|---|
++| I. Standard Library Only | **PASS** | The design names every runtime import, and this feature adds none beyond `os` to a file that already imports `tarfile`, `argparse`, `posixpath`, `pathlib`, and `sys`. Research R12 rejected `mimetypes` (environment-dependent) and R13 rejected `shutil.make_archive` (cannot meet the contract) — both resolved *toward* the stdlib core rather than away from it. `pytest.ini` is test configuration and declares no runtime dependency. |
++| II. Fail Loudly | **PASS** | The contract's diagnostics table gives a specific single-line message for all eleven specified failure conditions, each naming the offending path as typed. The write-pass backstop converts `OSError` into a named diagnostic plus exit 2 — the opposite of swallowing. Research R19 and R20 both resolved genuine specification gaps *toward* loud refusal rather than toward guessing (`.` refused rather than given an invented member name; `--overwrite` onto a FIFO refused rather than hanging on `open`). |
++| III. Every Requirement Is Testable | **PASS** | Every contract row and data-model rule is phrased as an assertable input → output/status pair. The quickstart's acceptance checklist carries SC-016's per-FR traceability forward, adds the FR-049/SC-015 baseline to match (63 passed, 2 skipped), and requires the three spec-gap decisions to be pinned by tests so a future amendment surfaces as a failing test rather than silent drift. R24 records why two permission requirements must be covered by root-skipping tests and proposes a monkeypatched companion so the diagnostic and status are still asserted here. |
++| IV. Simplicity | **PASS** | Post-design file count: **zero new runtime files**. One existing module gains four functions and a subparser block; three test modules are added. The four justified additions above are unchanged; Phase 1 added no fifth. Design decisions R13, R14, R15, R17, and R21 each resolved toward *less* code (delegate the walk, the self-exclusion, the ordering, and the header convention to `tarfile`; add no rollback). |
++
++**No violations. Complexity Tracking below is intentionally empty.**
++
++Three notes for transparency, not gate failures. Each is a place where behavior is decided in this
++plan rather than in the specification, so each warrants a reviewer's attention and may warrant a
++spec amendment:
++
++1. **`.` (and an empty string) as a source path is refused with exit 2.** Phase 0 verified that
++   accepting it produces member names `.`, `./photos`, `./photos/a.jpg` — every one carrying the
++   leading `./` that FR-034 explicitly forbids. The current directory's relative path is empty, so
++   it has no conformant member name ([research R19](./research.md#r19--sourcepath-containment-and-the-current-directory-as-a-source)).
++2. **`--overwrite` onto an archive path that exists as neither a file nor a directory is refused
++   with exit 2.** FR-044 covers only the regular-file case, and honouring the flag on a FIFO would
++   *block* on `open` rather than fail. This leaves a documented asymmetry: the same FIFO yields
++   exit 3 without the flag, because FR-043 is explicit that *any* existing path does
++   ([research R20](./research.md#r20--the-archive-paths-prior-existence-and-kind-exit-2-versus-exit-3)).
++3. **FR-048's count equality is read as scoped to non-overlapping source paths.** It cannot hold
++   simultaneously with the *A path named twice* edge case, which requires `create` to store and
++   count a duplicated file twice while FR-015 requires `extract` to count the destination path once.
++   The more specific edge case governs, and both halves are asserted by tests
++   ([research R22](./research.md#r22--counting-regularfile-members-and-the-fr048-countequality-ambiguity)).
++
++A fourth item is a deliberate, specification-permitted consequence rather than an ambiguity: an
++`--overwrite` run that fails part-way through writing leaves a truncated archive where the old one
++was. FR-053 constrains what is *announced* ("MUST NOT report success"), and FR-051 is scoped to a
++*rejected* invocation, which validation-before-open already covers. Temp-file-and-rename would add
++cleanup paths, transient double disk usage, and a hole in FR-037 — so Principle IV forbids it absent
++a requirement that asks for it ([research R21](./research.md#r21--failure-partway-through-writing-no-temporary-file-no-rollback)).
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/002-create-command/
++├── plan.md                      # This file (/speckit-plan output)
++├── spec.md                      # Feature specification (input)
++├── research.md                  # Phase 0 output — decisions R12 … R25
++├── data-model.md                # Phase 1 output — entities, validation rules, run state machine
++├── quickstart.md                # Phase 1 output — runnable validation scenarios
++├── contracts/
++│   └── create-contract.md       # Phase 1 output — the `create` CLI surface
++└── tasks.md                     # Phase 2 output (/speckit-tasks — NOT created here)
++```
++
++001's `contracts/cli-contract.md` is **not** edited: FR-049 freezes it, and the new contract
++references it as still in force rather than restating or superseding it.
++
++### Source Code (repository root)
++
++```text
++pytest.ini                       # unchanged — pythonpath = src, testpaths = tests
++
++src/
++└── tarx/
++    ├── __init__.py              # unchanged — package marker, no logic
++    ├── __main__.py              # unchanged — sys.exit(main(sys.argv[1:]))
++    └── cli.py                   # MODIFIED (additive only):
++                                 #   + archive_mode(path)            FR-040 … FR-042
++                                 #   + validate_sources(paths)       FR-050, FR-052
++                                 #   + validate_archive_target(...)  FR-043 … FR-046, FR-053
++                                 #   + cmd_create(args)              FR-029 … FR-039, FR-053 … FR-056
++                                 #   + a third add_parser block      FR-029, FR-030, FR-031
++                                 #   + "create" in main()'s handlers FR-056
++                                 #   ~ module and parser description strings
++                                 #   = cmd_list, cmd_extract, open_archive, build_plan,
++                                 #     write_members, escapes_destination, TarxError,
++                                 #     EXIT_* all UNCHANGED (FR-049)
++
++tests/
++├── conftest.py                  # MODIFIED (additive only): source-tree fixtures for create;
++│                                #   the existing archive fixtures and run_tarx are UNCHANGED
++├── test_invocation.py           # unchanged (FR-049, SC-015)
++├── test_list.py                 # unchanged
++├── test_extract.py              # unchanged
++├── test_compression.py          # unchanged
++├── test_overwrite.py            # unchanged
++├── test_failures.py             # unchanged
++├── test_performance.py          # unchanged
++├── test_create.py               # NEW — FR-029 … FR-042: invocation, members, naming, order,
++│                                #   skipping, self-exclusion, summary line, compression
++├── test_create_overwrite.py     # NEW — FR-043 … FR-046: exit 3, --overwrite, directory target
++└── test_create_failures.py      # NEW — FR-050 … FR-056: diagnostics, containment, statuses,
++                                 #   FR-047 … FR-049 round trip and the unchanged-behavior check
++```
++
++**Structure Decision**: Extend the existing single-package CLI layout; add nothing to it. All new
++runtime code goes into `src/tarx/cli.py`, which keeps "all logic in one module" true for three
++subcommands as it was for two, and keeps FR-055 and FR-056 true by construction — `main` remains the
++only place that formats a diagnostic or chooses an exit status. A new `create.py` was rejected in
++[research R25](./research.md#r25--where-the-code-lives): it buys a second file and two import edges
++for 60 lines, and raises a shared-error-type question that currently has no cost.
++
++Tests are split one file per requirement cluster, matching 001's convention so SC-016's
++requirement-to-test traceability stays visible from the file tree. The names are prefixed
++`test_create_*` so the 001 modules they parallel remain unambiguous, and the three round-trip
++requirements (FR-047 … FR-049) live with the failure tests because that module is where the
++pre-existing-suite check belongs. `conftest.py` gains source-*tree* fixtures (the existing ones all
++build archives, which is the opposite of what `create` needs as input) and loses nothing; the
++`run_tarx` subprocess runner already accepts a `cwd=` argument, which is exactly what `create` needs
++since it names members relative to the current directory.
++
++## Complexity Tracking
++
++> **Fill ONLY if Constitution Check has violations that must be justified**
++
++No violations. The Constitution Check passes both pre-Phase-0 and post-Phase-1. This feature adds
++zero new runtime files, zero new classes, and zero new runtime dependencies; the four additions that
++exceed "one more function" are justified inline under *Simplicity justifications*, each traced to the
++specific requirement that forces it.
+diff --git a/specs/002-create-command/quickstart.md b/specs/002-create-command/quickstart.md
+new file mode 100644
+index 0000000..df6de26
+--- /dev/null
++++ b/specs/002-create-command/quickstart.md
+@@ -0,0 +1,265 @@
++# Quickstart & Validation Guide: `tarx create`
++
++**Feature**: `002-create-command` | **Date**: 2026-11-05 | **Spec**: [spec.md](./spec.md)
++
++Runnable scenarios that prove the feature works end to end. Each maps to the user stories and
++success criteria in [spec.md](./spec.md); the exact strings and statuses are normative in
++[contracts/create-contract.md](./contracts/create-contract.md), and the design rationale is in
++[research.md](./research.md) and [data-model.md](./data-model.md).
++
++This is a validation guide, not an implementation guide. It contains no production code and no test
++bodies — those belong to `tasks.md` and the implementation phase.
++
++## Prerequisites
++
++- Python **3.11+** (developed and verified on CPython 3.13.17). Standard library only; nothing to
++  install for the program itself.
++- `pytest` for the test suite (test-time only, never imported by runtime code).
++- Optional, for the independent-reader checks: system GNU `tar` and `gzip`. Scenario 3 skips
++  gracefully without them, as 001's `gnu_tar_dir_archive` fixture already does.
++
++```bash
++cd <repo root>
++python -m pytest -q          # baseline before this feature: 63 passed, 2 skipped
++```
++
++`pytest.ini` already sets `pythonpath = src` and `testpaths = tests`, so a bare `pytest` works from
++the repository root. Running the CLI directly needs `src` on `PYTHONPATH`:
++
++```bash
++export PYTHONPATH="$PWD/src"
++```
++
++## Setup: a known source tree
++
++Every scenario below runs inside a scratch directory, because `create` names members relative to
++the current directory.
++
++```bash
++mkdir -p /tmp/tarx-demo && cd /tmp/tarx-demo
++mkdir -p photos/raw photos/empty
++printf 'AAA'  > photos/a.jpg
++printf 'BBBB' > photos/b.jpg
++printf 'R'    > photos/raw/r.cr2
++printf ''     > photos/zero.bin
++printf 'notes' > notes.txt
++```
++
++Four regular files, one empty directory, one zero-length file.
++
++---
++
++## Scenario 1 — Create, compressed and plain (US1, SC-009, SC-011, SC-012)
++
++```bash
++python -m tarx create photos.tar.gz photos notes.txt
++python -m tarx create photos.tar    photos notes.txt
++```
++
++Expected, for each command:
++
++- stdout exactly `created photos.tar.gz with 5 files` / `created photos.tar with 5 files`
++- stderr empty, exit status `0`
++- the count is 5: four files under `photos` plus `notes.txt`; the two directory members and the
++  empty directory are **not** counted (FR-039)
++
++Check the compression form was chosen by name alone (FR-040 … FR-042, SC-012):
++
++```bash
++gzip -t photos.tar.gz && echo "gzip OK"       # exit 0
++head -c2 photos.tar | xxd                     # NOT 1f 8b
++python -m tarx create bundle photos           # no recognised suffix → plain tar
++```
++
++---
++
++## Scenario 2 — The round trip (US2, SC-010, FR-047, FR-048)
++
++```bash
++python -m tarx list photos.tar.gz
++python -m tarx extract photos.tar.gz out/
++diff -r photos out/photos && diff notes.txt out/notes.txt && echo "identical"
++test -d out/photos/empty && echo "empty directory survived"
++```
++
++Expected `list` output, in exactly this order (FR-034, FR-035) — note `photos` and `photos/empty`
++appear **without** a trailing separator:
++
++```text
++photos
++photos/a.jpg
++photos/b.jpg
++photos/empty
++photos/raw
++photos/raw/r.cr2
++photos/zero.bin
++notes.txt
++```
++
++Expected `extract`: stdout `extracted 5 files`, stderr empty, exit `0` — the same count `create`
++reported (FR-048). Repeating both commands against `photos.tar` must give byte-identical output.
++
++This scenario was run against the real, unmodified `list` and `extract` during Phase 0; the
++observed results are tabulated at the end of [research.md](./research.md).
++
++---
++
++## Scenario 3 — Verified by a reader that is not this tool (SC-009, SC-012)
++
++```bash
++tar -tf  photos.tar
++tar -tzf photos.tar.gz
++tar -xzf photos.tar.gz -C verify/ && diff -r photos verify/photos
++```
++
++Expected: GNU `tar` lists the same entries and extracts byte-identical contents. **Directory
++entries appear as `photos/` and `photos/empty/`** — tar's universal convention for directory
++headers, which this tool's own `list` strips. File names match character for character. See
++[research R17](./research.md#r17--directory-member-names-the-trailing-separator-and-the-archive-format)
++before reading this as an FR-034 violation.
++
++---
++
++## Scenario 4 — Overwrite protection (US3, SC-013)
++
++```bash
++cp photos.tar guard.tar
++sha256sum guard.tar > before.txt
++
++python -m tarx create guard.tar photos ; echo "exit=$?"
++sha256sum -c before.txt
++```
++
++Expected: a diagnostic on stderr naming `guard.tar`, stdout **empty**, exit `3`, and the checksum
++still matches — the existing archive is byte-for-byte untouched (FR-043).
++
++```bash
++python -m tarx create guard.tar notes.txt --overwrite ; echo "exit=$?"
++python -m tarx list guard.tar                      # now just: notes.txt
++python -m tarx create fresh.tar notes.txt --overwrite ; echo "exit=$?"   # 0, no complaint
++mkdir adir && python -m tarx create adir photos --overwrite ; echo "exit=$?"
++```
++
++Expected: `--overwrite` replaces the regular file (exit `0`, FR-044); `--overwrite` on a
++non-existent archive is accepted silently (exit `0`, FR-046); an archive path that is a **directory**
++fails with exit `2` and leaves the directory alone, with or without the flag (FR-045).
++
++---
++
++## Scenario 5 — Failures are loud, scriptable, and leave nothing behind (US4, SC-014)
++
++Each command must print a one-line diagnostic naming the offending path to stderr, print nothing to
++stdout, and create no archive.
++
++```bash
++python -m tarx create other.tar missing-folder            ; echo "exit=$? "; ls other.tar
++python -m tarx create other.tar photos missing-folder     ; echo "exit=$? "; ls other.tar
++python -m tarx create other.tar /etc/passwd               ; echo "exit=$?"
++python -m tarx create other.tar ../outside                ; echo "exit=$?"
++python -m tarx create other.tar .                         ; echo "exit=$?"
++python -m tarx create nodir/other.tar photos              ; echo "exit=$? "; ls -d nodir
++python -m tarx create other.tar                           ; echo "exit=$?"
++python -m tarx create other.tar photos --bogus            ; echo "exit=$?"
++```
++
++| Command | Status | Must also hold |
++|---|---|---|
++| missing source | `2` | `other.tar: No such file` — no archive created (FR-050) |
++| one of several sources missing | `2` | no archive created even though `photos` was valid (FR-051) |
++| absolute source path | `2` | FR-052 |
++| source reaching outside the current directory | `2` | FR-052 |
++| the current directory as a source | `2` | FR-052 / [research R19](./research.md#r19--sourcepath-containment-and-the-current-directory-as-a-source) |
++| archive's parent directory missing | `2` | `nodir` is **not** created (FR-053) |
++| no source paths | `2` | `argparse` usage guidance on stderr (FR-031) |
++| unknown option | `2` | `argparse` usage guidance on stderr (FR-031) |
++
++The combined case FR-056 singles out:
++
++```bash
++python -m tarx create guard.tar missing-folder --overwrite ; echo "exit=$?"
++sha256sum guard.tar     # unchanged from before the command
++```
++
++Expected: exit `2`, not `3` — status 2 outranks status 3 — and `guard.tar` byte-for-byte unchanged,
++because validation completes before the archive is ever opened
++([research R18](./research.md#r18--all-validation-must-precede-opening-the-archive)).
++
++Permission cases (FR-053 unwritable location, FR-054 unreadable source) behave the same way but
++**cannot be exercised as `root`**, which bypasses mode bits. Their tests skip on
++`os.geteuid() == 0`, following the pattern already in `tests/test_failures.py`
++([research R24](./research.md#r24--permissiondenied-cases-are-untestable-as-root)).
++
++---
++
++## Scenario 6 — Edge cases worth seeing once
++
++```bash
++mkdir hollow && python -m tarx create hollow.tar hollow
++# → "created hollow.tar with 0 files", exit 0, and `list hollow.tar` prints `hollow`
++
++python -m tarx create photos/inside.tar photos
++python -m tarx list photos/inside.tar | grep inside.tar   # no match: the archive is not inside itself
++
++python -m tarx create trail.tar photos/
++# → identical members to `create trail.tar photos`
++
++ln -s a.jpg photos/link.jpg && mkfifo photos/pipe
++python -m tarx create skip.tar photos
++# → the link and the FIFO are skipped silently and not counted; exit 0
++```
++
++| Edge case | Expected | Requirement |
++|---|---|---|
++| directory with no files | `created hollow.tar with 0 files`, exit `0`, directory member present | FR-039, US1 §6 |
++| archive written inside a named directory | archive absent from its own member list | FR-037 |
++| trailing separator on a source path | identical member names | FR-034 |
++| symlink / FIFO in the tree | skipped, uncounted, run still succeeds | FR-036 |
++| zero-length file | stored as an empty member and **counted** | FR-032, FR-039 |
++| same path named twice | stored twice, counted twice; `extract` then reports the lower count | [research R22](./research.md#r22--counting-regularfile-members-and-the-fr048-countequality-ambiguity) |
++
++---
++
++## Scenario 7 — Performance (SC-017)
++
++```bash
++python - <<'EOF'
++import pathlib
++for i in range(100):
++    d = pathlib.Path(f"big/d{i:03d}"); d.mkdir(parents=True, exist_ok=True)
++    for j in range(100): (d/f"f{j:03d}.txt").write_bytes(b"payload")
++EOF
++time python -m tarx create big.tar    big
++time python -m tarx create big.tar.gz big
++```
++
++Expected: 10,000 files in well under the 30 s budget — Phase 0 measured **0.97 s** plain and
++**1.98 s** gzip for 10,001 files on this machine
++([research R23](./research.md#r23--performance-sc017)). Memory must not grow with the size of the
++largest member: `tarfile` streams each member in `bufsize` chunks.
++
++---
++
++## Acceptance checklist
++
++The implementation is complete only when all of the following hold (Constitution Principle III and
++*Development Workflow & Quality Gates*):
++
++- [ ] **The pre-existing suite passes unmodified** — `python -m pytest -q` still reports the 001
++      tests green with zero edits to their expected stdout, stderr, or exit statuses (FR-049,
++      SC-015). Baseline to match: 63 passed, 2 skipped.
++- [ ] Every requirement **FR-029 … FR-056** has at least one `pytest` test that fails when the
++      requirement is unmet, traceable by requirement identifier in the test name or docstring
++      (SC-016).
++- [ ] Every failure case in Scenario 5 asserts **both** the non-empty stderr diagnostic naming the
++      offending path **and** the exact exit status — never merely "it failed" (Principle II).
++- [ ] No test observes an uncaught traceback on stderr, for any input (FR-055).
++- [ ] Scenarios 1–7 above all behave as stated.
++- [ ] Runtime imports in `src/tarx/` resolve only to the standard library and this package
++      (Principle I); `pytest` appears in no runtime import.
++- [ ] No structure beyond the minimum: no new module, no new package, no new exception type, no
++      configuration surface — or any addition justified in writing in [plan.md](./plan.md)
++      (Principle IV, [research R25](./research.md#r25--where-the-code-lives)).
++- [ ] The three decisions this plan made where the specification was silent (`.` as a source path,
++      `--overwrite` onto a non-regular file, the FR-048 count-equality scope) are each covered by a
++      test asserting the chosen behavior, so a future spec amendment would show up as a failing
++      test rather than a silent drift.
+diff --git a/specs/002-create-command/research.md b/specs/002-create-command/research.md
+new file mode 100644
+index 0000000..7e79245
+--- /dev/null
++++ b/specs/002-create-command/research.md
+@@ -0,0 +1,476 @@
++# Phase 0 Research: Tar Archive Create Command
++
++**Feature**: `002-create-command` | **Date**: 2026-11-05 | **Spec**: [spec.md](./spec.md)
++
++Decision identifiers continue the sequence of
++[`001-tar-archive-cli/research.md`](../001-tar-archive-cli/research.md) (R1 … R11), because the
++existing runtime code cites those identifiers in its docstrings and reusing numbers would make
++those citations ambiguous. This document starts at **R12**.
++
++Every claim below was verified against the interpreter this repository is developed on
++(**CPython 3.13.17**, Linux 6.18), using throwaway scripts outside the repository, and against
++system GNU `tar` 1.35 and `gzip` where interoperability was at stake. "Verified" in this document
++means a probe was run and its output observed, not that the documentation was read.
++
++The Technical Context in [plan.md](./plan.md) contains **no** `NEEDS CLARIFICATION` markers: the
++specification's *Assumptions* section already fixed language, dependency policy, package location,
++and scope. The research below therefore resolves *design* unknowns and two genuine internal
++ambiguities in the specification (R20, R22), rather than filling in missing context.
++
++---
++
++## R12 — Choosing the write mode from the archive name
++
++**Decision**: Select `tarfile.open(path, "w:gz")` when the archive path's name, lower-cased, ends
++in `.tar.gz` or `.tgz`; otherwise `tarfile.open(path, "w")`.
++
++**Rationale**: FR-040/FR-041/FR-042 make the suffix of the typed archive path the *only* input to
++this choice. A two-line `str.lower().endswith((".tar.gz", ".tgz"))` test expresses exactly that and
++nothing more. Lower-casing implements the specification's assumption that the comparison is
++case-insensitive, so `.TGZ` and `.TAR.GZ` compress. Verified: `photos.tar.gz`, `photos.tgz`,
++`photos.TGZ`, `x.TAR.GZ` → compressed; `photos.tar`, `bundle`, `bundle.bin` → plain. Verified that
++`w:gz` output starts with the gzip magic `1f 8b` and that `w` output does not, that `gzip -t`
++accepts the compressed archive (exit 0), and that GNU `tar -tzf` lists it.
++
++**Alternatives considered**:
++
++- `pathlib.PurePath.suffixes` — would need re-joining and case-folding to recognise the two-part
++  `.tar.gz`, and mis-handles a name like `my.photos.2026.tgz` unless the last suffix is isolated.
++  More code for the same answer.
++- `mimetypes.guess_type` — drags in a module whose answer depends on system MIME databases, which
++  makes a specified behaviour environment-dependent. Rejected outright.
++- Sniffing the source files to decide — explicitly prohibited by FR-042.
++
++**Note on asymmetry**: the read commands sniff compression from content (001 research R2) while
++`create` decides from the name. This is deliberate and self-consistent: a content-sniffing reader
++accepts whatever a name-driven writer produces, which is why FR-047/FR-048 can hold even for a
++deliberately unconventional name such as `bundle`.
++
++---
++
++## R13 — `TarFile.add(recursive=True, filter=...)` instead of a hand-written walk
++
++**Decision**: Build each archive with one `tar.add(source, arcname=normalized, recursive=True,
++filter=classify)` call per command-line source path. Do not write an `os.walk` loop.
++
++**Rationale**: a single stdlib call already delivers five separate requirements, each of which
++would otherwise be our code to write and test:
++
++| Requirement | What `TarFile.add` does |
++|---|---|
++| FR-033 recursive expansion, directory member for the named directory itself | adds the directory member, then recurses into its entries |
++| FR-034 member naming | joins `arcname` with each child name, normalises separators to `/`, strips any leading `/` |
++| FR-035 deterministic order | recurses over `sorted(os.listdir(name))` (CPython ≥ 3.7) |
++| FR-036 skipping other kinds | `filter` returning `None` excludes a member; `gettarinfo` already returns `None` for types it cannot represent (e.g. sockets) |
++| FR-037 never archiving the archive | `add` returns early when `os.path.abspath(name) == self.name` |
++| SC-017 flat memory | `addfile` streams file contents through `copyfileobj` in `bufsize` chunks, never reading a member whole |
++
++Principle IV ("when two designs both satisfy the specification, the one with fewer moving parts
++MUST be chosen") makes this the required choice, not merely the convenient one.
++
++Verified in one probe, with the archive deliberately written *inside* the named directory
++(`tarfile.open("photos/out.tar", "w")`, then `add("photos")`): members came out as `photos`,
++`photos/a.jpg`, `photos/b.jpg`, `photos/empty`, `photos/raw`, `photos/raw/r.cr2`,
++`photos/zero.bin`, `notes.txt` — alphabetically ordered within each directory, the empty directory
++present, the zero-length file present, and `photos/out.tar` **absent**.
++
++**Alternatives considered**:
++
++- **Hand-rolled `os.walk` + `tar.addfile`** — roughly 25 lines replacing one, and it would have to
++  re-implement sorting, self-exclusion, separator normalisation, and chunked copying. Every one of
++  those is a place to get a specified behaviour subtly wrong. Rejected.
++- **`tar.add(..., recursive=True)` with no filter** — would store symbolic links and FIFOs as
++  members, violating FR-036, and gives no hook for counting.
++- **`shutil.make_archive`** — cannot name members by a chosen relative path, cannot exclude the
++  archive from itself, cannot report a count, and chooses compression from a format argument rather
++  than the typed suffix. Rejected.
++
++**One caveat recorded for the implementation**: in `TarFile.add`, a `filter` that returns `None`
++for a *directory* also suppresses recursion into it, because the early return happens before the
++recursive branch. The design never excludes directories, so this is latent rather than live — but
++it means the filter must not grow a "skip this directory" responsibility later without revisiting
++recursion.
++
++---
++
++## R14 — The archive is never stored inside itself
++
++**Decision**: Rely on `TarFile.add`'s built-in self-exclusion; add no check of our own.
++
++**Rationale**: FR-037 is satisfied structurally. `TarFile.__init__` records
++`self.name = os.path.abspath(name)`, and `add` compares `os.path.abspath(name)` against it before
++doing anything else, on every recursive call as well as the top-level one. `os.path.abspath`
++normalises away `./` prefixes and trailing separators, so `./photos/out.tar` and `photos/out.tar`
++compare equal.
++
++Verified for both write modes: `tarfile.open("photos/out.tar", "w")` and `"w:gz"` both set
++`TarFile.name` to the absolute path, and in the R13 probe the archive did not appear among its own
++members.
++
++**Alternatives considered**: comparing `Path.resolve()` of every candidate against the archive
++before adding it — duplicate machinery for a guarantee the stdlib already makes, and `resolve()`
++follows symlinks, which this feature deliberately does not.
++
++**Limitation, deliberately not addressed**: the comparison is path-based, so a *different* path
++that reaches the same file (a hard link, or a symlinked parent directory) is not recognised as the
++archive. Nothing in the specification asks for that, and symbolic links are skipped anyway
++(FR-036), so the unbounded-growth concern the edge case names cannot arise through the paths this
++tool walks.
++
++---
++
++## R15 — Deterministic member order
++
++**Decision**: Source paths are added in command-line order; within a directory, `TarFile.add`'s
++`sorted(os.listdir(name))` fixes the order. No sorting of our own.
++
++**Rationale**: FR-035 requires only that the order be "fixed, repeatable" — not any particular
++collation. `sorted()` on the raw entry names gives code-point order, which is repeatable across
++runs and machines and independent of locale (unlike a `locale.strcoll` sort) and of filesystem
++readdir order (unlike bare `os.listdir`). Verified: the R13 probe's member list is in ascending
++name order within each directory, with files and subdirectories interleaved by name rather than
++grouped.
++
++**Alternatives considered**: `os.scandir` without sorting (faster, but order depends on the
++filesystem — fails FR-035); depth-first-files-then-directories grouping (no requirement asks for
++it).
++
++---
++
++## R16 — Skipping entries that are neither regular files nor directories
++
++**Decision**: Pass a `filter` callable that returns the `TarInfo` for `isreg()` and `isdir()`
++members, increments a counter for `isreg()`, and returns `None` for everything else.
++
++**Rationale**: this is the one line FR-036 needs, and it is also the natural place to satisfy
++FR-039 (count regular-file members only), since the filter sees exactly the members that will be
++written and nothing else. Verified: a directory containing a symbolic link and a FIFO alongside
++four regular files produced the four file members plus the directory members, with the link
++(`SYMTYPE`) and FIFO (`FIFOTYPE`) reported to the filter and dropped — the run did **not** fail,
++as FR-036 requires.
++
++Verified separately from CPython's `gettarinfo`: types `tarfile` cannot represent at all (a UNIX
++socket) make `gettarinfo` return `None`, and `add` then returns before the filter is consulted. So
++such entries are skipped and uncounted too, by a different route to the same specified outcome.
++
++A directly-named non-file, non-directory source path takes the same route: it passes existence
++validation (it does exist), reaches the filter, and is dropped — an archive is still created, with
++that path contributing nothing to `N`. That is what FR-036's "whether named directly or encountered
++while walking" asks for.
++
++**Alternatives considered**: pre-filtering with `os.walk` and `stat` before calling `add` — a
++second traversal that can disagree with the first (a file replaced between passes) for no benefit.
++
++---
++
++## R17 — Directory member names, the trailing separator, and the archive format
++
++**Decision**: Pass the normalised relative path as `arcname` and let `tarfile` write the header.
++Do not set `format=`; the default (`PAX_FORMAT`) is correct. Do not attempt to strip the trailing
++`/` that tar headers carry for directory members.
++
++**Rationale**: FR-034 requires recorded member names with "no leading `./`, no trailing separator,
++and no absolute prefix". Verified behaviour, with `arcname="photos"`:
++
++- **Python `tarfile` reader** reports `photos`, `photos/a.jpg`, `photos/empty` — exactly FR-034's
++  form, and exactly what this tool's own `list` prints (confirmed by running the real
++  `python -m tarx list` against a prototype archive).
++- **On-wire header** stores the directory name as `photos/`. This is written by `TarInfo.get_info`,
++  which appends `/` to a `DIRTYPE` name, and it is the universal tar convention: GNU `tar` writes
++  it, and 001 research R3 established that `tarfile` strips it again when reading, which is why
++  `list` needs no code for FR-008.
++- **GNU `tar -tf`** therefore prints `photos/`, `photos/a.jpg`, `photos/empty/`.
++
++So FR-034 is met at the level the specification's own acceptance scenarios observe — US2 scenario 1
++asks for "the directory entry `photos` without a trailing separator" from the `list` command, and
++that is what comes out. Suppressing the on-wire `/` would be both extra code and actively harmful:
++it is how every tar reader distinguishes a directory entry, and removing it would break the
++interoperability SC-012 and SC-009 demand. **Recorded so a reviewer of SC-009 is not surprised**:
++an independent reader shows directory names with the conventional trailing separator; file names
++match character for character.
++
++On `format`: the default PAX format writes a `././@PaxHeader` pseudo-entry when a field does not
++fit the historic USTAR layout (long names, sub-second mtimes). Verified that this pseudo-entry is
++consumed by the reader and is **not** surfaced as a member by either Python `tarfile` (3 members
++reported) or GNU `tar` (3 entries listed), so it cannot leak into `list` output or inflate the
++extraction count. PAX is also what makes member names longer than 100 characters work at all.
++Pinning `format=tarfile.USTAR_FORMAT` would trade that away for nothing.
++
++**Alternatives considered**: `GNU_FORMAT` (equivalent here, less portable); `USTAR_FORMAT` (breaks
++on long paths); post-processing `TarInfo.name` in the filter to drop the separator (fights the
++library, breaks readers).
++
++---
++
++## R18 — All validation must precede opening the archive
++
++**Decision**: Validate every source path, and the archive path's existence and kind, *before*
++calling `tarfile.open(..., "w")`. The open call is the first operation in a `create` run that
++touches the filesystem in a way the user can observe.
++
++**Rationale**: this is the single most load-bearing finding of Phase 0, because the obvious
++ordering silently violates three requirements. Verified: a pre-existing `pre.tar` of 140 bytes was
++**truncated to 0 bytes** by `tarfile.open("pre.tar", "w")` even though the subsequent `add` failed
++immediately with `FileNotFoundError`. A design that opens first and validates during the walk would
++therefore destroy the user's archive in exactly the case FR-050 and US4 scenario 3 single out
++("the pre-existing archive is left byte-for-byte unchanged"), and would leave a 0-byte archive
++behind in the case FR-050 and US4 scenario 1 forbid (`other.tar` does not exist).
++
++Verified in the same probe that a failed `add` leaves the newly-created archive file on disk
++(0 bytes for an immediate failure, 10240 bytes after some members were written) — so "create no
++archive" is only achievable by not opening it.
++
++Making validation a separate, filesystem-write-free pass turns FR-051 into a structural property
++rather than a promise, exactly as 001's plan/write split did for `extract` (001 research R9).
++
++**Alternatives considered**:
++
++- Open with mode `"x"` (exclusive create) to get overwrite protection from the OS — attractive, but
++  it conflates "already exists" (exit 3) with every other `OSError` (exit 2), cannot distinguish an
++  existing directory (FR-045, exit 2) from an existing file (FR-043, exit 3), and gives no place to
++  report the first offending *source* path. Rejected: the explicit checks are needed anyway.
++- Write to a temporary file and `os.replace` it into place on success — see R21.
++
++---
++
++## R19 — Source-path containment, and the current directory as a source
++
++**Decision**: Validate each source path **lexically**: reject it if `posixpath.isabs` is true, if
++`posixpath.normpath` yields `..` or a value starting `../`, or if `normpath` yields `.`. Use the
++normalised value as the `arcname`.
++
++**Rationale**: FR-052 requires refusing a source path that is absolute or resolves outside the
++current directory, and FR-034 requires the member name to be the normalised relative path — so the
++normalisation has to happen regardless, and the containment test is three comparisons on its
++result. Verified: `photos/` → `photos`; `./photos` → `photos`; `photos/../photos` → `photos`
++(inside, accepted); `/etc` → absolute (refused); `../x` and `a/../../x` → both `../x` (refused).
++
++Lexical rather than `Path.resolve()`-based, for the same reasons 001 research R11 gave for
++`escapes_destination`: `resolve()` follows symbolic links, and this feature deliberately does not
++follow them (FR-036 skips them). A symlink inside the working directory that points outside it is
++therefore skipped as a member, never followed to reach outside — so the lexical check and the
++skipping rule together close the hole that a realpath check would otherwise be needed for.
++
++**The current directory itself (`.`, or an empty string, which `normpath` also maps to `.`) is
++refused with exit status 2.** This resolves a gap in the specification. Verified that
++`add(".", arcname=".")` produces member names `.`, `./photos`, `./photos/a.jpg` — every one of them
++carrying the leading `./` that FR-034 explicitly forbids. The specification describes a source path
++as naming "a file or a directory ... such as `notes.txt` or `photos`", whose members are "named by
++their relative path"; the current directory's relative path is empty, so it has no FR-034-conformant
++member name. Refusing loudly (Principle II) beats inventing a naming rule the specification does not
++state, and beats emitting names it forbids. **Flagged for a reviewer**: this behaviour is decided
++here, not in the specification, and may warrant a spec amendment.
++
++**Alternatives considered**:
++
++- Accepting `.` and rewriting its members to drop the `./` prefix — invents an unspecified rule,
++  and makes `create x.tar .` archive the archive's own directory, including unrelated siblings.
++- Accepting `.` as-is — emits names FR-034 forbids, and 001's `extract` would then normalise them
++  back on the way out, making the round trip pass by luck rather than by design.
++
++---
++
++## R20 — The archive path's prior existence and kind; exit 2 versus exit 3
++
++**Decision**: Check the archive path in this order, before any source data is written:
++
++1. exists and is a directory → exit **2** (FR-045), with or without `--overwrite`;
++2. exists and `--overwrite` was **not** given → exit **3** (FR-043);
++3. exists, `--overwrite` was given, and it is **not** a regular file → exit **2**;
++4. otherwise open it for writing; any `OSError` → exit **2** (FR-053).
++
++**Rationale**: FR-056 states that when a status-2 condition and the status-3 condition are both
++present, status 2 is reported, so status 3 always means "re-run with `--overwrite`". That forces
++the directory check (step 1) ahead of the existence check (step 2) — the literal reading of FR-043
++("if the archive path already exists ... exit with status 3") would otherwise capture a directory
++too and contradict FR-045.
++
++Step 3 resolves a second gap. FR-044 obliges `--overwrite` to replace an existing **regular file**
++and says nothing about an existing FIFO, socket, or device node. Attempting to honour `--overwrite`
++there is not merely unspecified but actively harmful: opening a FIFO for writing *blocks* until a
++reader appears, so the command would hang rather than fail. Refusing with exit 2 and a diagnostic
++naming the path keeps the failure loud, bounded, and consistent with FR-045's "not replaceable in
++kind" stance. **Flagged for a reviewer** as a decision made here rather than in the specification.
++
++The asymmetry this leaves — a FIFO at the archive path yields exit 3 without `--overwrite` (FR-043
++is explicit that *any* existing path does) and exit 2 with it — is the price of following FR-043
++literally. It is recorded rather than smoothed over, and is a candidate for the same spec amendment
++as step 3.
++
++Verified for step 4: `tarfile.open("adir", "w")` and `"w:gz"` both raise `IsADirectoryError`
++(errno 21), and a missing parent directory raises `FileNotFoundError` (errno 2); both carry
++`filename` and `strerror`, which is what the diagnostics in the contract are built from. The
++explicit directory check in step 1 still precedes this, because `IsADirectoryError` alone cannot be
++told apart from the other write failures that must report exit 2 *after* the exit-3 check.
++
++**Interaction with source validation**: source paths are validated *before* the archive path, so a
++run with both a bad source and an existing archive reports the source (exit 2 either way, which is
++what FR-056 demands). US4 scenario 3 — existing archive, `--overwrite`, one missing source — is
++therefore exit 2 with the archive untouched, because nothing has opened it.
++
++---
++
++## R21 — Failure part-way through writing: no temporary file, no rollback
++
++**Decision**: Write directly to the archive path. Convert any `OSError` or `tarfile` error raised
++during the write pass into a one-line diagnostic plus exit 2, and never print the summary line. Do
++**not** write to a temporary file and `os.replace` it into position.
++
++**Rationale**: FR-053 requires that a mid-write error produce a diagnostic naming the archive path,
++exit 2, and "MUST NOT report success" — a statement about what is *announced*, not about what is
++left on disk. The specification's edge case agrees in the same terms: "still reports a diagnostic
++... rather than reporting success, so no incomplete archive is ever announced as created". FR-051's
++"never leaves a new or partially rebuilt archive behind" is scoped to a *rejected invocation*, i.e.
++one that fails validation — which R18's ordering already guarantees without a temporary file.
++
++Temp-file-and-rename would additionally protect the *pre-existing* archive during an `--overwrite`
++run that fails mid-write. No requirement asks for that, and Principle IV prohibits structure
++without "a current specified requirement that needs it". It also brings real costs: a second path
++to validate, a cleanup path for the temporary file (itself able to fail), transient double disk
++usage on a large archive, and a hole in FR-037 — the temporary file would sit inside a named
++directory under a name `TarFile.add`'s self-exclusion does not recognise, so it could be archived
++into itself.
++
++**Consequence, stated plainly**: an `--overwrite` run that fails part-way through leaves a truncated
++archive where the old one was. This is a deliberate, specification-permitted outcome, and the
++failure is loud. **Flagged for a reviewer** as the strongest candidate for a future requirement if
++the project later decides durability matters more than simplicity.
++
++**Alternatives considered**: `os.replace` from a temp file (above); unlinking the partial archive in
++an `except` block (turns one failure into two possible failures, and destroys the pre-existing
++archive's remains for no gain).
++
++---
++
++## R22 — Counting regular-file members, and the FR-048 count-equality ambiguity
++
++**Decision**: Count with a plain integer incremented in the filter — one increment per regular-file
++member actually stored.
++
++**Rationale**: FR-039 counts "regular-file members", and the specification's edge case *A path named
++twice* states that overlapping entries "are stored more than once, since no de-duplication is
++applied; the reported count counts each stored regular file". An integer is therefore not merely
++sufficient but *required*. Note this is the opposite of 001's `extract`, which deliberately used a
++`set` of written paths because FR-015 counts distinct *destination* paths (001 research R9) — the
++two commands count different things, and the difference is specified in both directions.
++
++**Ambiguity found and resolved**: FR-048 requires that for every archive `create` produces, "the
++extraction count equals the count `create` reported". When the named source paths **overlap** — the
++same path given twice, or a directory and a file inside it — `create` stores a regular file twice
++and reports 2, while `extract` writes one destination path and reports 1. FR-048 and the
++*A path named twice* edge case cannot both hold for such an archive.
++
++Resolution: the edge case is the more specific statement and governs `create`'s count; FR-048's
++count-equality is read as holding for archives built from non-overlapping source paths, which is
++every case the acceptance scenarios and success criteria exercise. The contract records this
++restriction explicitly, and the test suite will assert both halves — equality for disjoint sources,
++and the documented divergence for overlapping ones — so neither behaviour can regress unnoticed.
++**Flagged for a reviewer**: this is a specification-internal conflict resolved in the plan, the
++direct counterpart of 001 research R8.
++
++**Alternatives considered**: de-duplicating source paths so the counts always agree — contradicts
++the edge case outright and adds overlap-detection machinery Principle IV forbids. Counting distinct
++stored names instead — same contradiction, in the reporting rather than the storing.
++
++---
++
++## R23 — Performance (SC-017)
++
++**Decision**: No performance work beyond using `TarFile.add`. No chunk-size tuning, no parallelism.
++
++**Rationale**: measured, on a tree of 10,000 regular files across 100 directories plus one 120 MiB
++file, on this development machine:
++
++| Archive | Files | Wall clock | Budget (SC-017) |
++|---|---|---|---|
++| plain `w` | 10,001 | **0.97 s** | 30 s |
++| gzip `w:gz` | 10,001 | **1.98 s** | 30 s |
++
++A 15–30× margin, so there is nothing to optimise. Memory flatness with respect to the largest
++member is structural rather than measured-in-isolation: `TarFile.addfile` copies the member through
++`shutil.copyfileobj` in `bufsize`-sized chunks and never materialises it, which is the same
++guarantee 001 research R6 relied on for extraction. (The probe's own peak RSS was dominated by the
++120 MiB buffer it allocated to *create* the large file, so it is not quoted as evidence here.)
++
++**Alternatives considered**: tuning `tarfile`'s `bufsize`, or a `gzip` `compresslevel` below the
++default 9 — both are optimisation against a 15× margin, i.e. complexity with no forcing requirement.
++
++---
++
++## R24 — Permission-denied cases are untestable as root
++
++**Decision**: Specify the permission failures (FR-053 unwritable archive location, FR-054
++unreadable source) as tests that skip when `os.geteuid() == 0`, following the precedent already set
++in this repository.
++
++**Rationale**: verified that `chmod 0o000` denies nothing to root — `tar.add` read both a
++`0o000` directory and a `0o000` file without error in the probe, and the development environment
++runs as euid 0. `tests/test_failures.py:63` already guards two 001 tests this way
++(`SKIPPED [2] ... running as root: mode 0o000 does not deny access`), and the suite reports
++63 passed / 2 skipped. Reusing that exact pattern keeps the requirement covered and traceable on
++any non-root machine without making the suite fail or, worse, silently assert nothing here.
++
++**Alternatives considered**: simulating the failure by monkeypatching `tarfile.open` or `TarFile.add`
++to raise `PermissionError` — tests the error-formatting code without testing that the real
++`PermissionError` is raised and attributed to the right path. Worth adding *alongside* the skipping
++test, not instead of it, so the diagnostic and status are asserted even under root.
++
++---
++
++## R25 — Where the code lives
++
++**Decision**: Extend `src/tarx/cli.py` with `cmd_create` and its helpers, and register the
++subcommand in the existing `build_parser`. Create no new module, no new package, no new exception
++type.
++
++**Rationale**: Principle IV prefers "a module to a package" and prohibits structure without a
++forcing requirement. `create` reuses `TarxError`, `EXIT_OK`/`EXIT_ERROR`/`EXIT_CONFLICT`, and the
++single diagnostic-formatting site in `main` — exactly the machinery 001's plan justified, and the
++only way FR-055 and FR-056 stay true by construction rather than by duplication. The additions are
++roughly 60 lines in one file.
++
++Changes to existing code are confined to three additive edits: a third `add_parser` block, a third
++entry in `main`'s `handlers` dict, and the module and parser description strings. Verified that no
++existing test asserts the parser's `description`; the invocation tests assert only
++`usage: tarx`-prefixed strings and `usage: tarx list` / `usage: tarx extract`, none of which a
++third subparser changes. FR-049 and SC-015 are nonetheless verified empirically by running the
++pre-existing suite unmodified (baseline recorded above: 63 passed, 2 skipped).
++
++**Alternatives considered**: a new `create.py` module (a second file, two import edges, and a
++shared-error-type question, for 60 lines); a `tarx.archive` package with writer/reader submodules
++(textbook speculative generality — Principle IV prohibits it explicitly).
++
++---
++
++## Round-trip verification (the whole design, end to end)
++
++Before any of the above was written up, a prototype implementing R12–R17 was run against the
++**real, unmodified** `python -m tarx list` and `python -m tarx extract`, on a tree containing
++`notes.txt` and `photos/{a.jpg,b.jpg,raw/r.cr2,empty/}`:
++
++| Check | Plain `photos.tar` | Gzip `photos.tar.gz` |
++|---|---|---|
++| prototype summary count | 4 | 4 |
++| `list` exit / stderr | 0 / empty | 0 / empty |
++| `list` output | `photos`, `photos/a.jpg`, `photos/b.jpg`, `photos/empty`, `photos/raw`, `photos/raw/r.cr2`, `notes.txt` | identical |
++| `extract` stdout | `extracted 4 files` | `extracted 4 files` |
++| extracted tree | `notes.txt`, `photos/{a.jpg,b.jpg,empty/,raw/r.cr2}` | identical |
++| contents byte-identical | yes | yes |
++
++This closes FR-047, FR-048, SC-009, SC-010, and SC-012 as *reachable* by this design before a line
++of production code is written. The empty directory survives the round trip, the directory entry
++lists without a trailing separator, the two forms are indistinguishable after reading, and the
++extraction count equals the creation count.
++
++---
++
++## Summary of unresolved specification issues
++
++None blocks implementation. All three are recorded for a reviewer and are candidates for a spec
++amendment; each is resolved in the contract and covered by tests.
++
++| # | Issue | Resolution |
++|---|---|---|
++| R19 | The specification does not say what `.` (or an empty string) means as a source path, and accepting it emits member names FR-034 forbids | Refused with exit 2 and a diagnostic |
++| R20 | FR-044 does not say what `--overwrite` means when the archive path exists as a FIFO, socket, or device node; honouring it could hang | Refused with exit 2; FR-043 still gives exit 3 without the flag |
++| R22 | FR-048's count equality conflicts with the *A path named twice* edge case when source paths overlap | Edge case governs `create`'s count; FR-048 read as scoped to non-overlapping sources |

@@ -1,0 +1,327 @@
+---
+
+description: "Task list for 002-create-command — tar archive create command"
+---
+
+# Tasks: Tar Archive Create Command
+
+**Input**: Design documents from `/specs/002-create-command/`
+
+**Prerequisites**: [plan.md](./plan.md), [spec.md](./spec.md), [research.md](./research.md),
+[data-model.md](./data-model.md), [contracts/create-contract.md](./contracts/create-contract.md),
+[quickstart.md](./quickstart.md)
+
+**Tests**: **REQUIRED, not optional.** Constitution Principle III mandates a `pytest` test per
+functional requirement, and SC-016 restates it for FR-029 … FR-056. Test tasks therefore precede
+the implementation tasks inside every user-story phase, and each phase has an explicit
+"confirm these fail first" task.
+
+**Organization**: Tasks are grouped by user story (US1 … US4, in spec priority order P1 … P4) so
+each story can be implemented, tested, and delivered as its own increment.
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: Can run in parallel (different files, no dependencies)
+- **[Story]**: Which user story this task belongs to (US1, US2, US3, US4)
+- Exact file paths appear in every description
+
+## Path Conventions
+
+Single project, source under `src/` (plan.md *Project Structure*). All paths below are relative to
+the repository root:
+
+- Runtime code: `src/tarx/cli.py` — **the only runtime file this feature touches**
+- Tests: `tests/`
+- Test config: `pytest.ini` (already sets `pythonpath = src`, `testpaths = tests`; unchanged)
+
+**This feature adds zero new runtime files.** It adds four functions and one subparser block to
+`src/tarx/cli.py`, three new test modules, and additive fixtures to `tests/conftest.py`
+([research R25](./research.md#r25--where-the-code-lives)).
+
+---
+
+## Phase 1: Setup (Shared Infrastructure)
+
+**Purpose**: Pin the pre-feature baseline that FR-049 and SC-015 are measured against, and confirm
+the preconditions the plan relies on. Nothing is modified in this phase.
+
+- [ ] T001 Run `python -m pytest -q` from the repository root (configured by `pytest.ini`) and record the pre-feature baseline — expect exactly `63 passed, 2 skipped` — as the FR-049/SC-015 reference point; make no edits to any file under `tests/`
+- [ ] T002 [P] Confirm, changing nothing, the four preconditions the plan depends on: `pytest.ini` sets `pythonpath = src` and `testpaths = tests`; `src/tarx/cli.py` imports only `argparse`, `posixpath`, `shutil`, `sys`, `tarfile`, and `pathlib.Path`; `tests/conftest.py`'s `run_tarx` fixture already accepts a `cwd=` argument (which `create` needs, since it names members relative to the current directory); and `tests/test_failures.py:63` holds the `os.geteuid() == 0` skip pattern that T034 must copy
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**Purpose**: Shared test infrastructure every user story needs. The existing fixtures in
+`tests/conftest.py` all build *archives*, which is the opposite of what `create` needs as input, so
+source-*tree* fixtures must exist before any story's tests can be written.
+
+**⚠️ CRITICAL**: No user story work can begin until this phase is complete.
+
+- [ ] T003 Add create-side source-tree fixtures to `tests/conftest.py` (additive only — do not modify any existing fixture, helper, constant, or `run_tarx`): `source_tree(tmp_path)` building `notes.txt` = `b"notes"`, `photos/a.jpg` = `b"AAA"`, `photos/b.jpg` = `b"BBBB"`, `photos/raw/r.cr2` = `b"R"`, `photos/zero.bin` = `b""` (zero length — must still be counted, per spec *Edge Cases*), and the empty directory `photos/empty/`, returning the tree root (5 regular files total); `hollow_tree(tmp_path)` building only the empty directory `hollow/`; and `special_tree(tmp_path)` extending `source_tree`'s layout with the symbolic link `photos/link.jpg` → `a.jpg` and the FIFO `photos/pipe` created with `os.mkfifo`
+- [ ] T004 Add archive-inspection helpers to `tests/conftest.py` (additive only): `member_names(path)` returning `[m.name for m in tarfile.open(path, "r:*")]` — an independent reader, so member-name assertions never depend on `tarx list`; `is_gzip(path)` returning whether the file's first two bytes are `\x1f\x8b`; and the module constant `EXPECTED_PHOTO_MEMBERS = ("photos", "photos/a.jpg", "photos/b.jpg", "photos/empty", "photos/raw", "photos/raw/r.cr2", "photos/zero.bin", "notes.txt")` — the verbatim order `create ARCHIVE photos notes.txt` must produce (data-model.md *Member order*: source paths in command-line order, directory member first, then `sorted()` entries)
+
+**Checkpoint**: `python -m pytest -q` still reports `63 passed, 2 skipped` — fixtures are additive
+and unused so far. User story implementation can now begin.
+
+---
+
+## Phase 3: User Story 1 - Pack files and folders into an archive (Priority: P1) 🎯 MVP
+
+**Goal**: `python -m tarx create ARCHIVE PATH...` packs each named file or directory into a tar
+archive, names members by their relative path, chooses gzip from the archive name alone, skips
+entries of other kinds, never stores the archive inside itself, and prints
+`created ARCHIVE with N files` (FR-029 … FR-042).
+
+**Independent Test**: In a scratch directory containing `notes.txt` and `photos/`, run the create
+command naming both; confirm the archive exists, that an independent tar reader
+(`conftest.member_names`) reports exactly `EXPECTED_PHOTO_MEMBERS` in order, that stdout is exactly
+`created photos.tar with 5 files`, that stderr is empty, and that the exit status is 0.
+
+### Tests for User Story 1 ⚠️
+
+> **Write these tests FIRST and confirm they FAIL before T014.** All of them live in the single new
+> module `tests/test_create.py`, so these tasks are sequential rather than parallel.
+
+- [ ] T005 [US1] Create `tests/test_create.py` with a module docstring mapping the file to FR-029 … FR-042 and a local helper `assert_created(result, archive, count)` asserting stdout is exactly `created {archive} with {count} files\n`, stderr is empty, and the exit status is 0 (FR-038) — mirroring the local-helper convention `tests/test_failures.py` already uses for `assert_clean_failure`
+- [ ] T006 [US1] Add FR-029/FR-030 invocation tests to `tests/test_create.py`: `python -m tarx create notes.tar notes.txt` is accepted as a third subcommand alongside `list` and `extract`; `ARCHIVE` is the first positional followed by one or more `PATH` arguments; two `PATH` arguments in one invocation are accepted; `--overwrite` is accepted on an archive path that does not exist
+- [ ] T007 [US1] Add FR-032/FR-038/FR-039 single-file tests to `tests/test_create.py`: `create notes.tar notes.txt` run with `cwd=source_tree` produces exactly one member named `notes.txt` whose extracted bytes equal the source's, and stdout is exactly `created notes.tar with 1 files` — the literal word `files` for `N == 1`
+- [ ] T008 [US1] Add FR-033/FR-034/FR-035 recursion, naming, and order tests to `tests/test_create.py`: `create photos.tar photos notes.txt` with `cwd=source_tree` makes `member_names(...)` equal `EXPECTED_PHOTO_MEMBERS` in that exact order; assert no recorded name has a leading `./`, a trailing `/`, or a leading `/` (FR-034); assert `photos/` (trailing separator) and `./photos` each yield a member list identical to `photos` (spec *Edge Cases*, data-model *Accepted forms*); assert the count is 5
+- [ ] T009 [US1] Add FR-039 counting tests to `tests/test_create.py`: `hollow_tree` gives `created hollow.tar with 0 files` with `hollow` present as a directory member and exit 0 (US1 scenario 6); the zero-length `photos/zero.bin` **is** counted; and `create dup.tar notes.txt notes.txt` stores and counts the overlapping file twice → `created dup.tar with 2 files`, since no de-duplication is applied ([research R22](./research.md#r22--counting-regularfile-members-and-the-fr048-countequality-ambiguity))
+- [ ] T010 [US1] Add FR-036 skipping tests to `tests/test_create.py` using `special_tree`: `photos/link.jpg` and `photos/pipe` are absent from `member_names(...)`, the count is still 5, stderr is empty, and the exit status is 0 — the run must not fail; and when the FIFO is named directly as the only source path the archive is still created with `with 0 files` and exit 0 (FR-036 applies "whether named directly or encountered while walking")
+- [ ] T011 [US1] Add the FR-037 self-exclusion test to `tests/test_create.py`: `create photos/inside.tar photos` with `cwd=source_tree` leaves `photos/inside.tar` absent from its own `member_names(...)` and exits 0, so the output cannot grow without bound
+- [ ] T012 [US1] Add FR-040/FR-041/FR-042 compression tests to `tests/test_create.py`: `photos.tar.gz` and `photos.tgz` satisfy `is_gzip(...)` and open under `tarfile.open(..., "r:gz")`; `photos.tar`, `bundle`, and `bundle.bin` do **not** satisfy `is_gzip(...)`; `.TGZ` and `.TAR.GZ` are treated as gzip (the suffix comparison is case-insensitive, per spec *Assumptions*); a source tree whose only file is itself gzip data still yields a plain archive when `ARCHIVE` has no recognised suffix (FR-042 — only the typed archive name is consulted); and `create ./photos.tar photos notes.txt` prints `created ./photos.tar with 5 files`, echoing the typed path verbatim and unnormalised (FR-038)
+- [ ] T013 [US1] Confirm the tests added in T006–T012 fail before implementation: run `python -m pytest tests/test_create.py -q` and check that every failure is in the new module, then run `python -m pytest -q` and check the 001 modules under `tests/` still report `63 passed, 2 skipped`
+
+### Implementation for User Story 1
+
+- [ ] T014 [US1] Add `archive_mode(path)` to `src/tarx/cli.py` returning `"w:gz"` when `path.lower().endswith((".tar.gz", ".tgz"))` and `"w"` otherwise — the typed archive path is its only input, never a source path's name or content (FR-040, FR-041, FR-042, [research R12](./research.md#r12--choosing-the-write-mode-from-the-archive-name))
+- [ ] T015 [US1] Add `cmd_create(args)` to `src/tarx/cli.py` (depends on T014): open the archive with `tarfile.open(args.archive, archive_mode(args.archive))` in a `with` block; define a local `classify(info)` closure over a plain integer counter that returns `info` when `info.isreg()` (incrementing the counter via `nonlocal`), returns `info` when `info.isdir()` without incrementing, and returns `None` for every other type (FR-036, FR-039, [research R16](./research.md#r16--skipping-entries-that-are-neither-regular-files-nor-directories)); for each `path` in `args.paths`, **in command-line order**, call `tar.add(path, arcname=posixpath.normpath(path), recursive=True, filter=classify)`, which supplies the recursion, the relative naming, the `sorted()` ordering, and the self-exclusion for free (FR-032 … FR-035, FR-037); then `print(f"created {args.archive} with {count} files")` and `return EXIT_OK` (FR-038). Write **no** `os.walk` traversal, no sorting, no self-exclusion check, and no de-duplication of your own (plan *Simplicity justifications*). Note for T028 and T039: both validation calls land ahead of the `tarfile.open` call, and that order is fixed by [research R18](./research.md#r18--all-validation-must-precede-opening-the-archive)
+- [ ] T016 [US1] Register the subcommand in `src/tarx/cli.py` (depends on T015): add a third `subparsers.add_parser("create", help="create a tar archive from files and directories")` block in `build_parser` with positional `archive` (`metavar="ARCHIVE"`), positional `paths` (`metavar="PATH"`, `nargs="+"`), and `--overwrite` (`action="store_true"`) — argparse itself supplies the usage guidance and exit 2 for an invocation error (FR-029, FR-030, FR-031); add `"create": cmd_create` to `main`'s `handlers` dict so the single `except TarxError` site keeps formatting every diagnostic and choosing every status (FR-056); and update the module docstring and the parser `description` (currently `"List and extract tar archives."`) to cover three subcommands. Change nothing else in the file (FR-049)
+- [ ] T017 [US1] Run `python -m pytest -q` and confirm `tests/test_create.py` passes in full and the 001 modules still contribute `63 passed, 2 skipped` to the totals with no edits to their expectations (FR-049, SC-015)
+
+**Checkpoint**: `create` works end to end for every US1 acceptance scenario — members, naming,
+order, skipping, counting, compression, summary line. It has **no** overwrite protection and **no**
+input validation yet; those are US3 and US4.
+
+---
+
+## Phase 4: User Story 2 - Unpack what was just packed (Priority: P2)
+
+**Goal**: Every archive `create` writes, compressed or not, is readable by the existing `list` and
+extractable by the existing `extract`, round-tripping byte-identically — and the observable
+behavior of those two commands is unchanged for every input (FR-047, FR-048, FR-049).
+
+**Independent Test**: Create an archive from `source_tree`, run `python -m tarx list` on it and
+compare the output to `EXPECTED_PHOTO_MEMBERS`, then extract it into a destination that does not
+exist and compare the result tree to the original byte for byte; separately, run the pre-existing
+suite unmodified and confirm it still passes at its recorded baseline.
+
+> **File note**: plan.md assigns FR-047 … FR-049 to `tests/test_create_failures.py`, because that
+> module is where the pre-existing-suite check belongs. US2 and US4 therefore share one file, so
+> their tasks are sequential with respect to each other, not parallel.
+
+### Tests for User Story 2 ⚠️
+
+- [ ] T018 [US2] Create `tests/test_create_failures.py` with a module docstring mapping the file to FR-047 … FR-056 and a local helper `assert_clean_failure(result, status, message)` asserting stdout is empty, stderr is exactly `tarx: {message}\n` (one line, no traceback), and the exit status is `status` — the same shape `tests/test_failures.py` already uses
+- [ ] T019 [US2] Add FR-047 list round-trip tests to `tests/test_create_failures.py`: for `photos.tar` and for `photos.tar.gz` built from `source_tree`, `python -m tarx list ARCHIVE` prints exactly `EXPECTED_PHOTO_MEMBERS`, one per line, in archive order — so `photos` and `photos/empty` appear **without** a trailing separator ([research R17](./research.md#r17--directory-member-names-the-trailing-separator-and-the-archive-format)) — with empty stderr and exit 0
+- [ ] T020 [US2] Add FR-048 extract round-trip tests to `tests/test_create_failures.py`: extracting each created archive into a destination that does not yet exist reproduces every regular file at its recorded relative path with byte-identical content, recreates `photos/empty` as an empty directory, prints `extracted 5 files` — equal to the count `create` reported — and exits 0; assert the plain and gzip forms give identical results (SC-010)
+- [ ] T021 [US2] Add the FR-048 scope-restriction test to `tests/test_create_failures.py` (contract *Scope restriction on FR-048's count equality*): for an archive built from overlapping sources (`create dup.tar notes.txt notes.txt`), `create` reports `with 2 files` while `extract` reports `extracted 1 files`; assert **both** numbers so the documented divergence cannot drift silently, and reference [research R22](./research.md#r22--counting-regularfile-members-and-the-fr048-countequality-ambiguity) in the docstring
+- [ ] T022 [US2] Add the FR-049/SC-015 unchanged-behavior test to `tests/test_create_failures.py`: with the `create` subcommand registered, `python -m tarx list` and `python -m tarx extract` over the pre-existing `plain_archive`, `gzip_archive`, and `nested_archive` fixtures still produce the exact stdout, stderr, and exit statuses 001's tests assert; and `python -m tarx` with no arguments, plus `python -m tarx list` with no `ARCHIVE`, still exit 2 with `usage: tarx`-prefixed stderr (a third subparser must not change the top-level usage line, which uses `metavar="COMMAND"`). Then run `python -m pytest -q` and confirm the 001 modules pass unmodified at `63 passed, 2 skipped`
+
+**Checkpoint**: US1 and US2 both hold — archives created by this tool round-trip through its own
+reader, and the two pre-existing commands are provably untouched.
+
+---
+
+## Phase 5: User Story 3 - Never destroy an existing archive by accident (Priority: P3)
+
+**Goal**: An existing archive path is refused with exit 3 and left byte-for-byte unmodified unless
+`--overwrite` is given; an archive path that exists as a directory is refused with exit 2 either way
+(FR-043 … FR-046).
+
+**Independent Test**: Create an archive, record its bytes, run the identical command again and
+confirm exit 3, a one-line diagnostic on stderr, empty stdout, and unchanged bytes; then re-run with
+`--overwrite` from a modified source tree and confirm exit 0 and that the archive reflects the new
+tree.
+
+### Tests for User Story 3 ⚠️
+
+- [ ] T023 [US3] Create `tests/test_create_overwrite.py` with a module docstring mapping it to FR-043 … FR-046 and the FR-043 tests: with an archive already at `ARCHIVE` and no `--overwrite`, stderr is exactly `tarx: '<archive>' already exists; use --overwrite to replace it`, stdout is empty, the exit status is 3, and the file is byte-for-byte unchanged (compare `read_bytes()` before and after) — the wording is character-for-character identical to `extract`'s overwrite conflict (contract *Diagnostics*)
+- [ ] T024 [US3] Add FR-044/FR-046 tests to `tests/test_create_overwrite.py`: `--overwrite` over an archive that exists as a regular file replaces it with one built from the named paths (new member list, normal summary line, exit 0); and `--overwrite` naming an archive path that does not exist is accepted without complaint, creating the archive normally with exit 0
+- [ ] T025 [US3] Add FR-045 tests to `tests/test_create_overwrite.py`: an `ARCHIVE` that exists as a directory gives stderr exactly `tarx: cannot write archive '<archive>': is a directory` and exit 2 **both with and without** `--overwrite`, leaving the directory and its entries unmodified
+- [ ] T026 [US3] Add the A3 / [research R20](./research.md#r20--the-archive-paths-prior-existence-and-kind-exit-2-versus-exit-3) decision tests to `tests/test_create_overwrite.py`: an `ARCHIVE` that exists as a FIFO with `--overwrite` gives stderr exactly `tarx: cannot replace archive '<archive>': not a regular file` and exit 2 (honouring the flag would block on `open` rather than fail); the same FIFO **without** `--overwrite` gives exit 3, because FR-043 is explicit that *any* existing path does. Pin both halves of this documented asymmetry (plan *Constitution Check* note 2) so a future spec amendment surfaces as a failing test rather than silent drift
+
+### Implementation for User Story 3
+
+- [ ] T027 [US3] Confirm T023–T026 fail, then add `validate_archive_target(path, overwrite)` to `src/tarx/cli.py` implementing data-model rules A1 → A2 → A3 in exactly that order: **A1** `Path(path).is_dir()` → `TarxError(f"cannot write archive '{path}': is a directory", EXIT_ERROR)`; **A2** `Path(path).exists()` and not `overwrite` → `TarxError(f"'{path}' already exists; use --overwrite to replace it", EXIT_CONFLICT)`; **A3** `Path(path).exists()` and `overwrite` and not `Path(path).is_file()` → `TarxError(f"cannot replace archive '{path}': not a regular file", EXIT_ERROR)`; otherwise return, writing nothing. A1 **must** precede A2 because FR-056 gives status 2 priority over status 3, so status 3 always means "re-run with `--overwrite`"
+- [ ] T028 [US3] Insert the `validate_archive_target(args.archive, args.overwrite)` call into `cmd_create` in `src/tarx/cli.py` **before** the `tarfile.open` call (depends on T027): Phase 0 verified that `tarfile.open(path, "w")` truncates an existing archive *immediately*, so FR-043's "byte-for-byte unmodified" holds only if the check precedes the open ([research R18](./research.md#r18--all-validation-must-precede-opening-the-archive)). Then run `python -m pytest -q` and confirm `tests/test_create_overwrite.py` and the US1/US2 modules all pass
+
+**Checkpoint**: US1, US2, and US3 all hold independently — a second run can no longer destroy an
+archive, and status 3 is reserved for the one condition `--overwrite` resolves.
+
+---
+
+## Phase 6: User Story 4 - Clear, scriptable failure for unusable input (Priority: P4)
+
+**Goal**: Every unusable input produces one line on stderr naming the offending path as typed, a
+non-zero status (2, except the reserved 3), no new archive, and no uncaught traceback
+(FR-031, FR-050 … FR-056).
+
+**Independent Test**: Run the create command naming a path that does not exist alongside paths that
+do; confirm the message names the missing path, the status is 2, and no archive file was created.
+Repeat with an absolute path, a path reaching outside the current directory, and `.`.
+
+> **File note**: these tasks extend `tests/test_create_failures.py`, created in T018, so they must
+> follow Phase 4 rather than run beside it.
+
+### Tests for User Story 4 ⚠️
+
+- [ ] T029 [US4] Add FR-050/FR-051 tests to `tests/test_create_failures.py`: `create other.tar missing-folder` gives stderr exactly `tarx: cannot add 'missing-folder': No such file or directory`, empty stdout, exit 2, and `other.tar` does **not** exist; `create other.tar photos missing-folder` behaves identically even though `photos` was valid (FR-051); and an existing archive plus `--overwrite` plus one missing source gives exit **2**, not 3, with the pre-existing archive byte-for-byte unchanged (US4 scenario 3, FR-056)
+- [ ] T030 [US4] Add FR-052 containment tests to `tests/test_create_failures.py`: an absolute source path (`/etc/passwd`) and ones reaching outside (`../outside`, `a/../../outside`) each give stderr exactly `tarx: refusing to add '<path>' outside the current directory`, exit 2, and no archive — with the path shown **as typed**, not normalised; and `photos/../photos`, which normalises back inside, is accepted with exit 0 (data-model *Accepted forms*)
+- [ ] T031 [US4] Add the S3 / [research R19](./research.md#r19--sourcepath-containment-and-the-current-directory-as-a-source) decision test to `tests/test_create_failures.py`: a source path of `.` and a source path of `""` each give stderr exactly `tarx: refusing to add '<path>': not an entry inside the current directory`, exit 2, and no archive — because the current directory's relative path is empty and so has no FR-034-conformant member name. Pin this chosen behavior (plan *Constitution Check* note 1) so a future spec amendment surfaces as a failing test
+- [ ] T032 [US4] Add FR-031 invocation-error tests to `tests/test_create_failures.py`: `create other.tar` with no `PATH`, and `create other.tar photos --bogus`, each write argparse's own usage guidance containing `usage: tarx create` to stderr, exit 2, create no archive, and perform no other action
+- [ ] T033 [US4] Add the FR-053 missing-parent test to `tests/test_create_failures.py`: `create nodir/other.tar photos` gives stderr exactly `tarx: cannot write archive 'nodir/other.tar': No such file or directory` and exit 2, and `nodir` is **not** created — the archive's containing directory is never created for the user (spec *Assumptions*)
+- [ ] T034 [US4] Add the root-skipping permission tests to `tests/test_create_failures.py`, copying the guard at `tests/test_failures.py:63` verbatim (`if os.geteuid() == 0: pytest.skip("running as root: mode 0o000 does not deny access")`): an archive whose containing directory is mode `0o500` gives `tarx: cannot write archive '<archive>': Permission denied` and exit 2 (FR-053); a source file at mode `0o000` gives `tarx: cannot add '<path>': Permission denied` and exit 2 (FR-054). `<reason>` is the OS `strerror` text, capitalised as the OS supplies it ([research R24](./research.md#r24--permissiondenied-cases-are-untestable-as-root))
+- [ ] T035 [US4] Add the monkeypatched companions to `tests/test_create_failures.py` so the same two diagnostics are asserted even under root (R24: "worth adding *alongside* the skipping test, not instead of it"): call `cli.cmd_create` in-process with `tarfile.open` monkeypatched to raise `PermissionError(13, "Permission denied", <archive>)`, and again with `tarfile.TarFile.add` monkeypatched to raise `PermissionError(13, "Permission denied", <source>)`, asserting the raised `TarxError.message` and `TarxError.code == 2` in each case
+- [ ] T036 [US4] Add the FR-055/FR-056 cross-cutting tests to `tests/test_create_failures.py`: for every failure case in this module assert stderr is exactly one line, begins with `tarx: `, names the offending path as typed, and contains no `Traceback`; and assert the statuses `create` can produce are exactly `{0, 2, 3}`, with 3 occurring only for an existing archive path without `--overwrite`
+
+### Implementation for User Story 4
+
+- [ ] T037 [US4] Confirm T029–T036 fail, then add `import os` to `src/tarx/cli.py`'s import block (alphabetically, after `argparse`) and add `validate_sources(paths)` implementing data-model rules S1–S4 as **two passes over all paths** in command-line order — containment for every path first, then existence for every path: pass one raises `TarxError(f"refusing to add '{p}' outside the current directory", EXIT_ERROR)` when `posixpath.isabs(p)` (S1) or `posixpath.normpath(p)` is `".."` or starts with `"../"` (S2), and `TarxError(f"refusing to add '{p}': not an entry inside the current directory", EXIT_ERROR)` when `posixpath.normpath(p) == "."` (S3, which also covers `p == ""`); pass two raises `TarxError(f"cannot add '{p}': No such file or directory", EXIT_ERROR)` when `not os.path.lexists(p)` (S4). Purely lexical — no `Path.resolve()`, no `os.path.realpath`, no `os.access`, so a symbolic link is never followed to decide containment ([research R19](./research.md#r19--sourcepath-containment-and-the-current-directory-as-a-source))
+- [ ] T038 [US4] Add the open-time and write-pass backstop to `cmd_create` in `src/tarx/cli.py`: wrap the `tarfile.open` call and the `tar.add` loop so any `OSError` becomes a `TarxError` carrying `EXIT_ERROR`, attributed by `getattr(exc, "filename", None)` — when that filename is the archive path, or is absent, use `f"cannot write archive '{args.archive}': {reason}"`; otherwise use `f"cannot add '{filename}': {reason}"`, where `reason` is `exc.strerror or str(exc)` (contract *Diagnostics* conventions, rows A5 and S5). Never swallow the exception and never print the summary line on failure (FR-053, FR-054, FR-055), and add no temporary file, no `os.replace`, and no rollback ([research R21](./research.md#r21--failure-partway-through-writing-no-temporary-file-no-rollback))
+- [ ] T039 [US4] Insert the `validate_sources(args.paths)` call into `cmd_create` in `src/tarx/cli.py` **before** the `validate_archive_target(...)` call added in T028, and therefore before the open (depends on T037): contract *Validation order within `create`* puts steps 2–3 ahead of steps 4–6, so a run with both a bad `PATH` and an existing `ARCHIVE` reports the `PATH` and exits 2, which is what FR-056 requires. Then run `python -m pytest -q` and confirm all four new modules plus the 001 baseline pass
+
+**Checkpoint**: All four user stories hold. The validation pass writes nothing, so FR-051 is a
+structural property: everything above the `tarfile.open` call is read-only with respect to the
+filesystem.
+
+---
+
+## Phase 7: Polish & Cross-Cutting Concerns
+
+**Purpose**: The success criteria that are not individual functional requirements, plus the
+constitution's quality gates.
+
+- [ ] T040 [P] Add the SC-017 performance test to `tests/test_create.py`: build 10,000 regular files across 100 directories in a module-scoped fixture, then assert `create big.tar big` and `create big.tar.gz big` each finish inside an explicit 30-second budget and each report `with 10000 files`; follow the module-scoped-fixture and named-budget-constant style of `tests/test_performance.py` (Phase 0 measured 0.97 s plain and 1.98 s gzip for 10,001 files, a 15–30× margin — [research R23](./research.md#r23--performance-sc017))
+- [ ] T041 [P] Add the SC-012 independent-reader test to `tests/test_create_failures.py`, skipped when `/usr/bin/tar` is absent (following the `gnu_tar_dir_archive` precedent in `tests/conftest.py`): `tar -tf photos.tar` and `tar -tzf photos.tar.gz` list the same entries this tool records, with directory entries shown as `photos/` and `photos/empty/` and file names matching character for character, and `tar -xzf` reproduces byte-identical contents — document in the docstring that the trailing separator is tar's universal directory convention, not an FR-034 violation ([research R17](./research.md#r17--directory-member-names-the-trailing-separator-and-the-archive-format))
+- [ ] T042 Verify SC-016 traceability across `tests/test_create.py`, `tests/test_create_overwrite.py`, and `tests/test_create_failures.py`: every identifier FR-029 … FR-056 appears in at least one test name or docstring (e.g. `grep -o 'FR-0[2-5][0-9]' tests/test_create*.py | sort -u`); list any uncovered identifier and add the missing test
+- [ ] T043 Review `src/tarx/cli.py` against Constitution Principle IV and FR-049: confirm exactly four new functions (`archive_mode`, `validate_sources`, `validate_archive_target`, `cmd_create`), no new class, no new module, no new runtime dependency, and no configuration surface; confirm with `git diff src/tarx/cli.py` that `cmd_list`, `cmd_extract`, `open_archive`, `read_failure`, `write_failure`, `build_plan`, `write_members`, `escapes_destination`, `validate_destination`, `member_target`, `needed_parents`, `TarxError`, and the `EXIT_*` constants are untouched, and that the only other edits are the module docstring, the parser `description`, the `create` subparser block, and the `handlers` entry
+- [ ] T044 Add docstrings to the four new functions in `src/tarx/cli.py` in the existing module's style — each citing the requirement identifiers it satisfies and the research decision behind it: R12 for `archive_mode`, R16 and R22 for `cmd_create`'s `classify` filter and integer counter, R18 and R19 for `validate_sources`, R18 and R20 for `validate_archive_target`
+- [ ] T045 Walk Scenarios 1–7 of `specs/002-create-command/quickstart.md` by hand from a scratch directory with `PYTHONPATH="$PWD/src"`, confirming every stated output, exit status, and side effect — including that `nodir` is never created, that `guard.tar`'s checksum survives both the exit-3 run and the exit-2 `--overwrite`-with-missing-source run, and that `list hollow.tar` prints `hollow`
+- [ ] T046 Run `python -m pytest -q` from the repository root one final time and confirm: zero failures, the 001 tests passing with their original expectations and zero edits (FR-049, SC-015), and the only skips being root-only or missing-`tar` ones; then tick every box in the *Acceptance checklist* at the end of `specs/002-create-command/quickstart.md`
+
+---
+
+## Dependencies & Execution Order
+
+### Phase Dependencies
+
+- **Setup (Phase 1)**: No dependencies — start immediately
+- **Foundational (Phase 2)**: Depends on Setup — BLOCKS all user stories (every story's tests need the source-tree fixtures)
+- **User Story 1 (Phase 3)**: Depends on Phase 2. Delivers `cmd_create`, `archive_mode`, and the parser registration
+- **User Story 2 (Phase 4)**: Depends on US1 — there is nothing to round-trip until `create` produces an archive. The spec itself says US2 "builds on P1"
+- **User Story 3 (Phase 5)**: Depends on US1 (inserts a call into `cmd_create`). Independent of US2 and US4
+- **User Story 4 (Phase 6)**: Depends on US1 (inserts a call into `cmd_create`) and on T018 from Phase 4, which creates the shared test module. Independent of US3
+- **Polish (Phase 7)**: Depends on all four stories
+
+### Story independence, honestly stated
+
+US1 is the only story that is independent in the strong sense. US2, US3, and US4 each **harden or
+verify** the command US1 delivers, which is what the spec's own priority rationale says ("Everything
+else in this specification protects or verifies this behavior"). Each is still an independently
+*testable* and independently *deliverable* increment: its test module passes or fails on its own,
+and stopping after any of them leaves a coherent tool.
+
+### The one ordering constraint that is not negotiable
+
+Inside `cmd_create`, the final call order **must** be:
+
+```text
+validate_sources(args.paths)                          # T039  (US4)
+validate_archive_target(args.archive, args.overwrite) # T028  (US3)
+tarfile.open(args.archive, archive_mode(...))         # T015  (US1)
+```
+
+`tarfile.open(path, "w")` truncates an existing file immediately — Phase 0 watched a 140-byte
+archive become 0 bytes while the following `add` failed. Any other order violates FR-043, FR-050,
+and FR-051 ([research R18](./research.md#r18--all-validation-must-precede-opening-the-archive)).
+T028 and T039 each insert one line; neither may be placed after the open.
+
+### Within Each User Story
+
+- Tests are written first and MUST FAIL before the implementation task (T013, T027, T037 are the explicit gates)
+- `archive_mode` before `cmd_create` (T014 → T015); `cmd_create` before the parser registration (T015 → T016)
+- Each validation helper before the call site that uses it (T027 → T028, T037 → T039)
+- Story complete and suite green before moving to the next priority
+
+### Parallel Opportunities
+
+- T001 and T002 (Phase 1) are independent read-only checks
+- T040 (`tests/test_create.py`) and T041 (`tests/test_create_failures.py`) touch different files with no shared state
+- Once Phase 3 is complete, **US3 (Phase 5) and US4 (Phase 6) can proceed in parallel** by different developers: their test modules are different files, and their two one-line insertions into `cmd_create` touch adjacent but distinct lines — coordinate only on the fixed order above
+- Within a phase, most tasks are sequential because they append to a single file: `tests/conftest.py` (T003, T004), `tests/test_create.py` (T005–T012), `tests/test_create_overwrite.py` (T023–T026), `tests/test_create_failures.py` (T018–T022, T029–T036), and `src/tarx/cli.py` (every implementation task). Marking these `[P]` would invite edit conflicts, so they are not marked
+
+---
+
+## Parallel Example: US3 and US4 after the MVP
+
+```bash
+# Developer A — overwrite protection (Phase 5)
+Task: "Create tests/test_create_overwrite.py with the FR-043 exit-3 tests"        # T023
+Task: "Add validate_archive_target(path, overwrite) to src/tarx/cli.py"           # T027
+
+# Developer B — failure reporting (Phase 6)
+Task: "Add FR-050/FR-051 tests to tests/test_create_failures.py"                  # T029
+Task: "Add validate_sources(paths) to src/tarx/cli.py"                            # T037
+
+# Then serialize the two one-line insertions into cmd_create, sources first:
+Task: "Insert validate_sources before validate_archive_target before the open"    # T039, T028
+```
+
+```bash
+# Polish, genuinely parallel — different files:
+Task: "SC-017 performance test in tests/test_create.py"                           # T040
+Task: "SC-012 independent-reader test in tests/test_create_failures.py"           # T041
+```
+
+---
+
+## Implementation Strategy
+
+### MVP First (User Story 1 only)
+
+1. Phase 1: Setup — pin the `63 passed, 2 skipped` baseline
+2. Phase 2: Foundational — source-tree fixtures (CRITICAL: blocks all stories)
+3. Phase 3: User Story 1 — `create` packs, names, orders, skips, counts, compresses, reports
+4. **STOP and VALIDATE**: `tests/test_create.py` green, 001 baseline untouched, quickstart Scenario 1 walked by hand
+5. Usable at this point: it creates archives correctly. It will happily clobber an existing archive and will traceback on a missing source path — which is exactly what US3 and US4 fix
+
+### Incremental Delivery
+
+1. Setup + Foundational → test infrastructure ready
+2. Add US1 → validate → **MVP**: `create` works for well-formed input
+3. Add US2 → validate → the round trip through `list`/`extract` is proven, and the two existing commands are proven unchanged
+4. Add US3 → validate → an existing archive can no longer be destroyed by accident
+5. Add US4 → validate → every unusable input fails loudly, scriptably, and leaves nothing behind
+6. Polish → SC-012, SC-016, SC-017 and the constitution's quality gates
+
+### Parallel Team Strategy
+
+1. Phases 1–3 together (they are a single short chain, and everything downstream depends on them)
+2. Then split: Developer A takes Phase 5 (US3), Developer B takes Phase 6 (US4), Developer C takes Phase 4 (US2)
+3. Serialize only the two one-line insertions into `cmd_create`, in the order fixed above
+4. Reconvene for Phase 7
+
+---
+
+## Notes
+
+- `[P]` tasks touch different files and share no state
+- `[Story]` labels map each task to a spec user story for SC-016 traceability
+- Tests are **not** optional here: Constitution Principle III and SC-016 require a failing-when-unmet test per FR-029 … FR-056, and Principle II requires every error-path test to assert **both** the diagnostic and the exit status, never merely "it failed"
+- Diagnostic strings in the task descriptions are quoted verbatim from `contracts/create-contract.md` *Diagnostics*; assert them exactly, with the offending path shown as the user typed it
+- Three tasks pin decisions this plan made where the specification is silent or self-conflicting, so an amendment surfaces as a failing test rather than silent drift: **T031** (`.` as a source path, R19), **T026** (`--overwrite` onto a non-regular file, R20), **T021** (FR-048's count-equality scope, R22)
+- Do not modify any pre-existing test file. FR-049 and SC-015 are verified by running them unmodified
+- Commit after each task or logical group; stop at any checkpoint to validate a story independently
+- Avoid: adding an `os.walk` traversal, a sort, a self-exclusion check, a de-duplication step, a temp-file-and-rename, a new module, or a new exception type — each was explicitly rejected in research R13, R14, R15, R21, and R25
