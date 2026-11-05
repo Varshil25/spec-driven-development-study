@@ -9,8 +9,8 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R024 | | T-QCOUNT-01 | unstructured | | | | | Java mechanics check |
 | R025 | | T-QCOUNT-01 | sdd_clarify | | | | | Java mechanics check |
 | R004 | 2026-11-04 | T-ACCOUNTS-01 | sdd_secure | OK | 0 | no | ok | operated by Claude; no questions, 5 LISTED; implement session interrupted when the operator's workspace restarted, resumed with the fixed message (1 RESUME; gap 2.8 min, inside active time); 65.7 min active, 17.2M tokens; Claude Code cost $10.00 excludes the interrupted call |
-| R004C | | T-ACCOUNTS-01-CR | sdd_secure | | | | | change request on R004 |
-| R005 | | T-TARX-01 | sdd | | | | |  |
+| R004C | 2026-11-04 | T-ACCOUNTS-01-CR | sdd_secure | OK | 0 | no | ok | change request on R004; operated by Claude; no questions, 3 LISTED; implement stopped at the account's 5-hour usage limit and was resumed with the fixed message after it reset (1 RESUME, about 43 min wait, inside active time); Claude Code cost $29.64 |
+| R005 | 2026-11-04 | T-TARX-01 | sdd | OK | 0 | no | ok | operated by Claude; 1 question (implement, NOPREF), 5 LISTED; agent edited data-model.md during implement; Claude Code cost $22.03 |
 | R005C | | T-TARX-01-CR | sdd | | | | | change request on R005 |
 | R006 | | T-REDACT-01 | sdd_secure | | | | |  |
 | R006C | | T-REDACT-01-CR | sdd_secure | | | | | change request on R006 |
