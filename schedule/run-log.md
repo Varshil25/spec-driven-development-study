@@ -13,7 +13,7 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R005 | 2026-11-04 | T-TARX-01 | sdd | OK | 0 | no | ok | operated by Claude; 1 question (implement, NOPREF), 5 LISTED; agent edited data-model.md during implement; Claude Code cost $22.03 |
 | R005C | 2026-11-05 | T-TARX-01-CR | sdd | OK | 0 | no | ok | change request on R005; operated by Claude; no questions, 4 LISTED; Claude Code cost $12.94 |
 | R006 | 2026-11-09 | T-REDACT-01 | sdd_secure | OK | 0 | no | ok | operated by Claude; 1 SAFETY (specify), 1 answer I1 (plan), 5 LISTED; plan session interrupted twice (usage limit 5 Nov, then workspace stops) and resumed 9 Nov with the fixed message: plan-phase and total active time include the idle gaps and are NOT usable; tokens and turns are; Claude Code cost $26.20 |
-| R006C | | T-REDACT-01-CR | sdd_secure | | | | | change request on R006 |
+| R006C | 2026-11-09 | T-REDACT-01-CR | sdd_secure | OK | 0 | no | ok | change request on R006; operated by Claude; no questions, 4 LISTED; agent edited the original feature's plan.md; Claude Code cost $17.96 |
 | R007 | | T-PASTE-01 | sdd_clarify | | | | |  |
 | R007C | | T-PASTE-01-CR | sdd_clarify | | | | | change request on R007 |
 | R008 | | T-BOOKMARKS-01 | unstructured | | | | |  |
