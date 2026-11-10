@@ -1,0 +1,608 @@
+diff --git a/src/bookmarks/__init__.py b/src/bookmarks/__init__.py
+new file mode 100644
+index 0000000..53674d6
+--- /dev/null
++++ b/src/bookmarks/__init__.py
+@@ -0,0 +1,5 @@
++"""A small command-line bookmark manager backed by SQLite."""
++
++__all__ = ["__version__"]
++
++__version__ = "1.0.0"
+diff --git a/src/bookmarks/__main__.py b/src/bookmarks/__main__.py
+new file mode 100644
+index 0000000..9743b6f
+--- /dev/null
++++ b/src/bookmarks/__main__.py
+@@ -0,0 +1,8 @@
++"""Entry point so that the package runs as ``python -m bookmarks``."""
++
++import sys
++
++from .cli import main
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/bookmarks/cli.py b/src/bookmarks/cli.py
+new file mode 100644
+index 0000000..b2a63de
+--- /dev/null
++++ b/src/bookmarks/cli.py
+@@ -0,0 +1,120 @@
++"""Command-line interface for the bookmark manager."""
++
++from __future__ import annotations
++
++import argparse
++import csv
++import json
++import sqlite3
++import sys
++from typing import Sequence
++
++from .storage import Bookmark, Store, parse_tags
++
++DEFAULT_DB = "bookmarks.db"
++ALLOWED_SCHEMES = ("http://", "https://")
++
++EXIT_OK = 0
++EXIT_ERROR = 1
++EXIT_BAD_URL = 2
++EXIT_NO_SUCH_BOOKMARK = 3
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        prog="python -m bookmarks",
++        description="Store and query bookmarks in an SQLite database.",
++    )
++    parser.add_argument(
++        "--db",
++        metavar="PATH",
++        default=DEFAULT_DB,
++        help=f"database file to use (default: {DEFAULT_DB})",
++    )
++    commands = parser.add_subparsers(dest="command", metavar="COMMAND")
++    commands.required = True
++
++    add = commands.add_parser("add", help="add a bookmark and print its id")
++    add.add_argument("url", metavar="URL")
++    add.add_argument("--title", default="", help="bookmark title (default: empty)")
++    add.add_argument("--tags", default="", help="comma-separated tags, e.g. python,cli")
++
++    listing = commands.add_parser("list", help="list bookmarks")
++    listing.add_argument("--tag", help="only bookmarks carrying this tag")
++
++    search = commands.add_parser("search", help="search titles and urls")
++    search.add_argument("text", metavar="TEXT")
++
++    delete = commands.add_parser("delete", help="delete a bookmark by id")
++    delete.add_argument("id", metavar="ID", type=int)
++
++    export = commands.add_parser("export", help="export every bookmark")
++    export.add_argument("--format", required=True, choices=("csv", "json"))
++
++    return parser
++
++
++def main(argv: Sequence[str] | None = None) -> int:
++    parser = build_parser()
++    args = parser.parse_args(argv)
++
++    try:
++        with Store(args.db) as store:
++            return dispatch(args, store)
++    except sqlite3.Error as exc:
++        print(f"error: could not use database {args.db!r}: {exc}", file=sys.stderr)
++        return EXIT_ERROR
++    except BrokenPipeError:  # e.g. piping into `head`
++        return EXIT_OK
++
++
++def dispatch(args: argparse.Namespace, store: Store) -> int:
++    if args.command == "add":
++        return cmd_add(args, store)
++    if args.command == "list":
++        return print_lines(store.all(args.tag))
++    if args.command == "search":
++        return print_lines(store.search(args.text))
++    if args.command == "delete":
++        return cmd_delete(args, store)
++    if args.command == "export":
++        return cmd_export(args, store)
++    raise AssertionError(f"unhandled command {args.command!r}")
++
++
++def cmd_add(args: argparse.Namespace, store: Store) -> int:
++    if not args.url.startswith(ALLOWED_SCHEMES):
++        print(
++            f"error: url must start with http:// or https://: {args.url}",
++            file=sys.stderr,
++        )
++        return EXIT_BAD_URL
++    bookmark_id = store.add(args.url, args.title, parse_tags(args.tags))
++    print(bookmark_id)
++    return EXIT_OK
++
++
++def cmd_delete(args: argparse.Namespace, store: Store) -> int:
++    if not store.delete(args.id):
++        print(f"error: no bookmark with id {args.id}", file=sys.stderr)
++        return EXIT_NO_SUCH_BOOKMARK
++    return EXIT_OK
++
++
++def cmd_export(args: argparse.Namespace, store: Store) -> int:
++    bookmarks = store.all()
++    if args.format == "csv":
++        writer = csv.writer(sys.stdout, lineterminator="\n")
++        writer.writerow(("id", "url", "title", "tags"))
++        writer.writerows(bookmark.as_row() for bookmark in bookmarks)
++    else:
++        json.dump([bookmark.as_dict() for bookmark in bookmarks], sys.stdout, indent=2)
++        print()
++    return EXIT_OK
++
++
++def print_lines(bookmarks: list[Bookmark]) -> int:
++    """Print one tab-separated line per bookmark."""
++    for bookmark in bookmarks:
++        print("\t".join(bookmark.as_row()))
++    return EXIT_OK
+diff --git a/src/bookmarks/storage.py b/src/bookmarks/storage.py
+new file mode 100644
+index 0000000..079e2a4
+--- /dev/null
++++ b/src/bookmarks/storage.py
+@@ -0,0 +1,158 @@
++"""SQLite persistence for bookmarks.
++
++A bookmark is a row in ``bookmarks`` plus zero or more rows in ``tags``.
++Ids are assigned by SQLite with ``AUTOINCREMENT`` so that they start at 1
++and keep increasing even after the most recent bookmark is deleted.
++"""
++
++from __future__ import annotations
++
++import sqlite3
++from dataclasses import dataclass, field
++from pathlib import Path
++from typing import Iterable, Iterator
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS bookmarks (
++    id    INTEGER PRIMARY KEY AUTOINCREMENT,
++    url   TEXT NOT NULL,
++    title TEXT NOT NULL DEFAULT ''
++);
++
++CREATE TABLE IF NOT EXISTS tags (
++    bookmark_id INTEGER NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE,
++    tag         TEXT NOT NULL,
++    PRIMARY KEY (bookmark_id, tag)
++);
++
++CREATE INDEX IF NOT EXISTS tags_by_tag ON tags(tag);
++"""
++
++
++@dataclass(frozen=True)
++class Bookmark:
++    """One stored bookmark, with its tags in alphabetical order."""
++
++    id: int
++    url: str
++    title: str = ""
++    tags: tuple[str, ...] = field(default=())
++
++    @property
++    def tag_string(self) -> str:
++        """The tags joined with commas, alphabetically."""
++        return ",".join(self.tags)
++
++    def as_row(self) -> tuple[str, str, str, str]:
++        """The four fields used by ``list``, ``search`` and CSV output."""
++        return (str(self.id), self.url, self.title, self.tag_string)
++
++    def as_dict(self) -> dict[str, object]:
++        """The JSON shape: a numeric id and the tags as a list."""
++        return {
++            "id": self.id,
++            "url": self.url,
++            "title": self.title,
++            "tags": list(self.tags),
++        }
++
++
++def parse_tags(raw: str | None) -> tuple[str, ...]:
++    """Turn a comma-separated string such as ``"python, cli"`` into tags.
++
++    Surrounding whitespace is stripped, empty entries are dropped and
++    duplicates are collapsed.  The result is sorted alphabetically.
++    """
++    if not raw:
++        return ()
++    seen = {tag.strip() for tag in raw.split(",")}
++    seen.discard("")
++    return tuple(sorted(seen))
++
++
++class Store:
++    """A bookmark database.  Use it as a context manager."""
++
++    def __init__(self, path: str | Path) -> None:
++        self.path = str(path)
++        self._conn = sqlite3.connect(self.path)
++        self._conn.row_factory = sqlite3.Row
++        self._conn.execute("PRAGMA foreign_keys = ON")
++        with self._conn:
++            self._conn.executescript(SCHEMA)
++
++    def __enter__(self) -> "Store":
++        return self
++
++    def __exit__(self, *exc_info: object) -> None:
++        self.close()
++
++    def close(self) -> None:
++        self._conn.close()
++
++    def add(self, url: str, title: str = "", tags: Iterable[str] = ()) -> int:
++        """Store a bookmark and return its new id."""
++        tags = sorted(set(tags))
++        with self._conn:
++            cursor = self._conn.execute(
++                "INSERT INTO bookmarks (url, title) VALUES (?, ?)", (url, title)
++            )
++            bookmark_id = int(cursor.lastrowid)
++            self._conn.executemany(
++                "INSERT INTO tags (bookmark_id, tag) VALUES (?, ?)",
++                [(bookmark_id, tag) for tag in tags],
++            )
++        return bookmark_id
++
++    def delete(self, bookmark_id: int) -> bool:
++        """Delete a bookmark; return whether it existed."""
++        with self._conn:
++            cursor = self._conn.execute(
++                "DELETE FROM bookmarks WHERE id = ?", (bookmark_id,)
++            )
++        return cursor.rowcount > 0
++
++    def all(self, tag: str | None = None) -> list[Bookmark]:
++        """Every bookmark ordered by id, or only those carrying ``tag``."""
++        if tag is None:
++            rows = self._conn.execute(
++                "SELECT id, url, title FROM bookmarks ORDER BY id"
++            ).fetchall()
++        else:
++            rows = self._conn.execute(
++                "SELECT b.id, b.url, b.title FROM bookmarks AS b "
++                "JOIN tags AS t ON t.bookmark_id = b.id "
++                "WHERE t.tag = ? ORDER BY b.id",
++                (tag,),
++            ).fetchall()
++        return list(self._with_tags(rows))
++
++    def search(self, text: str) -> list[Bookmark]:
++        """Bookmarks whose title or url contains ``text``, ignoring case."""
++        needle = text.casefold()
++        return [
++            bookmark
++            for bookmark in self.all()
++            if needle in bookmark.title.casefold()
++            or needle in bookmark.url.casefold()
++        ]
++
++    def _with_tags(self, rows: Iterable[sqlite3.Row]) -> Iterator[Bookmark]:
++        """Attach each row's tags, using a single extra query."""
++        rows = list(rows)
++        if not rows:
++            return
++        tags: dict[int, list[str]] = {row["id"]: [] for row in rows}
++        placeholders = ",".join("?" * len(tags))
++        for tag_row in self._conn.execute(
++            f"SELECT bookmark_id, tag FROM tags WHERE bookmark_id IN ({placeholders})",
++            tuple(tags),
++        ):
++            tags[tag_row["bookmark_id"]].append(tag_row["tag"])
++        for row in rows:
++            yield Bookmark(
++                id=row["id"],
++                url=row["url"],
++                title=row["title"],
++                tags=tuple(sorted(tags[row["id"]])),
++            )
+diff --git a/tests/test_bookmarks.py b/tests/test_bookmarks.py
+new file mode 100644
+index 0000000..fa5ee0a
+--- /dev/null
++++ b/tests/test_bookmarks.py
+@@ -0,0 +1,287 @@
++"""End-to-end tests for the bookmarks CLI.
++
++Each test drives the real command line (``python -m bookmarks``) in a
++temporary directory, so exit statuses and stream separation are covered
++exactly as a user would see them.
++"""
++
++from __future__ import annotations
++
++import csv
++import io
++import json
++import os
++import subprocess
++import sys
++from pathlib import Path
++
++import pytest
++
++SRC = Path(__file__).resolve().parents[1] / "src"
++TAB = "\t"
++
++
++@pytest.fixture
++def run(tmp_path):
++    """Return a helper that runs the CLI inside a fresh temporary cwd."""
++    env = dict(os.environ)
++    existing = env.get("PYTHONPATH")
++    env["PYTHONPATH"] = str(SRC) + (os.pathsep + existing if existing else "")
++
++    def _run(*args: str) -> subprocess.CompletedProcess:
++        return subprocess.run(
++            [sys.executable, "-m", "bookmarks", *args],
++            cwd=tmp_path,
++            env=env,
++            capture_output=True,
++            text=True,
++        )
++
++    _run.tmp_path = tmp_path
++    return _run
++
++
++@pytest.fixture
++def db(run):
++    """A helper bound to an explicit ``--db`` path."""
++
++    def _db(*args: str) -> subprocess.CompletedProcess:
++        return run("--db", "b.db", *args)
++
++    return _db
++
++
++def ok(result: subprocess.CompletedProcess) -> str:
++    assert result.returncode == 0, result.stderr
++    return result.stdout
++
++
++# --- add ----------------------------------------------------------------
++
++
++def test_add_prints_ids_starting_at_one(db):
++    assert ok(db("add", "https://a.example")) == "1\n"
++    assert ok(db("add", "http://b.example")) == "2\n"
++    assert ok(db("add", "https://c.example")) == "3\n"
++
++
++@pytest.mark.parametrize(
++    "url",
++    ["ftp://example.com", "example.com", "javascript:alert(1)", "", "//example.com"],
++)
++def test_add_rejects_non_http_urls(db, url):
++    result = db("add", url)
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert result.stderr.strip() != ""
++
++
++def test_rejected_url_is_not_stored(db):
++    db("add", "ftp://example.com")
++    assert ok(db("list")) == ""
++    assert ok(db("add", "https://a.example")) == "1\n"
++
++
++def test_title_defaults_to_empty_and_tags_optional(db):
++    db("add", "https://a.example")
++    assert ok(db("list")) == f"1{TAB}https://a.example{TAB}{TAB}\n"
++
++
++# --- list ---------------------------------------------------------------
++
++
++def test_list_is_ordered_by_id_with_sorted_tags(db):
++    db("add", "https://docs.python.org", "--title", "Python docs",
++       "--tags", "python,docs")
++    db("add", "https://example.com")
++    assert ok(db("list")) == (
++        f"1{TAB}https://docs.python.org{TAB}Python docs{TAB}docs,python\n"
++        f"2{TAB}https://example.com{TAB}{TAB}\n"
++    )
++
++
++def test_list_filters_by_tag(db):
++    db("add", "https://a.example", "--title", "A", "--tags", "python,cli")
++    db("add", "https://b.example", "--title", "B", "--tags", "docs")
++    db("add", "https://c.example", "--title", "C", "--tags", "cli")
++    assert ok(db("list", "--tag", "cli")) == (
++        f"1{TAB}https://a.example{TAB}A{TAB}cli,python\n"
++        f"3{TAB}https://c.example{TAB}C{TAB}cli\n"
++    )
++    assert ok(db("list", "--tag", "nothing")) == ""
++
++
++def test_list_on_empty_database_succeeds(db):
++    assert ok(db("list")) == ""
++
++
++def test_tags_are_trimmed_deduplicated_and_blanks_dropped(db):
++    db("add", "https://a.example", "--tags", " python , docs ,, python,")
++    assert ok(db("list")).endswith(f"{TAB}docs,python\n")
++
++
++# --- search -------------------------------------------------------------
++
++
++def test_search_is_case_insensitive_over_title_and_url(db):
++    db("add", "https://docs.python.org", "--title", "Python docs",
++       "--tags", "python,docs")
++    db("add", "https://example.com", "--title", "Example")
++    expected = f"1{TAB}https://docs.python.org{TAB}Python docs{TAB}docs,python\n"
++    assert ok(db("search", "PYTHON")) == expected
++    assert ok(db("search", "python")) == expected
++    assert ok(db("search", "DOCS.PYTHON")) == expected  # matches the url
++    assert ok(db("search", "exam")) == f"2{TAB}https://example.com{TAB}Example{TAB}\n"
++
++
++def test_search_orders_by_id_and_can_match_nothing(db):
++    for host in ("c", "a", "b"):
++        db("add", f"https://{host}.example", "--title", "shared")
++    assert [line.split(TAB)[0] for line in ok(db("search", "shared")).splitlines()] == [
++        "1",
++        "2",
++        "3",
++    ]
++    assert ok(db("search", "absent")) == ""
++
++
++# --- delete -------------------------------------------------------------
++
++
++def test_delete_removes_bookmark(db):
++    db("add", "https://a.example")
++    db("add", "https://b.example")
++    assert ok(db("delete", "1")) == ""
++    assert ok(db("list")) == f"2{TAB}https://b.example{TAB}{TAB}\n"
++
++
++def test_delete_unknown_id_exits_three(db):
++    db("add", "https://a.example")
++    result = db("delete", "99")
++    assert result.returncode == 3
++    assert result.stdout == ""
++    assert result.stderr.strip() != ""
++
++
++def test_delete_twice_reports_missing(db):
++    db("add", "https://a.example")
++    assert db("delete", "1").returncode == 0
++    assert db("delete", "1").returncode == 3
++
++
++def test_ids_keep_increasing_after_delete(db):
++    db("add", "https://a.example")
++    db("add", "https://b.example")
++    db("delete", "2")
++    assert ok(db("add", "https://c.example")) == "3\n"
++
++
++def test_delete_removes_tags_so_they_stop_matching(db):
++    db("add", "https://a.example", "--tags", "python")
++    db("delete", "1")
++    db("add", "https://b.example")
++    assert ok(db("list", "--tag", "python")) == ""
++    assert ok(db("export", "--format", "json")).count("python") == 0
++
++
++# --- export -------------------------------------------------------------
++
++
++def test_export_csv(db):
++    db("add", "https://docs.python.org", "--title", "Python docs",
++       "--tags", "python,docs")
++    db("add", "https://example.com")
++    rows = list(csv.reader(io.StringIO(ok(db("export", "--format", "csv")))))
++    assert rows == [
++        ["id", "url", "title", "tags"],
++        ["1", "https://docs.python.org", "Python docs", "docs,python"],
++        ["2", "https://example.com", "", ""],
++    ]
++
++
++def test_export_csv_header_only_when_empty(db):
++    assert ok(db("export", "--format", "csv")).splitlines() == ["id,url,title,tags"]
++
++
++def test_export_csv_quotes_commas_and_titles(db):
++    db("add", "https://a.example", "--title", 'He said "hi", loudly',
++       "--tags", "b,a")
++    rows = list(csv.reader(io.StringIO(ok(db("export", "--format", "csv")))))
++    assert rows[1] == ["1", "https://a.example", 'He said "hi", loudly', "a,b"]
++
++
++def test_export_json(db):
++    db("add", "https://docs.python.org", "--title", "Python docs",
++       "--tags", "python,docs")
++    db("add", "https://example.com")
++    assert json.loads(ok(db("export", "--format", "json"))) == [
++        {
++            "id": 1,
++            "url": "https://docs.python.org",
++            "title": "Python docs",
++            "tags": ["docs", "python"],
++        },
++        {"id": 2, "url": "https://example.com", "title": "", "tags": []},
++    ]
++
++
++def test_export_json_empty_is_empty_array(db):
++    assert json.loads(ok(db("export", "--format", "json"))) == []
++
++
++def test_export_requires_a_known_format(db):
++    assert db("export").returncode != 0
++    assert db("export", "--format", "yaml").returncode != 0
++
++
++# --- database handling --------------------------------------------------
++
++
++def test_default_database_is_created_in_cwd(run):
++    assert ok(run("add", "https://a.example")) == "1\n"
++    assert (run.tmp_path / "bookmarks.db").is_file()
++
++
++def test_bookmarks_persist_between_runs_and_databases_are_separate(run):
++    ok(run("--db", "one.db", "add", "https://one.example"))
++    ok(run("--db", "two.db", "add", "https://two.example"))
++    assert ok(run("--db", "one.db", "list")) == f"1{TAB}https://one.example{TAB}{TAB}\n"
++    assert ok(run("--db", "two.db", "list")) == f"1{TAB}https://two.example{TAB}{TAB}\n"
++
++
++def test_database_in_nested_missing_directory_reports_error(run):
++    result = run("--db", "no/such/dir/b.db", "add", "https://a.example")
++    assert result.returncode != 0
++    assert result.stderr.strip() != ""
++
++
++def test_unknown_command_fails(run):
++    assert run("frobnicate").returncode != 0
++    assert run().returncode != 0
++
++
++# --- unicode / odd input ------------------------------------------------
++
++
++def test_search_handles_unicode_case_folding(db):
++    db("add", "https://a.example", "--title", "Straße Übung")
++    assert ok(db("search", "übung")).startswith("1" + TAB)
++
++
++def test_title_and_tags_with_unicode_round_trip(db):
++    db("add", "https://a.example", "--title", "日本語", "--tags", "日本,語")
++    assert ok(db("list")) == f"1{TAB}https://a.example{TAB}日本語{TAB}日本,語\n"
++
++
++# --- storage unit tests -------------------------------------------------
++
++
++def test_parse_tags():
++    sys.path.insert(0, str(SRC))
++    from bookmarks.storage import parse_tags
++
++    assert parse_tags(None) == ()
++    assert parse_tags("") == ()
++    assert parse_tags(",,") == ()
++    assert parse_tags("b,a") == ("a", "b")
++    assert parse_tags(" b , a , a ") == ("a", "b")
