@@ -1,0 +1,336 @@
+# Tasks: Burn After Reading and Password Protection
+
+**Input**: Design documents from `/specs/002-burn-after-reading-password/`
+
+**Prerequisites**: [plan.md](./plan.md), [spec.md](./spec.md), [research.md](./research.md), [data-model.md](./data-model.md), [contracts/](./contracts/)
+
+**Tests**: Test tasks are **included and mandatory**. Constitution Principle III requires every
+functional requirement to map to a named `pytest` test, SC-020 makes that an asserted outcome, and
+[data-model.md](./data-model.md#requirement-to-test-map) already fixes the test names. Tests are
+written before the implementation they cover, per the constitution's Development Workflow step 2.
+
+**Organization**: Tasks are grouped by user story so each story can be implemented, tested, and
+delivered independently.
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: Can run in parallel (different files, no dependencies)
+- **[Story]**: Which user story this task belongs to (US1, US2, US3)
+- Exact file paths are in every description
+
+## Path Conventions
+
+This feature extends an existing single-package project (plan.md → Project Type). Paths are
+repository-root relative: runtime code in `src/pastebin/`, tests in `tests/`. **No new runtime
+module is created** — the feature lands in `src/pastebin/store.py` and `src/pastebin/server.py`.
+
+## Files Touched
+
+| File | Change | Phases |
+|------|--------|--------|
+| `src/pastebin/store.py` | M — constants, record schema, derivation, durable removal, claim | 1, 2, 3, 4 |
+| `src/pastebin/server.py` | M — validation, password gate, claim ordering, two report flags | 3, 4, 5 |
+| `tests/test_burn.py` | A — FR-045…FR-053 | 3, 4 |
+| `tests/test_password.py` | A — FR-054…FR-063, FR-072…FR-074 | 4 |
+| `tests/test_flags.py` | A — FR-064…FR-066 | 5 |
+| `tests/test_compatibility.py` | A — FR-067…FR-071 | 6 |
+| `README.md` | M — the two options, the header, the two flags, the new ceiling | 6 |
+| `tests/conftest.py` and feature 001's eleven test modules | **UNCHANGED — editing one is a failure, not a fix** (FR-068, SC-018) | — |
+
+---
+
+## Phase 1: Setup (Shared Infrastructure)
+
+**Purpose**: Establish the pre-change baseline and the two numeric constants everything else reads.
+
+- [X] T001 Record the pre-change baseline: run `python3 -m pytest` from the repository root and confirm every feature 001 test module passes; capture the output. This green run is the reference for FR-068/SC-018, and from here on no file listed as unchanged in the Files Touched table above may be edited.
+- [X] T002 Add `MIN_PASSWORD_CHARS = 1` and `MAX_PASSWORD_CHARS = 128` beside `MAX_CONTENT_BYTES` in `src/pastebin/store.py`, with a comment recording that the bound is "a string of 1 to 128 characters inclusive, counted in characters" — not encoded bytes (FR-054).
+- [X] T003 Recompute `MAX_BODY_BYTES` in `src/pastebin/store.py` from `6 * MAX_CONTENT_BYTES + 1_024` to `6 * MAX_CONTENT_BYTES + 12 * MAX_PASSWORD_CHARS + 1_024` (394,240 → 395,776), keeping it a module-level constant independent of any length the caller declares, and update its docstring/comment with research.md R-09's derivation (12 output bytes per password character, worst case an escaped surrogate pair). Depends on T002.
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**Purpose**: The stored record's new shape, its validation, its derivation helpers, and durable
+removal. Both US1 and US2 persist through `create_paste` and `_validate_record`, so this phase
+blocks both.
+
+**⚠️ CRITICAL**: No user story work can begin until this phase is complete.
+
+**Note on scope**: `hash_password`/`password_matches` live here rather than in Phase 4 because they
+are part of the record's *encoding*, which is what `store` owns (plan.md → Structure Decision), and
+because `_validate_record` must validate what they write. Their requirement tests (FR-056, FR-061,
+FR-073) are in Phase 4, where the behaviour becomes observable.
+
+- [X] T004 In `src/pastebin/store.py`, replace `RECORD_KEYS` with `REQUIRED_RECORD_KEYS = frozenset({"id", "content", "created_at", "expires_at", "delete_token"})` and `OPTIONAL_RECORD_KEYS = frozenset({"burn_after_reading", "password"})`.
+- [X] T005 In `_validate_record` in `src/pastebin/store.py`, change the key-set rule: all five `REQUIRED_RECORD_KEYS` MUST be present, and any key outside `REQUIRED_RECORD_KEYS | OPTIONAL_RECORD_KEYS` makes the record damaged — so feature 001's extra-key rule and its `surprise`-key test still hold (FR-068). Keep the existing `StoreCorrupt` diagnostic naming the missing and unexpected keys. Depends on T004.
+- [X] T006 In `_validate_record` in `src/pastebin/store.py`, add the `burn_after_reading` rule: absent is valid and means `False` (FR-067); when present it MUST be a boolean (`type(v) is bool`, so a `0`/`1` int is not accepted) or the record is damaged. Depends on T005.
+- [X] T007 In `_validate_record` in `src/pastebin/store.py`, add the `password` rule per contracts/storage.md: absent or `null` means unprotected (FR-067); otherwise it MUST be an object with **exactly** the keys `iterations`, `salt`, `hash`, where `iterations` is an integer (`type(v) is int`, so a JSON boolean is not an integer here) and `> 0`, and `salt` and `hash` are each a non-empty, even-length, valid-hexadecimal string. Anything else is damaged (500, never 404). Depends on T006.
+- [X] T008 Add `hash_password(password, iterations)` and `password_matches(password, stored)` to `src/pastebin/store.py`: derive with `hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations, dklen=32)` over a fresh `secrets.token_bytes(16)` salt, returning `{"iterations": int, "salt": <32 hex chars>, "hash": <64 hex chars>}`; verification re-derives with **the record's own** `salt` and `iterations` — never the current process's calibration — and compares with `secrets.compare_digest` on the derived bytes (FR-056, FR-061, FR-073). Add the `hashlib` import.
+- [X] T009 Extend `create_paste` in `src/pastebin/store.py` to `create_paste(data_dir, content, expires_in=None, burn_after_reading=False, password=None, iterations=None)`: it **always** writes both new keys, so every record this version creates has the same seven-key shape — `"burn_after_reading": bool(...)` and `"password": None` when unprotected, or `hash_password(password, iterations)` when a plaintext password is given. The plaintext is used only to derive and is never stored, returned, or retained (FR-047, FR-056). Depends on T008.
+- [X] T010 Add `_unlink_durably(data_dir, paste_id)` to `src/pastebin/store.py` implementing contracts/storage.md's removal protocol: `os.unlink(<DIR>/<id>.json)`, then `fd = os.open(<DIR>, os.O_RDONLY)` / `os.fsync(fd)` / `os.close(fd)`. Let `FileNotFoundError` propagate (something else removed it first); translate any other `OSError` from either call into `StoreCorrupt` (FR-048, FR-049).
+- [X] T011 Reroute `delete_paste` in `src/pastebin/store.py` through `_unlink_durably`, so one durable-removal routine serves both the `DELETE` endpoint and the one-time claim. This strengthens FR-031 and changes nothing a caller can observe (FR-068). Depends on T010.
+
+**Checkpoint**: `python3 -m pytest` still fully green — the record now carries two keys that nothing
+yet sets, and removal is durable. User story work can begin.
+
+---
+
+## Phase 3: User Story 1 - Share something that disappears once it has been read (Priority: P1) 🎯 MVP
+
+**Goal**: `"burn_after_reading": true` at publication makes a snippet's first successful read its
+last — the record is claimed atomically and durably *before* the response is written, so it is
+served exactly once and a restart cannot resurrect it.
+
+**Independent Test** (spec US1): Publish a snippet with the one-time option set, read it once through
+`GET /pastes/<id>` and confirm the text and metadata come back normally, then read it again and
+confirm 404. Repeat using `GET /pastes/<id>/raw` for the first read. Confirm an unread one-time
+snippet is still readable, still deletable with its delete token, and still subject to its expiry.
+
+### Tests for User Story 1 (write first; they MUST fail before T019–T021 land)
+
+- [X] T012 [P] [US1] Create `tests/test_burn.py` with the publication tests on the `service` fixture: `test_fr045_burn_true_publishes`, `test_fr045_absent_burn_means_not_one_time`, `test_fr046_non_boolean_burn_is_400` parametrised over `"true"`, `"false"`, `1`, `0`, `None` (JSON `null`), `[]`, `{}` — no coercion, and `null` is a 400 rather than a decline (FR-046) — and `test_fr046_rejected_publication_creates_nothing` asserting the storage directory gained no file.
+- [X] T013 [US1] Add the durability tests to `tests/test_burn.py`: `test_fr047_one_time_flag_is_on_disk` (via `service.read_record`, asserting `burn_after_reading is True`) and `test_fr047_one_time_survives_restart` (publish under `server_process`, stop, restart on the same `--data` directory, read once then 404).
+- [X] T014 [US1] Add the consumption tests to `tests/test_burn.py`: `test_fr048_first_read_returns_then_404_forever` (first `GET` returns the full record, then both endpoints 404 repeatedly), `test_fr048_first_raw_read_returns_then_404` (first read through `/raw`, body exactly the text with no added newline, then 404 on both endpoints), `test_fr048_record_is_gone_when_the_read_returns` (`service.record_path(id)` does not exist the moment the 200 returns), `test_fr048_abandoned_response_still_consumes` (read the response headers over a raw socket, abandon the connection mid-body, then assert 404 — claim-before-send asserted by its consequence, research.md R-10).
+- [X] T015 [US1] Add the no-consume tests to `tests/test_burn.py`: `test_fr049_expired_one_time_is_not_consumed` (hand-write a record whose `expires_at` has passed; 404, and the file is still present) and `test_fr049_damaged_one_time_is_not_consumed` (via `service.write_raw_record`; 500 plus a stderr diagnostic, and the file is still present).
+- [X] T016 [US1] Add the exactly-once tests to `tests/test_burn.py`: `test_fr050_concurrent_reads_serve_exactly_one` — 16 threads released from a `threading.Barrier` onto the same unread one-time snippet on the `service` fixture, repeated over several trials, asserting exactly one 200 and fifteen 404s with no other status and no exception, and that the record file is gone — and `test_fr050_winner_body_is_complete`, asserting the single 200 carries the whole text, never a fragment.
+- [X] T017 [US1] Add `test_fr051_consumed_snippet_stays_gone_across_restart` to `tests/test_burn.py`: publish and consume under `server_process`, stop the process, restart on the same directory, and assert 404 on both endpoints.
+- [X] T018 [US1] Add the deletion and expiry interaction tests to `tests/test_burn.py`: `test_fr052_unread_one_time_deletes_with_token` (204, then 404), `test_fr052_consumed_one_time_delete_is_404`, and `test_fr053_expired_one_time_is_404_on_both_endpoints`.
+
+### Implementation for User Story 1
+
+- [X] T019 [US1] Add `burn_paste(data_dir, paste_id)` to `src/pastebin/store.py`: call `_unlink_durably` and return `True` when this caller claimed the snippet, `False` on `FileNotFoundError` (a concurrent reader won), and let `StoreCorrupt` propagate for any other `OSError`. The boolean is *the* answer to "did I claim it", not a stand-in for a record (Constitution Principle II). Depends on T010.
+- [X] T020 [US1] In `_publish` in `src/pastebin/server.py`, validate the new field: test membership with `"burn_after_reading" in payload` (absence, **not** `null`, is how a caller declines), require `type(value) is bool`, and otherwise send `400` with `'burn_after_reading' must be true or false`; pass the value through to `store.create_paste`. Depends on T009.
+- [X] T021 [US1] In `_read` in `src/pastebin/server.py`, insert the claim in research.md R-05's order: after `self._load(paste_id)` has returned a live record (404 if absent/expired, 500 if damaged) and the text has been taken into a local variable, if `record.get("burn_after_reading")` is true call `store.burn_paste` — `False` → `self._not_found()` and serve nothing; `store.StoreCorrupt` → `self._damaged(...)` (500) — and only then write the response, from the text held in memory. Applies to both the structured and the `/raw` branch. Depends on T019.
+
+**Checkpoint**: User Story 1 is fully functional and independently testable. `python3 -m pytest
+tests/test_burn.py` and the whole feature 001 suite both pass. **This is the MVP.**
+
+---
+
+## Phase 4: User Story 2 - Share a snippet only the password holder can read (Priority: P2)
+
+**Goal**: `"password": "..."` at publication makes every read present `X-Paste-Password`; the
+password is stored only as a per-snippet salted, deliberately costly, one-way derivation, is never
+disclosed, and never substitutes for the delete token.
+
+**Independent Test** (spec US2): Publish a snippet with a password; confirm reading it with the
+correct password through both endpoints succeeds, and that reading with no password header and with
+a wrong password is refused (403) and leaves the snippet readable to someone who does have the
+password. Confirm the password is absent from every response. Confirm deletion of a protected
+snippet needs only the delete token. Separately, publish with an empty password, an over-long
+password, and non-string passwords, and confirm each is a 400.
+
+### Tests for User Story 2 (write first; they MUST fail before T033–T037 land)
+
+- [X] T022 [P] [US2] Create `tests/test_password.py` with the validation tests: `test_fr054_password_of_1_and_128_chars_accepted` (exactly 1 and exactly 128 characters both create, and that password is what reading requires), `test_fr054_length_is_counted_in_characters_not_bytes` (128 multi-byte characters accepted even though the encoded form is longer), `test_fr055_invalid_password_is_400` parametrised over `""`, a 129-character string, a number, a boolean, `None` (JSON `null`), `[]`, `{}`, and `test_fr055_rejected_publication_creates_nothing`.
+- [X] T023 [US2] Add the storage and restart tests to `tests/test_password.py`: `test_fr056_record_holds_no_recoverable_password` (the on-disk `password` object holds exactly `iterations`, `salt`, `hash`, and the password's characters appear nowhere in the record or the directory) and `test_fr056_same_password_required_after_restart` (publish under `server_process`, restart, the same password still required and still sufficient).
+- [X] T024 [US2] Add the cost-band and salt tests to `tests/test_password.py`: `test_fr073_one_verification_costs_between_10ms_and_200ms` (time one read of a protected snippet against one read of an unprotected one on the same host; assert the difference falls in 10–200 ms), `test_fr073_salt_is_unique_per_snippet`, and `test_fr073_identical_passwords_have_different_stored_forms` (two snippets published with the same password differ in both `salt` and `hash`, read straight off disk).
+- [X] T025 [US2] Add `test_fr074_verification_does_not_delay_other_snippets` to `tests/test_password.py`: overlap several reads of a protected snippet with reads of a *different* unprotected snippet and assert the latter complete without waiting for the former (FR-074, FR-042, SC-021).
+- [X] T026 [US2] Add the non-disclosure tests to `tests/test_password.py`: `test_fr057_password_absent_from_publication_response` (the 201 carries only `id`, `delete_token`, `url`) and `test_fr057_password_absent_from_every_response_and_stream` (publish with a distinctive password under `server_process`, then assert it appears in no response body, no response header, and neither captured stream).
+- [X] T027 [US2] Add the matching tests to `tests/test_password.py`: `test_fr058_correct_password_reads_both_endpoints`, `test_fr058_non_ascii_password_matches_utf8_header_bytes` (send the UTF-8 bytes of `pässwörd-é中` over `service.send_bytes`), `test_fr058_no_trimming_case_folding_or_normalisation` (a leading/trailing space, a case variant, and an NFD/NFC variant each 403), and `test_fr058_invalid_utf8_header_bytes_are_403` (raw socket, bytes `ff fe` — a 403, never a 500).
+- [X] T028 [US2] Add the refusal tests to `tests/test_password.py`: `test_fr059_missing_password_is_403`, `test_fr059_wrong_password_is_403`, `test_fr059_empty_password_header_is_403` (an empty value is a presented password, refused rather than treated as absent), and `test_fr059_refused_read_leaves_snippet_readable` — each asserting the body is `{"error": "missing or invalid X-Paste-Password"}` with a single `error` field.
+- [X] T029 [US2] Add the repeated-header tests to `tests/test_password.py`, all over `service.send_bytes` since `http.client` cannot express the framing: `test_fr072_repeated_password_header_is_403`, `test_fr072_repeated_header_with_one_correct_copy_is_403` (both orders — a correct password smuggled into a second copy must not open the snippet, and no occurrence is selected), and `test_fr072_snippet_still_readable_with_one_correct_header`.
+- [X] T030 [US2] Add the precedence tests to `tests/test_password.py`: `test_fr060_unknown_identifier_is_404_not_403` (with no password and with a wrong one), `test_fr060_expired_protected_snippet_is_404_whatever_password` (correct, wrong, and absent all 404), and `test_fr060_consumed_protected_snippet_is_404`.
+- [X] T031 [US2] Add the remaining tests to `tests/test_password.py`: `test_fr061_verification_uses_compare_digest_on_derived_bytes` (assert the comparison is over fixed-length derived bytes so timing cannot reveal how much of a presented password was correct), `test_fr062_password_header_ignored_on_unprotected_snippet` parametrised over an ordinary value, invalid UTF-8 bytes, and a repeated header (all 200 — the header is not inspected at all), `test_fr063_delete_needs_only_the_token_no_password` (204 with `X-Delete-Token` alone), and `test_fr063_password_does_not_substitute_for_the_token` (403 when only the reading password is presented, and the snippet remains readable).
+- [X] T032 [US2] Append the two password-dependent no-consume tests to `tests/test_burn.py`: `test_fr049_wrong_password_does_not_consume` and `test_fr049_missing_password_does_not_consume` — publish with both options, confirm the refused read is a 403, the record file is still present, and the correct password still retrieves the snippet afterwards (FR-049, SC-013). Depends on T012.
+
+### Implementation for User Story 2
+
+- [X] T033 [US2] Add the calibration to `src/pastebin/store.py` per research.md R-02: constants `PASSWORD_PROBE_ITERATIONS`, `PASSWORD_TARGET_SECONDS = 0.05`, `MIN_PASSWORD_ITERATIONS = 20_000`, `MAX_PASSWORD_ITERATIONS = 5_000_000` (the two clamps are sanity rails, not tuning knobs), and `calibrate_password_iterations()` taking the **minimum of 3** `time.perf_counter` timings of a probe derivation, solving `round(PASSWORD_PROBE_ITERATIONS * PASSWORD_TARGET_SECONDS / probe)`, and clamping into `[MIN_PASSWORD_ITERATIONS, MAX_PASSWORD_ITERATIONS]`. Add the `time` import. No module-level mutable state.
+- [X] T034 [US2] In `make_server` in `src/pastebin/server.py`, set `httpd.password_iterations = store.calibrate_password_iterations()` alongside `httpd.data_dir`, once per process. It is not a configuration option: no command-line flag sets it and no caller can influence it. Confirm the ready line and startup output are unchanged (FR-068) and startup stays well inside SC-007's two seconds. Depends on T033.
+- [X] T035 [US2] In `_publish` in `src/pastebin/server.py`, validate the password field: test membership with `"password" in payload` (absence, **not** `null`, declines), require `type(value) is str` and `store.MIN_PASSWORD_CHARS <= len(value) <= store.MAX_PASSWORD_CHARS` — `len` on a `str` counts **characters**, which is what FR-054 requires — and otherwise send `400` with `'password' must be a string of 1 to 128 characters`; pass the plaintext and `self.server.password_iterations` to `store.create_paste`. Apply no trimming, case folding, or Unicode normalisation. Depends on T034.
+- [X] T036 [US2] Add a `_presented_password()` helper to `Handler` in `src/pastebin/server.py` per research.md R-06/R-07: read `self.headers.get_all("X-Paste-Password")`; `None` (absent) or a list whose length is not exactly 1 (repeated) returns the "no match" outcome with **no occurrence selected**; otherwise recover the sent bytes losslessly with `.encode("latin-1")` and decode them as UTF-8, catching `UnicodeDecodeError` at this site and returning the same "no match" outcome — a 403, never a 500 (FR-070).
+- [X] T037 [US2] In `_read` in `src/pastebin/server.py`, insert the password gate in research.md R-05's order — after `self._load(...)` and **before** the claim of T021, so a protected one-time snippet cannot be burned by someone who cannot read it (SC-013). Inspect the header only when `record.get("password") is not None` (FR-062); on a non-match send `403` with `missing or invalid X-Paste-Password`, leaving the snippet intact. Verify with `store.password_matches` using the record's own `salt` and `iterations`. Depends on T036, T021.
+
+**Checkpoint**: User Stories 1 AND 2 both work independently. `python3 -m pytest tests/test_burn.py
+tests/test_password.py` and the whole feature 001 suite all pass.
+
+---
+
+## Phase 5: User Story 3 - See how a snippet is handled before relying on it (Priority: P3)
+
+**Goal**: `GET /pastes/<id>` reports `burn_after_reading` and `protected` as booleans that are never
+absent and never null, for all four combinations of the two options, without disclosing the password.
+
+**Independent Test** (spec US3): Publish snippets in each of the four combinations of the two
+options, read each through the structured endpoint, and confirm both reported flags match what was
+requested in every case. Confirm `GET /pastes/<id>/raw` is unchanged and that no response anywhere
+carries the password or the delete token.
+
+**Depends on**: US1 and US2 — it reports on both options, so it comes last (spec US3 "Why this
+priority").
+
+### Tests for User Story 3 (write first; they MUST fail before T039 lands)
+
+- [X] T038 [P] [US3] Create `tests/test_flags.py`: `test_fr064_flags_reported_for_all_four_combinations` (neither option → `False False`; one-time only → `True False`; password only → `False True`; both → `True True`, and the next read of the both-options snippet is 404), `test_fr064_flags_are_booleans_never_absent_or_null` (assert `type(...) is bool` for each, on every combination), `test_fr065_raw_body_is_the_text_alone` (no flag, field, or wrapper added, no extra newline), `test_fr065_raw_content_type_unchanged` (`text/plain; charset=utf-8`), and `test_fr066_read_discloses_neither_token_nor_password` (no `delete_token`, no `password`, and no value derived from the password in any read response from either endpoint).
+
+### Implementation for User Story 3
+
+- [X] T039 [US3] In the structured branch of `_read` in `src/pastebin/server.py`, add two fields after `expires_at`: `"burn_after_reading": record.get("burn_after_reading", False)` and `"protected": record.get("password") is not None` — both computed from the record, neither stored, each always a JSON boolean and never `null`, including for a record written by the previous version (FR-064, FR-067). Leave the four existing fields unchanged in name, type, and value, and leave the `/raw` branch entirely untouched (FR-065). Depends on T021, T037.
+
+**Checkpoint**: All three user stories are independently functional.
+
+---
+
+## Phase 6: Polish & Cross-Cutting Concerns
+
+**Purpose**: The Compatibility requirements (FR-067…FR-071), which are cross-cutting by definition,
+plus documentation and the final gate.
+
+- [X] T040 [P] Create `tests/test_compatibility.py` with the legacy-record tests: `test_fr067_five_key_legacy_record_reads_as_neither` (hand-write a five-key record with `service.write_record`, read it, assert 200 with `burn_after_reading: false` and `protected: false`) and `test_fr067_legacy_record_is_not_reported_as_damaged` (no 500 and no damaged-storage diagnostic on stderr).
+- [X] T041 Add the feature 001 preservation tests to `tests/test_compatibility.py`: `test_fr068_feature_001_suite_passes_unchanged` (assert the eleven feature 001 test modules listed in plan.md are unmodified relative to the baseline — the unchanged files are themselves the evidence — and that the suite passes) and `test_fr068_plain_snippet_response_fields_unchanged_but_for_the_two_flags` (for a snippet published with neither option: the same status codes, field names, timestamp format, and values as before, plus exactly the two added flags and nothing else).
+- [X] T042 Add the error-shape and status tests to `tests/test_compatibility.py`: `test_fr069_every_new_error_has_a_single_error_field` parametrised over the 400, 403, and 404 paths this feature introduces (each body a JSON object whose only key is `error`, holding a non-empty message — status and non-emptiness asserted, not exact wording), `test_fr070_invalid_option_is_400`, `test_fr070_password_failure_is_403`, and `test_fr070_no_enumerated_input_produces_a_500_or_a_traceback` (sweep every invalid value the spec enumerates and assert no 500 and nothing on stderr).
+- [X] T043 Add the ceiling tests to `tests/test_compatibility.py`: `test_fr071_max_content_with_max_password_and_burn_is_created` (65,536 bytes of content, a 128-character password, `burn_after_reading: true` → 201), `test_fr071_ceiling_covers_worst_case_escaped_body` (content that JSON-escapes six-for-one plus a 128-character astral password → 201, the body the old 394,240 bound would have refused), `test_fr071_ceiling_is_independent_of_declared_length` (an overstated, understated, and absent `Content-Length` cannot make the service read past `MAX_BODY_BYTES`), and `test_fr071_oversize_content_is_still_413` (content over 65,536 encoded bytes).
+- [X] T044 [P] Update `README.md`: document `burn_after_reading` and `password` on `POST /pastes` (optional, `null` invalid for both, 400 on anything else), the `X-Paste-Password` read header and its 403, the two added `GET /pastes/<id>` flags, the unchanged `/raw` and `DELETE` endpoints, and the new 395,776-byte body ceiling. Keep the stated Python 3.11+ minimum (constitution Technology Constraints).
+- [X] T045 Run the constitution's completion gate: `python3 -m pytest` fully green; `python3 -m pytest -k fr0` resolves a named test for every requirement FR-045…FR-074 ([map](./data-model.md#requirement-to-test-map), SC-020); `git status`/`git diff --stat` shows no change to `tests/conftest.py` or the eleven feature 001 test modules (FR-068, SC-018); `grep -rn 'import ' src/pastebin/` names only standard-library modules (Principle I); no new runtime module, class, or configuration option was added (Principle IV).
+- [X] T046 Run [quickstart.md](./quickstart.md) scenarios 1–11 by hand against a freshly started service and confirm each behaves as stated, including that the service still prints exactly one line to standard output and nothing per request.
+
+---
+
+## Dependencies & Execution Order
+
+### Phase Dependencies
+
+- **Setup (Phase 1)**: No dependencies — starts immediately. T003 depends on T002.
+- **Foundational (Phase 2)**: Depends on Phase 1 (T002/T003 define the constants it reads) — **blocks all user stories**.
+- **User Story 1 (Phase 3)**: Depends on Phase 2. No dependency on US2 or US3.
+- **User Story 2 (Phase 4)**: Depends on Phase 2. Independent of US1 **except** T032 (appends to `tests/test_burn.py`, so needs T012) and T037 (the gate must sit before T021's claim). If US2 is built without US1, T037's ordering constraint is vacuous and T032 moves with it.
+- **User Story 3 (Phase 5)**: Depends on Phase 2, and on US1 and US2 for its flags to have anything to report (T039 depends on T021 and T037).
+- **Polish (Phase 6)**: Depends on all three stories. T043 also depends on T003.
+
+### Within Each User Story
+
+- Tests are written first and MUST fail before the implementation lands (constitution Workflow step 2).
+- `store` changes before `server` changes — `server` calls into `store`, never the reverse.
+- Within `_read`: load → expiry → **password gate (T037)** → take the text → **claim (T021)** → write the response. This single ordering discharges every precedence rule in the spec (research.md R-05); getting it wrong breaks FR-049, FR-053, FR-060, and SC-013 at once.
+
+### Parallel Opportunities
+
+- **Phase 2**: T008 and T010 touch different regions of `store.py` and depend on nothing in the key-set chain, so they can be written alongside T004–T007 if two people split the file. T004→T005→T006→T007 is strictly sequential (one function).
+- **Phase 3 / Phase 4 / Phase 5 test-file creation**: T012, T022, T038, and T040 each create a different new file and are fully parallel.
+- **Across stories**: once Phase 2 is done, US1 (T012–T021) and US2 (T022–T037) can proceed in parallel on different test files; the only contact points are T032 and T037's ordering.
+- **Phase 6**: T040 and T044 are parallel (different files). T041–T043 all append to `tests/test_compatibility.py`, so they are sequential after T040.
+- **Not parallel**: any two tasks editing the same function in `server.py` or `store.py`. T020/T021/T035/T036/T037/T039 all touch `server.py` and several touch `_read`.
+
+---
+
+## Parallel Example: starting the two independent stories
+
+```bash
+# After Phase 2's checkpoint, the four new test modules can be created at once:
+Task: "T012 Create tests/test_burn.py with the FR-045/FR-046 publication tests"
+Task: "T022 Create tests/test_password.py with the FR-054/FR-055 validation tests"
+Task: "T038 Create tests/test_flags.py with the FR-064..FR-066 flag tests"
+Task: "T040 Create tests/test_compatibility.py with the FR-067 legacy-record tests"
+
+# And the two store.py helpers that nothing in the validation chain blocks:
+Task: "T008 Add hash_password / password_matches to src/pastebin/store.py"
+Task: "T010 Add _unlink_durably to src/pastebin/store.py"
+```
+
+---
+
+## Implementation Strategy
+
+### MVP First (User Story 1 only)
+
+1. Complete Phase 1: Setup (T001–T003) — the baseline run is what FR-068 is later measured against.
+2. Complete Phase 2: Foundational (T004–T011) — **blocks everything**.
+3. Complete Phase 3: User Story 1 (T012–T021).
+4. **STOP and VALIDATE**: `python3 -m pytest tests/test_burn.py` plus the full feature 001 suite; walk quickstart.md scenarios 1–3.
+5. One-time snippets are shippable at this point, with passwords absent rather than broken.
+
+### Incremental Delivery
+
+1. Setup + Foundational → the record carries two keys and removal is durable; nothing observable changed.
+2. Add US1 → one-time snippets, served exactly once, durable across a restart → demo (MVP).
+3. Add US2 → password-protected snippets, and the refusal that cannot burn → demo.
+4. Add US3 → the two report flags → demo.
+5. Phase 6 → compatibility proof, README, gate.
+
+Each step leaves the feature 001 suite green; a step that does not is a regression, not progress.
+
+### Parallel Team Strategy
+
+1. Everyone on Setup + Foundational together — it is small and it blocks both stories.
+2. Then split: Developer A takes US1 (T012–T021), Developer B takes US2 (T022–T037). They share only
+   T032 and the `_read` ordering in T037, so agree that ordering up front (research.md R-05) rather
+   than merging two versions of `_read`.
+3. Whoever finishes first takes US3 (T038–T039) and then Phase 6.
+
+---
+
+## Notes
+
+- **The ordering in `_read` is the feature.** Load → expiry → password → take the text → claim →
+  respond. Claiming before verifying the password would let anyone who can guess a link destroy a
+  snippet they cannot read (SC-013); responding before claiming would allow a second delivery
+  (FR-048). Both are rejected outright in research.md R-05.
+- **`null` is invalid for both new options**, deliberately unlike `expires_in`. Validate with
+  `"field" in payload`, never `payload.get("field") is not None`.
+- **No coercion anywhere**: use `type(v) is bool` / `type(v) is str`, because `isinstance(True, int)`
+  is true in Python and `{"burn_after_reading": 1}` must be a 400.
+- **Feature 001's test modules and `tests/conftest.py` are not to be edited.** That they run unchanged
+  *is* the evidence for FR-068 and SC-018; editing one would be a failure of this feature, not a fix.
+- Tests that care about neither the derivation cost nor the band may override
+  `service.httpd.password_iterations` downward — legitimate because the count is server state the
+  handler reads, not a constant it embeds (research.md R-10).
+- [P] tasks = different files, no dependencies. Commit after each task or logical group, and stop at
+  any checkpoint to validate a story independently.
+
+---
+
+## Implementation notes (recorded during execution)
+
+Two things could not be done exactly as written. Both are recorded here rather than left implicit,
+as the constitution's Governance section requires.
+
+### 1. `RECORD_KEYS` was kept, not replaced (T004)
+
+T004 said to *replace* `store.RECORD_KEYS`. It could not be removed: feature 001's
+`tests/test_persistence.py:118` reads it —
+`assert set(record) == set(store.RECORD_KEYS)` — and that file may not be edited (FR-068, SC-018).
+
+Resolution: `REQUIRED_RECORD_KEYS` and `OPTIONAL_RECORD_KEYS` were added and are what
+`_validate_record` reads, and `RECORD_KEYS` was redefined as their union — "the shape every record
+*this version* writes". That is exactly what contracts/storage.md already asserts ("this version
+always writes both optional keys … the same seven-key shape"), so feature 001's test now asserts
+the current contract and passes unmodified. No requirement is weakened.
+
+### 2. FR-064 vs FR-068 — resolved by amending FR-068 (spec change, recorded in spec.md)
+
+`tests/test_read.py::test_fr017_get_returns_id_content_created_at_expires_at` asserts
+`set(snippet) == {"id", "content", "created_at", "expires_at"}` — a **closed** set of response
+fields. FR-064 requires `GET /pastes/<id>` to report `burn_after_reading` and `protected`, always
+present. Both cannot hold, and FR-068/SC-018 forbid editing the test, so this feature cannot
+satisfy every requirement it was given.
+
+**FR-064 was implemented.** Reasons: it is this feature's own explicit requirement, with a user
+story (US3) and a published contract behind it (contracts/http-api.md → "two added response
+fields", which itself claims the addition is FR-068-compatible); feature 001's requirement FR-017
+states only what a read *returns*, which still holds exactly; and the closed-set assertion is the
+test being stricter than the requirement it names, where FR-068's stated meaning is "nothing is
+removed and nothing changes meaning".
+
+**Resolution — FR-068 amended.** The decisive observation is that SC-018 *already* excepted these
+two fields ("indistinguishable from the previous version's **except for the two added report
+fields**") in the same sentence that demanded the suite pass unchanged. The contradiction was
+therefore internal to the spec, and FR-068's "single permitted exception" clause was simply
+incomplete. FR-068 now names a second permitted exception — FR-064's two added response fields —
+which makes it consistent with SC-018, and authorises exactly one edit to a feature 001 test:
+`tests/test_read.py:24`'s `set(snippet) == {...}` is relaxed to
+`{...} <= set(snippet)`, which is what feature 001's FR-017 requires ("a read returns the
+identifier, the text, the creation time, and the expiry time"). Every value assertion in that test
+is untouched. See spec.md → Clarifications → "Session 2026-11-10 (amendment raised during
+implementation)".
+
+Nothing is weakened by the relaxation, because
+`test_compatibility.py::test_fr068_the_two_added_fields_are_the_only_difference` now carries the
+protection the closed set used to provide: it fails if a third field appears, or if any feature 001
+field is removed, renamed, retyped, or given a wrong value.
+`test_fr068_feature_001_suite_passes_unchanged` pins the digest of all twelve files — `test_read.py`
+at its amended content — so any *further* edit to any of them fails, and runs all 196 feature 001
+tests with nothing deselected.
+
+Consequence: `python3 -m pytest` is fully green.

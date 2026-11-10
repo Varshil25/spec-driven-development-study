@@ -14,8 +14,8 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R005C | 2026-11-05 | T-TARX-01-CR | sdd | OK | 0 | no | ok | change request on R005; operated by Claude; no questions, 4 LISTED; Claude Code cost $12.94 |
 | R006 | 2026-11-09 | T-REDACT-01 | sdd_secure | OK | 0 | no | ok | operated by Claude; 1 SAFETY (specify), 1 answer I1 (plan), 5 LISTED; plan session interrupted twice (usage limit 5 Nov, then workspace stops) and resumed 9 Nov with the fixed message: plan-phase and total active time include the idle gaps and are NOT usable; tokens and turns are; Claude Code cost $26.20 |
 | R006C | 2026-11-09 | T-REDACT-01-CR | sdd_secure | OK | 0 | no | ok | change request on R006; operated by Claude; no questions, 4 LISTED; agent edited the original feature's plan.md; Claude Code cost $17.96 |
-| R007 | | T-PASTE-01 | sdd_clarify | | | | |  |
-| R007C | | T-PASTE-01-CR | sdd_clarify | | | | | change request on R007 |
+| R007 | 2026-11-09 | T-PASTE-01 | sdd_clarify | OK | 0 | no | ok | operated by Claude; 5 clarify questions, all NOPREF (none matched the sheet); implement stopped at the usage limit, then a container restart; resumed with the fixed message, so implement and total active time include the 3.4 h wait and are not usable; Claude Code cost $25.35 |
+| R007C | 2026-11-10 | T-PASTE-01-CR | sdd_clarify | OK | 0 | no | ok | change request on R007; operated by Claude; 6 questions: clarify NOPREF x2 and SAFETY x3, implement NOPREF x1; operator slip to review: the implement turn contained the word 'safety' (outside the question itself) and got NOPREF, sent before the keyword check was read; implement stopped at the usage limit 9 Nov and was resumed 10 Nov with the fixed message, so implement and total active time include an 18.8 h wait and are not usable; Claude Code cost $42.41 |
 | R008 | | T-BOOKMARKS-01 | unstructured | | | | |  |
 | R008C | | T-BOOKMARKS-01-CR | unstructured | | | | | change request on R008 |
 | R026 | | T-QNOTES-01 | unstructured | | | | |  |

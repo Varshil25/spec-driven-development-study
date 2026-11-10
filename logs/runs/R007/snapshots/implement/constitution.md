@@ -1,0 +1,161 @@
+<!--
+SYNC IMPACT REPORT (scratch material for amendment review — remove before committing)
+
+Version change: none (unfilled template) → 1.0.0
+Rationale: Initial ratification. The previous file was the unpopulated scaffold with no
+concrete principles, so this is the first governing version rather than a bump of an
+existing one.
+
+Modified principles:
+- [PRINCIPLE_1_NAME] (placeholder) → I. Standard Library Only
+- [PRINCIPLE_2_NAME] (placeholder) → II. Fail Loudly
+- [PRINCIPLE_3_NAME] (placeholder) → III. Every Requirement Is Testable
+- [PRINCIPLE_4_NAME] (placeholder) → IV. Simplicity
+
+Added sections:
+- Core Principles (4 principles, populated)
+- Technology and Dependency Constraints (filled [SECTION_2_NAME])
+- Development Workflow and Quality Gates (filled [SECTION_3_NAME])
+- Governance (filled [GOVERNANCE_RULES])
+
+Removed sections:
+- [PRINCIPLE_5_NAME] / [PRINCIPLE_5_DESCRIPTION] — the user specified exactly four
+  principles, so the fifth template slot was dropped rather than invented.
+
+Follow-up TODOs:
+- TODO(PROJECT_NAME): No project name was supplied and the repository contains no README,
+  package metadata, or other identity marker to infer one from. The title currently reads
+  "Project Constitution". Replace it once the name is chosen.
+-->
+
+# Project Constitution
+<!-- TODO(PROJECT_NAME): replace "Project" with the project's chosen name once decided. -->
+
+## Core Principles
+
+### I. Standard Library Only
+
+The shipped program MUST depend only on the Python standard library. No third-party package
+may be imported by any module that runs in production or is reachable from the project's
+entry points. Adding a runtime dependency is an amendment to this constitution, not an
+implementation decision.
+
+Test-only and development-only tooling (notably `pytest`, required by Principle III) is
+exempt, provided it is never imported by runtime code and is declared separately from
+runtime requirements.
+
+Rationale: a small project with zero runtime dependencies installs anywhere Python runs,
+cannot break from upstream releases or yanked versions, and carries no third-party supply
+chain risk. The ceiling this places on the design is itself useful: it forces solutions
+that stay small.
+
+### II. Fail Loudly
+
+Invalid, malformed, or unsupported input MUST produce a clear diagnostic and an explicit
+failure signal. Concretely:
+
+- Command-line entry points MUST write a human-readable message naming what was wrong to
+  `stderr` and exit with a non-zero status.
+- Library functions and API handlers MUST raise an exception or return an explicit error
+  response. They MUST NOT return a sentinel value that a caller can mistake for a result.
+- Bare `except:` and `except Exception: pass` are prohibited. Exceptions MUST be caught
+  only where they are handled or deliberately translated into a clearer error.
+- Guessing at the user's intent in order to proceed — coercing unparseable input,
+  substituting defaults for required values, silently truncating or skipping bad records —
+  is prohibited.
+
+Producing a plausible but wrong answer is the worst available outcome and MUST never be a
+code path.
+
+Rationale: a wrong answer that looks right propagates into whatever consumes it and costs
+far more to find than a crash at the point of failure.
+
+### III. Every Requirement Is Testable
+
+Every functional requirement in a specification MUST map to at least one automated `pytest`
+test. The mapping MUST be discoverable: the test references the requirement identifier in
+its name or docstring.
+
+- A requirement that cannot be expressed as an automated test MUST be rewritten until it
+  can be, or removed from the specification.
+- Error behavior required by Principle II is itself a requirement: each specified failure
+  mode MUST have a test asserting the message and the exit status or raised exception.
+- A feature is not complete while any of its requirements lack a passing test.
+
+Rationale: an untestable requirement is an unverifiable one, and unverifiable requirements
+are where silent regressions accumulate.
+
+### IV. Simplicity
+
+Implementations MUST be the smallest design that satisfies the specification. Specifically:
+
+- Build what the current specification requires. Speculative extension points,
+  configuration knobs with one caller, and abstractions with one implementation are
+  prohibited.
+- Prefer functions and plain data (`dict`, `list`, `dataclass`, `tuple`) over class
+  hierarchies, custom metaclasses, and frameworks.
+- Prefer one obvious module over several indirect ones. Add a layer only when a concrete,
+  present requirement forces it.
+- When two designs both satisfy the specification, the one with less code, fewer files, and
+  fewer concepts wins. "We might need it later" is not a justification.
+
+Rationale: every line is a line to read, test, and keep correct. Code written for
+anticipated requirements is usually wrong about them and is never covered by the tests
+Principle III demands.
+
+## Technology and Dependency Constraints
+
+- **Language**: Python 3. The minimum supported version MUST be stated once in project
+  documentation and honored by all code; no module may rely on a newer feature.
+- **Runtime dependencies**: none permitted (Principle I).
+- **Development dependencies**: `pytest` is the test runner. Any further development tool
+  MUST be justified in review and MUST NOT be importable from runtime code.
+- **Standard library usage**: prefer `argparse` for command-line parsing, `json` for
+  serialization, `pathlib` for filesystem paths, `logging` or `stderr` for diagnostics, and
+  `unittest.mock` where test doubles are needed.
+- **Data and configuration formats** MUST be ones the standard library can read. A format
+  requiring a third-party parser is prohibited by Principle I.
+
+## Development Workflow and Quality Gates
+
+1. **Specification first**: functional requirements are written and given stable
+   identifiers before implementation begins.
+2. **Tests reference requirements**: each requirement gains at least one `pytest` test
+   naming it (Principle III). Tests are expected to fail before the implementation lands.
+3. **Implementation**: the smallest change that makes the tests pass (Principle IV).
+4. **Gate — all of the following MUST hold before work is considered complete**:
+   - The full `pytest` suite passes.
+   - Every functional requirement in scope has at least one passing test that names it.
+   - No runtime module imports a third-party package.
+   - Every specified invalid-input path has a test asserting a clear message and a non-zero
+     exit status or an explicit error.
+   - No new abstraction, option, or module lacks a present requirement that forces it.
+5. **Review**: reviewers MUST check the gate above explicitly. A change that fails any item
+   is not merged until the failure is fixed or the constitution is amended.
+
+## Governance
+
+This constitution supersedes other practices, conventions, and preferences on this project.
+Where a style guide, habit, or tool default conflicts with a principle here, the principle
+governs.
+
+**Amendment procedure**: an amendment MUST be proposed as a change to this file, stating
+the principle affected, the rationale, and the migration required for existing code. It
+takes effect when merged. Adding a runtime dependency, weakening an error-handling
+requirement, or exempting a requirement from testing each require an amendment — none may
+be decided case-by-case during implementation.
+
+**Versioning policy**: this document follows semantic versioning.
+
+- **MAJOR**: a principle is removed or redefined in a way existing compliant code would
+  violate.
+- **MINOR**: a principle or section is added, or existing guidance is materially expanded.
+- **PATCH**: clarifications, wording, and typo fixes that do not change what is required.
+
+**Compliance review**: every change under review is checked against the Development
+Workflow gate above. Deviation from a principle MUST be either corrected or recorded in the
+specification with explicit justification; undocumented deviation is a defect. Any
+complexity introduced beyond the minimum design MUST be justified in writing against a
+specific requirement.
+
+**Version**: 1.0.0 | **Ratified**: 2026-11-09 | **Last Amended**: 2026-11-09
