@@ -441,7 +441,7 @@ def main(argv=None):
         first, last = phase_range(phases, args.start_at, args.stop_after)
         answers = answer_sheets(kit, task)
         log_dir = Path("logs") / "runs" / args.run_id / "headless"
-        if first == 0:
+        if first == 0 and not args.resume_session:
             prepare_repository(condition, stage, args)
             sddlog("run-start", "--run-id", args.run_id, "--task", task, "--condition", condition,
                    "--stage", stage, "--model", args.model)
