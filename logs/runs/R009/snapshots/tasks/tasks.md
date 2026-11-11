@@ -1,0 +1,278 @@
+---
+
+description: "Task list for Local Account Manager CLI"
+---
+
+# Tasks: Local Account Manager CLI
+
+**Input**: Design documents from `/specs/001-accounts-cli/`
+
+**Prerequisites**: [plan.md](./plan.md), [spec.md](./spec.md), [research.md](./research.md), [data-model.md](./data-model.md), [contracts/cli.md](./contracts/cli.md), [contracts/store-file.md](./contracts/store-file.md), [quickstart.md](./quickstart.md)
+
+**Tests**: Test tasks are **REQUIRED** for this feature — not optional. SC-001 ("Each functional requirement is covered by at least one automated test that names the requirement it verifies") and SC-002 make the suite itself a specified requirement, and Constitution v1.0.0 Principle III mandates an explicit requirement-to-test mapping with every Principle II error path asserting both message content and failure signal. Within each phase, test tasks come before the implementation tasks they cover and MUST be observed to fail first.
+
+**Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story.
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: Can run in parallel (different files, no dependencies)
+- **[Story]**: Which user story this task belongs to (US1, US2, US3, US4)
+- Include exact file paths in descriptions
+
+## Path Conventions
+
+Single project, flat package (plan.md Structure Decision): `src/accounts/` for runtime code, `tests/` for the suite, `pytest.ini` and `requirements-dev.txt` at the repository root. The template's `src/{models,services,cli,lib}/` split is explicitly rejected — do not create `models/` or `services/` packages.
+
+**Test entry points** (research.md D-008): tests drive `accounts.cli.main(argv, stdin, stdout, stderr) -> int` in-process by default; a handful of tests use real `python -m accounts` subprocesses; bulk tests monkeypatch `accounts.hashing.DEFAULT_ITERATIONS` down.
+
+---
+
+## Phase 1: Setup (Shared Infrastructure)
+
+**Purpose**: Repository skeleton so that a bare `pytest` from the root collects the suite with no environment setup (Constitution: Project Layout).
+
+- [ ] T001 Create the directory skeleton `src/accounts/` and `tests/` at the repository root per plan.md Structure Decision; create no `models/` or `services/` package
+- [ ] T002 [P] Create `src/accounts/__init__.py` as an empty package marker — no logic, no imports, no `__all__` (plan.md: "package marker; no logic")
+- [ ] T003 [P] Create `pytest.ini` at the repository root containing exactly `pythonpath = src` and `testpaths = tests` under `[pytest]`, so a bare `pytest` from the root works with no `PYTHONPATH` export
+- [ ] T004 [P] Create `requirements-dev.txt` at the repository root containing only `pytest`; create NO runtime dependency file and NO `pyproject.toml` dependency table (Constitution Principle I, Gate I)
+- [ ] T005 Confirm the environment satisfies the baseline: `python3 --version` reports 3.11 or newer, and a bare `pytest` run from the repository root picks up `pytest.ini` and exits cleanly with "no tests ran" (collection of `tests/` works before any test exists)
+
+**Checkpoint**: Repository collects an empty suite; no runtime dependency declared anywhere.
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**Purpose**: The cryptography module, the store module, the pre-dispatch CLI pipeline (argument parsing → store load → stdin reading) and the test harness. These are shared by all four user stories and own the cross-cutting requirements FR-001–FR-006, FR-026*, FR-029*, FR-030.
+
+**⚠️ CRITICAL**: No user story work can begin until this phase is complete — every story's command handler is reached only through the pipeline built here.
+
+### Test harness
+
+- [ ] T006 Create `tests/conftest.py` with four fixtures per research.md D-008: (a) `store_path` returning a path inside `tmp_path` where **no file exists yet** (the empty-store case, rule S-1), (b) an in-process runner calling `accounts.cli.main(argv, stdin, stdout, stderr)` with `io.StringIO` streams and returning `(status, stdout_text, stderr_text)`, (c) a subprocess runner invoking `python -m accounts` with `src` on `PYTHONPATH` and returning the same triple, (d) a `low_iterations` fixture monkeypatching `accounts.hashing.DEFAULT_ITERATIONS` to a small value for bulk tests. Each `main()` call must re-read the store from disk and share no in-memory state with the previous call
+
+### Tests for the foundational modules
+
+- [ ] T007 [P] Create `tests/test_hashing.py` covering FR-026, FR-026a, FR-026b, FR-026c with the requirement id named in each test name or a comment: `DEFAULT_ITERATIONS == 600_000`; derived key is exactly **32 bytes** from `pbkdf2_hmac('sha256', password_utf8, salt, iterations, dklen=32)`; salt is exactly **16 bytes** from a CSPRNG and differs between two calls; the password is encoded **UTF-8** before derivation; `verify()` derives with the **record's own** `algorithm`, `iterations` and `salt` and never the module default (assert by verifying a record written with a non-default `iterations` value); comparison uses `hmac.compare_digest` (constant-time, FR-026c); two accounts with the same password get different salt and therefore different key (A-6)
+- [ ] T008 [P] Create `tests/test_store_file.py` covering FR-029, FR-029a, FR-029b, FR-029c at the `store.load`/`store.save` level, one test per corruption condition in contracts/store-file.md, each asserting `StoreError` with a non-empty cause: not valid UTF-8; not valid JSON; top level not an object; `format` missing or not exactly `"accounts-store-v1"`; `accounts` missing or not an object; a record not an object; a record missing any one of the six required fields (`algorithm`, `iterations`, `salt`, `key`, `failed_logins`, `locked`); `algorithm` a string other than `"pbkdf2_hmac_sha256"`; `salt` not valid base64 or not decoding to 16 bytes; `key` not valid base64 or not decoding to 32 bytes; `iterations` < 1; `failed_logins` < 0; `{"iterations": true}` and `{"locked": 1}` both rejected (bool is a subclass of `int`, so reject a bool where an integer is required and an int where a boolean is required). Plus: a non-existent path loads as `{"format": "accounts-store-v1", "accounts": {}}` and is **not** corruption (S-1); `save` leaves mode `0o600` at creation and after a rewrite of a file whose mode was wider (S-4, never widened); `save` writes the whole document and leaves no temporary file behind on success or on failure; comparisons are against parsed JSON, never bytes
+- [ ] T009 [P] Create `tests/test_cli_contract.py` covering the pre-dispatch pipeline — FR-001, FR-003, FR-004, FR-005, FR-006, FR-030 and SC-007 — asserting the exact usage line `usage: python -m accounts --store PATH {register|login|unlock|passwd|delete} USERNAME` on **stderr** with exit **2** and no store file created, for every row of the contracts/cli.md argument grammar: `--store` omitted; `--store` with no following value; `--store=PATH` (usage error, the space form only); `COMMAND` missing; `COMMAND` not one of the five; `USERNAME` missing; a third positional; any other flag including `-h` and `--help`. Plus: `--store PATH` accepted **after** the positionals (located by scan, not position, D-002); `missing password input` on stderr with exit 2 and store unchanged when input ends before a required line, for `register`, `login`, `passwd` (first line missing), `passwd` (second line missing) and `delete`; an empty line is a password of length 0 and yields `password too short`, **not** `missing password input`; input beyond the needed lines is ignored, not an error; leading and trailing whitespace inside a line is preserved and a password may contain spaces (`correct horse battery`); `\r\n` and `\n` both terminate a line; `unlock` reads nothing from stdin; and SC-007 — a password placed where an argument is expected is a usage error and is never used as a password
+
+### Foundational implementation
+
+- [ ] T010 [P] Implement `src/accounts/hashing.py` with `DEFAULT_ITERATIONS = 600_000`, a function producing new password material (fresh `secrets.token_bytes(16)` salt, `hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, DEFAULT_ITERATIONS, dklen=32)`, returning `algorithm="pbkdf2_hmac_sha256"`, `iterations`, base64 `salt`, base64 `key`) and `verify(record, password)` deriving with the record's own `algorithm`, `iterations` and `salt` and comparing with `hmac.compare_digest`. Imports only `hashlib`, `hmac`, `secrets`, `base64`. `DEFAULT_ITERATIONS` is a module constant, never read from an environment variable or config file (research.md D-008)
+- [ ] T011 Implement `src/accounts/store.py` with `StoreError` (the only class besides nothing else), `load(path)` and `save(path, data)`: `load` returns the empty store `{"format": "accounts-store-v1", "accounts": {}}` for a non-existent path and otherwise validates every condition listed in T008, raising `StoreError` with the specific cause (`OSError.strerror`, `UnicodeDecodeError`, `json.JSONDecodeError` each become a named cause — no bare `except: pass`); `save` writes atomically per contracts/store-file.md: `tempfile.mkstemp(dir=<directory of the store path>)` → `os.chmod(tmp, 0o600)` → write JSON as UTF-8 → `flush()` → `os.fsync(fd)` → close → `os.replace(tmp, path)`, removing the temporary file on any exception and letting the error surface as `StoreError`. Unknown extra top-level keys found on load are ignored and dropped on rewrite; a missing required key is corruption (S-6). Imports only `json`, `os`, `tempfile`, `base64`, `pathlib`
+- [ ] T012 Implement the pre-dispatch pipeline in `src/accounts/cli.py`: the exact message constants and exit statuses from the contracts/cli.md Messages and Exit statuses tables (0 success, 1 invalid credentials, 2 invalid input, 3 account conflict, 4 account locked, 5 store unusable); `main(argv, stdin, stdout, stderr) -> int` returning the status and never raising `SystemExit` or touching any `sys.*` global; hand-rolled argument parsing per D-002 (scan for `--store`, take the next element, require exactly two positionals with `COMMAND` in the known set, no `argparse`); the per-command stdin line counts (`register` 1, `login` 1, `unlock` 0, `passwd` 2, `delete` 1) read with one `readline()` each, where `''` means EOF → `missing password input` and a line is the content with a single trailing `\n` removed and nothing else stripped (D-003); rendering `StoreError` as `store unusable: {cause}` on stderr with exit 5; and the check order of D-004 — argument parsing (2) → store load (5) → required input lines (2) → the command handler. Handlers for the five commands are added in Phase 3+; the dispatch table is defined here
+- [ ] T013 Implement `src/accounts/__main__.py` as the only module touching `sys.*`: wrap `sys.stdin.buffer` in `io.TextIOWrapper(encoding='utf-8', newline=None)`, call `cli.main(sys.argv[1:], stdin, sys.stdout, sys.stderr)` and `sys.exit(...)` its return value. Three lines of adapter, no logic
+- [ ] T014 Run `pytest tests/test_hashing.py tests/test_store_file.py tests/test_cli_contract.py` and confirm all three pass; grep the runtime package for non-stdlib imports and confirm none (Gate I), and confirm no runtime module imports `pytest`
+
+**Checkpoint**: Cryptography, persistence and the CLI pre-dispatch pipeline are complete and tested. All four user stories can now proceed.
+
+---
+
+## Phase 3: User Story 1 - Register an account and sign in with it (Priority: P1) 🎯 MVP
+
+**Goal**: An operator can create a password-protected named account in a store file and, in a later separate invocation, prove they know that password — with a clear, script-detectable failure for a wrong password.
+
+**Independent Test**: Run `register` against a fresh store path, then `login` in a separate invocation with the same password and with a different password. Verify `registered alice` on stdout / exit 0, `ok` on stdout / exit 0, `invalid credentials` on stderr / exit 1, and that the store file exists after the first command and is reused rather than recreated by the second.
+
+### Tests for User Story 1 ⚠️ write first, observe failing
+
+- [ ] T015 [P] [US1] Create `tests/test_register.py` covering FR-007, FR-008, FR-009, FR-010, FR-011 with requirement ids named: success prints exactly `registered alice` on **stdout** with exit **0** and the store file now exists; the created record has `failed_logins: 0` and `locked: false` (L-8) and all six required fields; username accepted only when "3 to 32 characters long inclusive and consists solely of letters (`A`–`Z`, `a`–`z`), digits (`0`–`9`) and underscores" — boundary tests for 3 and 32 accepted, 2 and 33 rejected, and `bad-name` rejected; `invalid username` on **stderr** exit **2** with no account created; password accepted only when "at least 12 characters long", with "no maximum length and no character-class restriction" — boundary tests for 12 accepted and 11 rejected; `password too short` on **stderr** exit **2** with no account created; length counted in characters not bytes, so a 12-character non-ASCII password is accepted (A-4); duplicate username prints exactly `username already exists` on **stderr** with exit **3**, leaving the existing account's password, failure tally and lock state unchanged; precedence — an invalid username with a short password prints `invalid username` (username checked first), and an existing username with a short password prints `password too short` exit 2 (format rules before the duplicate check); usernames are case-sensitive, so `Alice` and `alice` are distinct accounts (A-2)
+- [ ] T016 [P] [US1] Create `tests/test_login_lockout.py` with the US1 portion only — FR-012 and FR-014: correct password on an existing unlocked account prints exactly `ok` on **stdout** with exit **0** and nothing on stderr; a wrong password prints exactly `invalid credentials` on **stderr** with exit **1** and nothing on stdout; an unknown username prints exactly `invalid credentials` on **stderr** with exit **1**, byte-identical in output and status to the wrong-password case (FR-014, no indication that the distinction exists); `login` against a store path that does not exist yields the same `invalid credentials` / 1 (contracts/cli.md store-related behaviour)
+- [ ] T017 [P] [US1] Add to `tests/test_cli_contract.py` the real-subprocess end-to-end tests for FR-001 and FR-002: `python -m accounts --store PATH register alice` followed by a **separate** `python -m accounts --store PATH login alice` process succeeds, proving the store written by one invocation is read by a later one; `src` on `PYTHONPATH` is the only setup (SC-003). Keep this to a handful of invocations at ~0.25 s each (research.md D-008 part 2)
+
+### Implementation for User Story 1
+
+- [ ] T018 [US1] Implement the `register` handler in `src/accounts/cli.py`: validate the username (A-1), then the password length (A-4), then check for an existing key in `accounts`; on success call `hashing.new_password_material`, insert the record with `failed_logins: 0` and `locked: false`, `store.save`, print `registered {username}` on stdout and return 0. Checks in the order of contracts/cli.md `register` 1→4; no account is created on any failing path
+- [ ] T019 [US1] Implement the `login` handler in `src/accounts/cli.py` for the unlocked path: unknown account → `invalid credentials` on stderr, return 1, **no store write**; password incorrect → `invalid credentials` on stderr, return 1; password correct → `ok` on stdout, return 0. The lock check and the failed-login tally belong to User Story 2 and are added in T022 — until then the `locked` and `failed_logins` fields are written at registration and read but not updated
+- [ ] T020 [US1] Run `pytest` and confirm `tests/test_register.py`, `tests/test_login_lockout.py` and `tests/test_cli_contract.py` all pass, then walk quickstart.md Scenario 1 by hand and confirm each stated message, stream and exit status
+
+**Checkpoint**: User Story 1 is fully functional and independently testable — a script can now gate an action on a correct password. This is the MVP.
+
+---
+
+## Phase 4: User Story 2 - Repeated wrong passwords lock the account until an operator unlocks it (Priority: P2)
+
+**Goal**: Five consecutive rejected logins close an account to logins — a correct password no longer works and says so distinctly — until an operator runs `unlock`, which also restarts the failure tally.
+
+**Independent Test**: Register an account, submit five wrong passwords in five separate invocations, then attempt a login with the correct password and observe `account locked` / exit 4; run `unlock` and confirm the correct password works again and that four further wrong attempts do not re-lock it (the tally restarted).
+
+### Tests for User Story 2 ⚠️ write first, observe failing
+
+- [ ] T021 [P] [US2] Extend `tests/test_login_lockout.py` with FR-013, FR-015, FR-016 and SC-006: each wrong-password login increases `failed_logins` by exactly one (read back from the store) and still prints `invalid credentials` / 1; four wrong attempts leave the account unlocked and the correct password still prints `ok` / 0; the **fifth** consecutive failure is itself reported as `invalid credentials` with exit **1**, not `account locked`, and sets `locked: true` (L-1); a locked account's `login` prints exactly `account locked` on **stderr** with exit **4** for both a correct and a wrong password, never prints `ok`, and changes nothing at all — not the tally, not the lock, not the stored password (L-3, verified by comparing the full parsed store before and after); a successful login resets the tally to 0, so five *further* consecutive wrong attempts are required to lock (FR-012, L-2) — includes the spec's scenario of three recorded failures followed by a success; SC-006 — parametrize over several orderings of correct and wrong attempts that contain five consecutive failures and assert every one locks, and that after locking no password produces a successful login until `unlock` is run
+- [ ] T022 [P] [US2] Create `tests/test_unlock.py` covering FR-017 and FR-018: `unlock` on a locked account exits **0** with **both streams empty**, after which the correct password prints `ok` / 0; `unlock` on an account that is not locked but has a non-zero tally exits 0 and clears the tally to 0; `unlock` on an already-unlocked zero-tally account exits 0 (idempotent); `unlock` reads **nothing** from standard input and succeeds with stdin closed or empty (no `missing password input`); after `unlock`, four wrong attempts still leave the account unlocked, demonstrating the tally was reset (L-4); `unlock carol` on a store with no such account prints exactly `no such account` on **stderr** with exit **3**; `unlock` against a store path that does not exist yields the same `no such account` / 3
+
+### Implementation for User Story 2
+
+- [ ] T023 [US2] Extend the `login` handler in `src/accounts/cli.py` with the lock and tally logic, in the order of contracts/cli.md `login` 1→4: existence (1) → `locked` (4) → password (1). On the wrong-password path increment `failed_logins`, set `locked = true` when the tally reaches **5**, save the store, and still report `invalid credentials` / 1 (FR-015, L-1). On success reset `failed_logins` to 0 and save. On the locked path write nothing at all (L-3). The tally increment is the only store write any failing command performs (L-7)
+- [ ] T024 [US2] Implement the `unlock` handler in `src/accounts/cli.py`: read no input; unknown account → `no such account` on stderr, return 3; otherwise set `locked = false` and `failed_logins = 0`, save, print nothing on either stream and return 0 — succeeding whether or not the account was locked (FR-017)
+- [ ] T025 [US2] Run `pytest` and confirm User Story 1 tests still pass alongside the new lockout and unlock tests, then walk quickstart.md Scenario 2 by hand and confirm each message, stream and exit status
+
+**Checkpoint**: User Stories 1 and 2 both work independently; guessing against the store is now bounded at five tries.
+
+---
+
+## Phase 5: User Story 3 - Change an account's password (Priority: P3)
+
+**Goal**: An account holder replaces its password by proving they know the current one, both passwords supplied on standard input in order (current, then new), with the account's existing password kept intact on every failure.
+
+**Independent Test**: Register an account, change its password with the correct current password, then confirm in separate invocations that the old password fails and the new one succeeds; also attempt a change with a wrong current password and with an 11-character new password and confirm the stored password is untouched in both cases.
+
+### Tests for User Story 3 ⚠️ write first, observe failing
+
+- [ ] T026 [P] [US3] Create `tests/test_passwd.py` covering FR-019, FR-020, FR-021 and FR-022: success exits **0** with **both streams empty**, after which a login with the new password prints `ok` / 0 and a login with the old password prints `invalid credentials` / 1; the success path replaces `algorithm`, `iterations`, `salt` and `key` (new salt, `iterations == DEFAULT_ITERATIONS`) and leaves `locked` and `failed_logins` untouched (FR-019, L-5); a wrong current password prints exactly `invalid credentials` on **stderr** with exit **1**, leaves the stored password unchanged (the original still logs in) and does **not** advance `failed_logins` (FR-020, L-6); a new password shorter than 12 characters prints exactly `password too short` on **stderr** with exit **2** and leaves the stored password unchanged, with 12 accepted and 11 rejected at the boundary; the current password is verified **before** the new password's length, so a wrong current password with a short new password exits **1** (FR-021); `passwd dave` on an unknown account prints exactly `no such account` on **stderr** with exit **3** with no password check performed (FR-022); a successful `passwd` on a **locked** account succeeds and does **not** unlock it (L-5), and a `passwd` on a locked account with the correct current password behaves normally
+
+### Implementation for User Story 3
+
+- [ ] T027 [US3] Implement the `passwd` handler in `src/accounts/cli.py` reading two stdin lines (current, then new) via the pipeline from T012, with checks in the order of contracts/cli.md `passwd` 1→4: existence (3) → current password (1) → new password length (2). On success replace only the four derivation fields with fresh material from `hashing.new_password_material`, leave `locked` and `failed_logins` as they were, save the store, print nothing and return 0. Two derivations total and no more (A-8)
+- [ ] T028 [US3] Run `pytest` and confirm all prior stories still pass, then walk quickstart.md Scenario 3 by hand and confirm each message, stream and exit status
+
+**Checkpoint**: User Stories 1–3 all work independently; credentials can now be rotated.
+
+---
+
+## Phase 6: User Story 4 - Delete an account (Priority: P4)
+
+**Goal**: An account holder removes their account by proving they know its password; afterwards the username is free to register again and behaves exactly as a username that never existed.
+
+**Independent Test**: Register an account, delete it with the correct password, then confirm a login attempt fails as for an unknown account and that the same username can be registered afresh; also attempt a deletion with a wrong password and confirm the account survives and still accepts its password.
+
+### Tests for User Story 4 ⚠️ write first, observe failing
+
+- [ ] T029 [P] [US4] Create `tests/test_delete.py` covering FR-023, FR-024 and FR-025: success exits **0** with **both streams empty**, the record is gone from `accounts`, and a later `login` as that username prints `invalid credentials` on **stderr** with exit **1** (indistinguishable from a name that never existed); after a deletion the same username registers afresh with a new valid password, printing `registered USERNAME` / 0, and the new password logs in — with a new salt, a zero tally and no lock, so no state survived the deletion (L-9); `unlock` and `passwd` on the deleted username both report `no such account` / 3; a wrong password prints exactly `invalid credentials` on **stderr** with exit **1**, retains the account unchanged so its correct password still logs in, and does **not** advance `failed_logins` (FR-024, L-6); `delete erin` on an unknown account prints exactly `no such account` on **stderr** with exit **3**; with a store holding two accounts, deleting one leaves the other untouched and still accepting its password; a `delete` on a locked account with the correct password succeeds (L-5)
+
+### Implementation for User Story 4
+
+- [ ] T030 [US4] Implement the `delete` handler in `src/accounts/cli.py` reading one stdin line (the current password), with checks in the order of contracts/cli.md `delete` 1→3: existence (3) → password (1). On success remove the record from `accounts`, leaving every other record identical, save the store, print nothing and return 0. One derivation and no more (A-8)
+- [ ] T031 [US4] Run `pytest` and confirm all four stories pass together, then walk quickstart.md Scenario 4 by hand and confirm each message, stream and exit status
+
+**Checkpoint**: All four user stories are independently functional; the full five-command surface is implemented.
+
+---
+
+## Phase 7: Polish & Cross-Cutting Concerns
+
+**Purpose**: The requirements and success criteria that span every command, plus the gates Constitution v1.0.0 requires before the feature may be called complete.
+
+- [ ] T032 Extend `tests/test_store_file.py` with the whole-command FR-027 and FR-028 assertions now that all five commands exist: every failing command writes its message to **stderr** and nothing to stdout, and every successful command writes **nothing to stderr** (FR-027), parametrized across all five commands; every failing path leaves the store's accounts, passwords, failure tallies and lock states exactly as they were, with the single documented exception of the `login` wrong-password tally increment (FR-028, L-7) — asserted by comparing the full parsed store before and after each failure path
+- [ ] T033 Extend `tests/test_store_file.py` with the store-usability behaviour of the full command set (FR-029 at the CLI level): `store unusable: ` as an exact **prefix** on stderr with exit **5** and a non-empty cause, for a path that is a directory, a path whose parent directory is missing, an unreadable file, an unwritable file, and a corrupt file — for each of the five commands; a corrupt store is never treated as an empty store; and the D-004 consequence worth pinning deliberately — `register` with an **invalid username** against a **corrupt** store exits **5**, not 2, because store load precedes input validation
+- [ ] T034 Create `tests/test_success_criteria.py` covering SC-002, SC-003, SC-004, SC-005, SC-006, SC-008 and SC-009 with the criterion id named in each test: **SC-002** a single table-driven test asserting each of the eleven documented messages for equality on its correct stream with its documented status (`registered USERNAME`, `ok`, `invalid credentials`, `account locked`, `invalid username`, `password too short`, `username already exists`, `no such account`, `missing password input`, the full usage line, and the `store unusable: ` prefix) and that every exit status 0–5 is produced at least once; **SC-003** a fresh store path to a verified password in exactly two commands with no setup step; **SC-004** 50 registrations across 50 independent invocations against one path, then 50 successful logins, using the `low_iterations` fixture; **SC-005** the raw store **bytes** searched for each known plaintext password with no match found, and two accounts registered with the identical password shown to have different `salt` and different `key`; **SC-008** the before/after store comparison across every failure path; **SC-009** a single command under 1 second against a store of 1,000 accounts (`low_iterations`), and the derivation count per command asserted as at most one for `register`/`login`/`delete`, exactly two for `passwd` and zero for `unlock` (counted by wrapping `hashing`'s derivation call)
+- [ ] T035 Add the full-cost assertions that the `low_iterations` fixture must not hide (research.md D-008 part 3), in `tests/test_hashing.py` and `tests/test_cli_contract.py`: `accounts.hashing.DEFAULT_ITERATIONS == 600_000` as a constant check, and one end-to-end `python -m accounts register` at full cost whose recorded `iterations` is read back out of the store and asserted to be `600000`
+- [ ] T036 Audit SC-001 coverage: confirm every requirement FR-001 through FR-030 including FR-026a/b/c and FR-029a/b/c is named in at least one test name or comment, matching the requirement-to-test mapping table in plan.md, and that each Principle II error path asserts both the message content and the failure signal. Record any gap as a new test, not as an accepted omission (Constitution Principle III: a feature MUST NOT be marked complete while any functional requirement has no covering test)
+- [ ] T037 [P] Verify Constitution Principle I and IV by inspecting `src/accounts/` and the repository root: no module under `src/accounts/` imports a non-stdlib package or `pytest`; no runtime dependency declaration exists (only `requirements-dev.txt`, holding `pytest`); `src/accounts/` is exactly `__init__.py`, `__main__.py`, `cli.py`, `store.py` and `hashing.py`, with `store.StoreError` as the only class; no configuration surface beyond `--store`, the command word and the username — nothing reads an environment variable or a config file, and no `--iterations` flag was added
+- [ ] T038 Run the full suite from the repository root as `pytest` with no environment setup and confirm **zero failures and zero skips** (SC-001), then `pytest -q --durations=10` and confirm the whole suite completes **within 60 seconds** (SC-009)
+- [ ] T039 Walk every quickstart.md scenario (1 through 7) end to end in a shell against a real store path and confirm each documented message, stream and exit status, including Scenario 6's `ls -l` showing owner-only `-rw-------` permissions (FR-029c) and Scenario 7's three `store unusable:` cases
+
+---
+
+## Dependencies & Execution Order
+
+### Phase Dependencies
+
+- **Setup (Phase 1)**: No dependencies — start immediately
+- **Foundational (Phase 2)**: Depends on Setup — **BLOCKS all four user stories**
+- **User Stories (Phases 3–6)**: All depend on Foundational completion
+  - US1 (P1) → US2 (P2) → US3 (P3) → US4 (P4) in priority order for incremental delivery
+  - Or in parallel across developers, with the one real coupling noted below
+- **Polish (Phase 7)**: Depends on all four stories being complete (T032–T034 and T039 assert behaviour across all five commands)
+
+### User Story Dependencies
+
+- **US1 (P1)**: Depends only on Foundational. No dependency on another story.
+- **US2 (P2)**: Depends only on Foundational for its `unlock` half (T022, T024). Its lockout half (T021, T023) **extends the `login` handler US1 builds in T019** and extends the same test file (`tests/test_login_lockout.py`), so it is sequenced after US1 rather than run concurrently with it. Independently testable once complete.
+- **US3 (P3)**: Depends only on Foundational. `passwd`'s handler and test file are new; the tests exercise login afterwards, so run them after US1 exists. No code coupling to US2.
+- **US4 (P4)**: Depends only on Foundational. `delete`'s handler and test file are new; tests exercise register and login afterwards. No code coupling to US2 or US3.
+
+### Within Each User Story
+
+- Test tasks are written first and MUST be observed to fail before the implementation task runs
+- `store.py` and `hashing.py` before any handler that uses them (both complete in Phase 2)
+- Handler before the story's verification task
+- Story complete and checkpointed before moving to the next priority
+
+### Shared-file sequencing (the main constraint on parallelism)
+
+- `src/accounts/cli.py` is touched by T012, T018, T019, T023, T024, T027 and T030. These are **never** `[P]` with each other — one developer or one sequential pass per handler.
+- `tests/test_cli_contract.py` is touched by T009, T017 and T035; `tests/test_login_lockout.py` by T016 and T021; `tests/test_store_file.py` by T008, T032 and T033. Same-file tasks are sequential within each group.
+
+### Parallel Opportunities
+
+- **Phase 1**: T002, T003 and T004 are all `[P]` — three different files
+- **Phase 2**: T007, T008, T009 (three different test files) are `[P]` with each other; T010 (`hashing.py`) is `[P]` with the test-writing tasks; T011 depends on nothing in T010 but is sequenced after it only for the module-import check in T014
+- **Phase 3**: T015, T016 and T017 are `[P]` — three different test files
+- **Phase 4**: T021 and T022 are `[P]` — different test files
+- **Phase 7**: T037 is `[P]` with T034–T036 (inspection only, touches no file the others touch)
+- Across stories, once Foundational is done, US3's and US4's test files (T026, T029) can be written in parallel with US1 and US2 work — only their implementation tasks contend for `cli.py`
+
+---
+
+## Parallel Example: Phase 2 Foundational
+
+```bash
+# Launch the three foundational test files together (different files, no shared state):
+Task: "Create tests/test_hashing.py covering FR-026, FR-026a, FR-026b, FR-026c"       # T007
+Task: "Create tests/test_store_file.py covering FR-029, FR-029a, FR-029b, FR-029c"    # T008
+Task: "Create tests/test_cli_contract.py covering FR-001, FR-003–FR-006, FR-030"      # T009
+
+# hashing.py can be implemented alongside them:
+Task: "Implement src/accounts/hashing.py with DEFAULT_ITERATIONS = 600_000"           # T010
+```
+
+## Parallel Example: Phase 3 User Story 1
+
+```bash
+# Launch all three US1 test files together:
+Task: "Create tests/test_register.py covering FR-007–FR-011"                          # T015
+Task: "Create tests/test_login_lockout.py US1 portion — FR-012, FR-014"               # T016
+Task: "Add the real-subprocess FR-001/FR-002 tests to tests/test_cli_contract.py"     # T017
+
+# Then implement the two handlers sequentially — both edit src/accounts/cli.py:
+Task: "Implement the register handler in src/accounts/cli.py"                         # T018
+Task: "Implement the login handler in src/accounts/cli.py"                            # T019
+```
+
+---
+
+## Implementation Strategy
+
+### MVP First (User Story 1 Only)
+
+1. Complete Phase 1: Setup (T001–T005)
+2. Complete Phase 2: Foundational (T006–T014) — **CRITICAL**, blocks every story
+3. Complete Phase 3: User Story 1 (T015–T020)
+4. **STOP and VALIDATE**: register against a fresh path, login in a separate process with the right and the wrong password; quickstart.md Scenario 1 passes end to end
+5. The tool is already useful here: a script can gate an action on a correct password
+
+### Incremental Delivery
+
+1. Setup + Foundational → cryptography, persistence and the CLI pipeline ready
+2. Add US1 → validate independently → **MVP**
+3. Add US2 → validate independently → guessing is now bounded at five attempts
+4. Add US3 → validate independently → passwords can be rotated
+5. Add US4 → validate independently → accounts can be removed and the name reused
+6. Phase 7 → the cross-command requirements (FR-027, FR-028, FR-029 at the CLI level), the nine success criteria and the constitution gates
+
+Each story adds value without breaking the previous ones — every phase ends with the full suite green.
+
+### Parallel Team Strategy
+
+With multiple developers:
+
+1. The team completes Setup + Foundational together (three test files and `hashing.py` in parallel, then `store.py` and `cli.py`)
+2. Once Foundational is done:
+   - Developer A: US1, then the US2 lockout half (both edit the `login` handler)
+   - Developer B: US2's `unlock` half, then US3's `passwd`
+   - Developer C: US4's `delete`, then the Phase 7 success-criteria suite
+3. Coordinate on `src/accounts/cli.py` — every handler lands in that one file, so merge handler by handler rather than story by story
+
+---
+
+## Notes
+
+- `[P]` tasks = different files, no dependencies. Every task that edits `src/accounts/cli.py` is deliberately **not** marked `[P]`.
+- `[Story]` labels map tasks to the four user stories for traceability; Setup, Foundational and Polish tasks carry no story label.
+- Message strings are **exact and complete**: no prefix, no suffix, no trailing punctuation beyond the single terminating newline. Assert equality, never containment — except `store unusable: `, which is asserted as a prefix with a separately asserted non-empty cause.
+- Compare **parsed JSON**, never raw bytes, when checking store contents — the single exception is SC-005, which deliberately searches the raw bytes for plaintext passwords.
+- Tests must not depend on the store file's mtime: a successful command that would change nothing may skip the write.
+- Verify tests fail before implementing. Commit after each task or logical group. Stop at any checkpoint to validate a story independently.
+- The feature is not complete until T036 and T038 pass: every FR has a named covering test and the suite runs green with zero skips inside 60 seconds (Constitution Principle III; SC-001, SC-009).
