@@ -22,7 +22,7 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R027 | | T-QIMPORT-01 | sdd_clarify | | | | |  |
 | R009 | 2026-11-10 | T-ACCOUNTS-01 | sdd_clarify | OK | 0 | no | ok | operated by Claude; 4 clarify questions: SAFETY x2, NOPREF x2 (none matched the sheet); first session stopped at the usage limit before any work and was resumed after 4.2 h with the fixed message; constitution and total active time include that wait and are not usable; Claude Code cost $19.59 |
 | R009C | 2026-11-11 | T-ACCOUNTS-01-CR | sdd_clarify | OK | 0 | no | ok | change request on R009; operated by Claude; 5 clarify questions: I1, I3 (first answer-sheet matches in the study), SAFETY x1, NOPREF x2; stopped at the usage limit twice (start of specify, start of implement) and resumed with the fixed message; specify, implement and total active time include the waits and are not usable; Claude Code cost $31.58 |
-| R010 | | T-TARX-01 | sdd_secure | | | | |  |
+| R010 | 2026-11-12 | T-TARX-01 | sdd_secure | OK | 0 | no | ok | operated by Claude; no questions, 5 LISTED; implement stopped at the usage limit 11 Nov and was resumed 12 Nov with the fixed message; implement and total active time include the wait and are not usable; Claude Code cost $18.22 |
 | R010C | | T-TARX-01-CR | sdd_secure | | | | | change request on R010 |
 | R011 | | T-REDACT-01 | sdd_clarify | | | | |  |
 | R011C | | T-REDACT-01-CR | sdd_clarify | | | | | change request on R011 |
