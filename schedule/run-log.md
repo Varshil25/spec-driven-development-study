@@ -27,8 +27,8 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R011 | 2026-11-13 | T-REDACT-01 | sdd_clarify | OK | 0 | no | ok | operated by Claude; 5 clarify questions: NOPREF x4, SAFETY x1 (none matched the sheet); plan stopped at the usage limit and was resumed with the fixed message; plan and total active time include the wait and are not usable; agent reports its email pattern is quadratic on long lines and scaled its own long-line test down; Claude Code cost $21.30 |
 | R011C | 2026-11-14 | T-REDACT-01-CR | sdd_clarify | FAIL | 0 | no | excluded | change request on R011; operated by Claude; two copies of the run tool drove the same run from the end of clarify through plan (operator error), so verify reports a duplicated sequence number and doubled phase markers; kept in logs/runs/R011C, redone as R019C (section 9); Claude Code cost $27.67 |
 | R019C | 2026-11-14 | T-REDACT-01-CR | sdd_clarify | OK | 0 | no | ok | rerun of R011C (spare ID), on R011's finished build from a fresh clone; operated by Claude; plan resumed after the usage limit (same session); Claude Code 2.1.325; Claude Code cost $24.74 |
-| R012 | | T-PASTE-01 | unstructured | | | | |  |
-| R012C | | T-PASTE-01-CR | unstructured | | | | | change request on R012 |
+| R012 | 2026-11-14 | T-PASTE-01 | unstructured | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $2.43 |
+| R012C | 2026-11-14 | T-PASTE-01-CR | unstructured | OK | 0 | no | ok | change request on R012; operated by Claude; Claude Code 2.1.317 (pinned); the agent's own pkill matched the harness and ended its first call, and the resumed session then stopped at the usage limit; both resumed with the fixed message; cost excludes the calls that were cut off; Claude Code cost $2.61 |
 | R013 | | T-BOOKMARKS-01 | sdd | | | | |  |
 | R013C | | T-BOOKMARKS-01-CR | sdd | | | | | change request on R013 |
 | R028 | | T-QNOTES-01 | sdd_clarify | | | | |  |

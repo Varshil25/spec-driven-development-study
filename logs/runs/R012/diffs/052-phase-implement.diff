@@ -1,0 +1,941 @@
+diff --git a/src/pastebin/__init__.py b/src/pastebin/__init__.py
+new file mode 100644
+index 0000000..03f981f
+--- /dev/null
++++ b/src/pastebin/__init__.py
+@@ -0,0 +1,5 @@
++"""A tiny standard-library-only HTTP service for sharing text snippets."""
++
++__all__ = ["__version__"]
++
++__version__ = "1.0.0"
+diff --git a/src/pastebin/__main__.py b/src/pastebin/__main__.py
+new file mode 100644
+index 0000000..a99b8b4
+--- /dev/null
++++ b/src/pastebin/__main__.py
+@@ -0,0 +1,64 @@
++"""Command line entry point: ``python -m pastebin serve --port P --data DIR``."""
++
++from __future__ import annotations
++
++import argparse
++import sys
++from typing import Optional, Sequence
++
++from .server import make_server
++
++HOST = "127.0.0.1"
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        prog="python -m pastebin",
++        description="A small HTTP service for sharing text snippets.",
++    )
++    subcommands = parser.add_subparsers(dest="command", required=True)
++
++    serve = subcommands.add_parser("serve", help="run the HTTP server")
++    serve.add_argument(
++        "--port",
++        type=int,
++        required=True,
++        help=f"TCP port to listen on (bound to {HOST}; 0 picks a free port)",
++    )
++    serve.add_argument(
++        "--data",
++        required=True,
++        metavar="DIR",
++        help="directory in which pastes are stored (created if needed)",
++    )
++    return parser
++
++
++def serve(port: int, data_dir: str) -> int:
++    if not 0 <= port <= 65535:
++        print(f"error: invalid port {port}", file=sys.stderr)
++        return 2
++    try:
++        server = make_server(port, data_dir, host=HOST)
++    except OSError as error:
++        print(f"error: could not start server: {error}", file=sys.stderr)
++        return 1
++
++    with server:
++        print(f"listening on {HOST}:{server.server_address[1]}", flush=True)
++        try:
++            server.serve_forever()
++        except KeyboardInterrupt:
++            pass
++    return 0
++
++
++def main(argv: Optional[Sequence[str]] = None) -> int:
++    args = build_parser().parse_args(argv)
++    if args.command == "serve":
++        return serve(args.port, args.data)
++    return 2  # pragma: no cover - argparse rejects unknown commands
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/src/pastebin/server.py b/src/pastebin/server.py
+new file mode 100644
+index 0000000..9192b5c
+--- /dev/null
++++ b/src/pastebin/server.py
+@@ -0,0 +1,286 @@
++"""HTTP layer: request routing, validation and JSON responses."""
++
++from __future__ import annotations
++
++import json
++import re
++import sys
++from http import HTTPStatus
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from typing import Optional, Tuple
++from urllib.parse import unquote, urlsplit
++
++from .storage import (
++    MAX_CONTENT_BYTES,
++    MAX_EXPIRES_IN,
++    MIN_EXPIRES_IN,
++    Store,
++    to_iso,
++)
++
++#: Bodies larger than this are rejected without being read into memory.  The
++#: content limit is 64 KiB; the slack covers JSON escaping of the payload.
++MAX_BODY_BYTES = 4 * MAX_CONTENT_BYTES + 4096
++
++PASTE_PATH = re.compile(r"\A/pastes/(?P<id>[^/]+)\Z")
++PASTE_RAW_PATH = re.compile(r"\A/pastes/(?P<id>[^/]+)/raw\Z")
++
++
++class HTTPError(Exception):
++    """An error that maps directly onto a status code and JSON message."""
++
++    def __init__(self, status: HTTPStatus, message: str) -> None:
++        super().__init__(message)
++        self.status = status
++        self.message = message
++
++
++def _parse_create_request(body: bytes) -> Tuple[str, Optional[int]]:
++    """Validate a ``POST /pastes`` body, returning ``(content, expires_in)``."""
++    try:
++        payload = json.loads(body.decode("utf-8"))
++    except (ValueError, UnicodeDecodeError):
++        raise HTTPError(HTTPStatus.BAD_REQUEST, "body must be valid JSON")
++
++    if not isinstance(payload, dict):
++        raise HTTPError(HTTPStatus.BAD_REQUEST, "body must be a JSON object")
++
++    content = payload.get("content")
++    if not isinstance(content, str):
++        raise HTTPError(HTTPStatus.BAD_REQUEST, "content must be a string")
++    if len(content.encode("utf-8")) > MAX_CONTENT_BYTES:
++        raise HTTPError(
++            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
++            f"content must be at most {MAX_CONTENT_BYTES} bytes",
++        )
++
++    if "expires_in" not in payload:
++        return content, None
++
++    # Present but not a usable integer (including ``null`` and booleans) is an
++    # error: the field is optional, but only an integer is accepted for it.
++    expires_in = payload["expires_in"]
++    if isinstance(expires_in, bool) or not isinstance(expires_in, int):
++        raise HTTPError(HTTPStatus.BAD_REQUEST, "expires_in must be an integer")
++    if not MIN_EXPIRES_IN <= expires_in <= MAX_EXPIRES_IN:
++        raise HTTPError(
++            HTTPStatus.BAD_REQUEST,
++            f"expires_in must be between {MIN_EXPIRES_IN} and {MAX_EXPIRES_IN} seconds",
++        )
++    return content, expires_in
++
++
++class PasteRequestHandler(BaseHTTPRequestHandler):
++    """Routes requests for the paste API.
++
++    One instance handles every request on a single (possibly kept-alive)
++    connection, so per-request state is reset in :meth:`_dispatch`.
++    """
++
++    server_version = "pastebin/1.0"
++    protocol_version = "HTTP/1.1"
++    timeout = 30  # drop a client that stops mid-request
++
++    #: Request body, filled in by :meth:`_dispatch` before routing.
++    body: bytes = b""
++    #: True when the body was larger than :data:`MAX_BODY_BYTES` and was skipped.
++    body_oversized: bool = False
++
++    # The store is attached to the server object by :func:`make_server`.
++    @property
++    def store(self) -> Store:
++        return self.server.store  # type: ignore[attr-defined]
++
++    # -- plumbing ----------------------------------------------------------
++
++    def log_message(self, format: str, *args) -> None:  # noqa: A002
++        """Silence per-request logging so stdout/stderr stay clean."""
++
++    def _send(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
++        try:
++            self._send_unguarded(status, body, content_type)
++        except (BrokenPipeError, ConnectionError):
++            # The client hung up before reading the response; nothing to do.
++            self.close_connection = True
++
++    def _send_unguarded(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
++        self.send_response(status)
++        if status == HTTPStatus.NO_CONTENT:
++            # A 204 carries no body, so it gets no entity headers either.
++            self.end_headers()
++            return
++        self.send_header("Content-Type", content_type)
++        self.send_header("Content-Length", str(len(body)))
++        self.end_headers()
++        if self.command != "HEAD":
++            self.wfile.write(body)
++
++    def _send_no_content(self) -> None:
++        self._send(HTTPStatus.NO_CONTENT, b"", "")
++
++    def _send_json(self, status: HTTPStatus, payload: dict) -> None:
++        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
++        self._send(status, body, "application/json; charset=utf-8")
++
++    def _send_error_json(self, status: HTTPStatus, message: str) -> None:
++        self._send_json(status, {"error": message})
++
++    def send_error(self, code, message=None, explain=None):  # noqa: D102
++        """Make framework-level errors (bad request line, timeouts) JSON too."""
++        try:
++            status = HTTPStatus(code)
++        except ValueError:
++            status = HTTPStatus.BAD_REQUEST
++        self.close_connection = True
++        self._send_error_json(status, message or status.phrase.lower())
++
++    def _read_body(self) -> bytes:
++        """Read the request body, recording whether it was too large to read.
++
++        An over-sized body is not read at all: the unread bytes make the
++        connection unusable for a following request, so it is closed instead.
++        Routing still happens, so a path that is 404 stays 404.
++        """
++        raw_length = self.headers.get("Content-Length")
++        if raw_length is None:
++            if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
++                self.close_connection = True
++                raise HTTPError(
++                    HTTPStatus.LENGTH_REQUIRED, "chunked request bodies are not supported"
++                )
++            return b""
++        try:
++            length = int(raw_length)
++        except ValueError:
++            length = -1
++        if length < 0:
++            # The body cannot be framed, so the connection cannot be reused.
++            self.close_connection = True
++            raise HTTPError(HTTPStatus.BAD_REQUEST, "invalid Content-Length header")
++        if length > MAX_BODY_BYTES:
++            self.body_oversized = True
++            self.close_connection = True
++            return b""
++        return self.rfile.read(length)
++
++    # -- verbs -------------------------------------------------------------
++
++    def do_POST(self) -> None:  # noqa: N802
++        self._dispatch(self._route_post)
++
++    def do_GET(self) -> None:  # noqa: N802
++        self._dispatch(self._route_get)
++
++    def do_HEAD(self) -> None:  # noqa: N802
++        self._dispatch(self._route_get)
++
++    def do_DELETE(self) -> None:  # noqa: N802
++        self._dispatch(self._route_delete)
++
++    def _dispatch(self, route) -> None:
++        # One handler instance serves every request on a keep-alive
++        # connection, so per-request state starts from a clean slate.
++        self.body = b""
++        self.body_oversized = False
++        try:
++            # Always consume the request body, even for requests that are
++            # rejected before they would look at it: bytes left unread would be
++            # parsed as the next request on a keep-alive connection.
++            self.body = self._read_body()
++            route(urlsplit(self.path).path)
++        except HTTPError as error:
++            self._send_error_json(error.status, error.message)
++        except (BrokenPipeError, ConnectionError, TimeoutError):
++            # The client went away mid-request; no response can be sent.
++            self.close_connection = True
++        except Exception:  # pragma: no cover - unexpected server-side failure
++            self._send_error_json(
++                HTTPStatus.INTERNAL_SERVER_ERROR, "internal server error"
++            )
++            raise
++
++    # -- routes ------------------------------------------------------------
++
++    def _route_post(self, path: str) -> None:
++        if path != "/pastes":
++            raise HTTPError(HTTPStatus.NOT_FOUND, "not found")
++        if self.body_oversized:
++            raise HTTPError(
++                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
++                f"content must be at most {MAX_CONTENT_BYTES} bytes",
++            )
++        content, expires_in = _parse_create_request(self.body)
++        paste = self.store.create(content, expires_in)
++        self._send_json(
++            HTTPStatus.CREATED,
++            {
++                "id": paste.id,
++                "delete_token": paste.delete_token,
++                "url": f"/pastes/{paste.id}",
++            },
++        )
++
++    def _route_get(self, path: str) -> None:
++        match = PASTE_RAW_PATH.match(path)
++        if match:
++            paste = self._lookup(match.group("id"))
++            self._send(
++                HTTPStatus.OK,
++                paste.content.encode("utf-8"),
++                "text/plain; charset=utf-8",
++            )
++            return
++
++        match = PASTE_PATH.match(path)
++        if match:
++            paste = self._lookup(match.group("id"))
++            self._send_json(
++                HTTPStatus.OK,
++                {
++                    "id": paste.id,
++                    "content": paste.content,
++                    "created_at": to_iso(paste.created_at),
++                    "expires_at": to_iso(paste.expires_at) if paste.expires_at else None,
++                },
++            )
++            return
++
++        raise HTTPError(HTTPStatus.NOT_FOUND, "not found")
++
++    def _route_delete(self, path: str) -> None:
++        match = PASTE_PATH.match(path)
++        if not match:
++            raise HTTPError(HTTPStatus.NOT_FOUND, "not found")
++        paste_id = unquote(match.group("id"))
++        outcome = self.store.delete(paste_id, self.headers.get("X-Delete-Token"))
++        if outcome == "not_found":
++            raise HTTPError(HTTPStatus.NOT_FOUND, "paste not found")
++        if outcome == "forbidden":
++            raise HTTPError(HTTPStatus.FORBIDDEN, "invalid delete token")
++        self._send_no_content()
++
++    def _lookup(self, raw_id: str):
++        paste = self.store.get(unquote(raw_id))
++        if paste is None:
++            raise HTTPError(HTTPStatus.NOT_FOUND, "paste not found")
++        return paste
++
++
++class PasteServer(ThreadingHTTPServer):
++    daemon_threads = True
++
++    def __init__(self, address, store: Store) -> None:
++        self.store = store
++        super().__init__(address, PasteRequestHandler)
++
++    def handle_error(self, request, client_address) -> None:
++        """Keep client disconnects out of the server's error output."""
++        error = sys.exc_info()[1]
++        if isinstance(error, (ConnectionError, BrokenPipeError, TimeoutError)):
++            return
++        super().handle_error(request, client_address)
++
++
++def make_server(port: int, data_dir: str, host: str = "127.0.0.1") -> PasteServer:
++    """Create (but do not start) a server bound to ``host:port``."""
++    return PasteServer((host, port), Store(data_dir))
+diff --git a/src/pastebin/storage.py b/src/pastebin/storage.py
+new file mode 100644
+index 0000000..a615298
+--- /dev/null
++++ b/src/pastebin/storage.py
+@@ -0,0 +1,189 @@
++"""Filesystem-backed storage for pastes.
++
++Each paste is one JSON file named ``<id>.json`` inside the data directory, so
++pastes survive a restart of the server.  Writes go through a temporary file and
++``os.replace`` so a reader never observes a half-written paste.
++"""
++
++from __future__ import annotations
++
++import json
++import os
++import re
++import secrets
++import tempfile
++import threading
++from dataclasses import dataclass
++from datetime import datetime, timedelta, timezone
++from typing import Optional
++
++#: Pastes ids are generated by us; this pattern is also used to reject ids from
++#: request paths that could escape the data directory (e.g. ``../../etc/passwd``).
++ID_PATTERN = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
++
++MAX_CONTENT_BYTES = 65_536
++MIN_EXPIRES_IN = 1
++MAX_EXPIRES_IN = 2_592_000  # 30 days
++
++
++def utcnow() -> datetime:
++    """Current UTC time, truncated to whole seconds."""
++    return datetime.now(timezone.utc).replace(microsecond=0)
++
++
++def to_iso(moment: datetime) -> str:
++    """Format a datetime as ISO 8601 in UTC, e.g. ``2026-10-23T20:15:00Z``."""
++    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
++
++
++def from_iso(text: str) -> datetime:
++    """Parse a timestamp written by :func:`to_iso`."""
++    moment = datetime.fromisoformat(text)
++    if moment.tzinfo is None:
++        moment = moment.replace(tzinfo=timezone.utc)
++    return moment
++
++
++@dataclass(frozen=True)
++class Paste:
++    id: str
++    content: str
++    created_at: datetime
++    expires_at: Optional[datetime]
++    delete_token: str
++
++    def is_expired(self, now: Optional[datetime] = None) -> bool:
++        if self.expires_at is None:
++            return False
++        return (now or utcnow()) >= self.expires_at
++
++    def to_json(self) -> dict:
++        return {
++            "id": self.id,
++            "content": self.content,
++            "created_at": to_iso(self.created_at),
++            "expires_at": to_iso(self.expires_at) if self.expires_at else None,
++            "delete_token": self.delete_token,
++        }
++
++    @classmethod
++    def from_json(cls, raw: dict) -> "Paste":
++        expires_at = raw.get("expires_at")
++        return cls(
++            id=raw["id"],
++            content=raw["content"],
++            created_at=from_iso(raw["created_at"]),
++            expires_at=from_iso(expires_at) if expires_at else None,
++            delete_token=raw["delete_token"],
++        )
++
++
++class Store:
++    """A directory of pastes."""
++
++    def __init__(self, directory: str | os.PathLike[str]) -> None:
++        self.directory = os.path.abspath(os.fspath(directory))
++        os.makedirs(self.directory, exist_ok=True)
++        self._lock = threading.Lock()
++
++    # -- internals ---------------------------------------------------------
++
++    def _path(self, paste_id: str) -> str:
++        return os.path.join(self.directory, f"{paste_id}.json")
++
++    def _read(self, paste_id: str) -> Optional[Paste]:
++        try:
++            with open(self._path(paste_id), "r", encoding="utf-8") as handle:
++                raw = json.load(handle)
++        except FileNotFoundError:
++            return None
++        except (OSError, ValueError, KeyError):
++            # Unreadable or malformed file: behave as if the paste is absent.
++            return None
++        try:
++            return Paste.from_json(raw)
++        except (KeyError, TypeError, ValueError):
++            return None
++
++    def _unlink(self, paste_id: str) -> bool:
++        try:
++            os.unlink(self._path(paste_id))
++            return True
++        except FileNotFoundError:
++            return False
++
++    def _write(self, paste: Paste) -> None:
++        payload = json.dumps(paste.to_json(), ensure_ascii=False, indent=2)
++        descriptor, temp_path = tempfile.mkstemp(
++            dir=self.directory, prefix=f".{paste.id}.", suffix=".tmp"
++        )
++        try:
++            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
++                handle.write(payload)
++                handle.flush()
++                os.fsync(handle.fileno())
++            os.replace(temp_path, self._path(paste.id))
++        except BaseException:
++            try:
++                os.unlink(temp_path)
++            except OSError:
++                pass
++            raise
++
++    # -- public API --------------------------------------------------------
++
++    def create(self, content: str, expires_in: Optional[int] = None) -> Paste:
++        created_at = utcnow()
++        expires_at = (
++            created_at + timedelta(seconds=expires_in) if expires_in is not None else None
++        )
++        with self._lock:
++            for _ in range(10):
++                paste_id = secrets.token_urlsafe(8)
++                if not os.path.exists(self._path(paste_id)):
++                    break
++            else:  # pragma: no cover - astronomically unlikely
++                raise RuntimeError("could not allocate a unique paste id")
++            paste = Paste(
++                id=paste_id,
++                content=content,
++                created_at=created_at,
++                expires_at=expires_at,
++                delete_token=secrets.token_urlsafe(24),
++            )
++            self._write(paste)
++        return paste
++
++    def get(self, paste_id: str) -> Optional[Paste]:
++        """Return a live paste, or ``None`` if it is unknown or expired."""
++        if not ID_PATTERN.match(paste_id):
++            return None
++        with self._lock:
++            paste = self._read(paste_id)
++            if paste is None:
++                return None
++            if paste.is_expired():
++                self._unlink(paste_id)
++                return None
++            return paste
++
++    def delete(self, paste_id: str, token=[REDACTED:assigned_secret][str]) -> str:
++        """Delete a paste.
++
++        Returns ``"deleted"``, ``"not_found"`` (unknown or expired paste) or
++        ``"forbidden"`` (wrong or missing delete token).  "Not found" wins over
++        "forbidden" so a bad token cannot reveal whether a paste exists.
++        """
++        if not ID_PATTERN.match(paste_id):
++            return "not_found"
++        with self._lock:
++            paste = self._read(paste_id)
++            if paste is None:
++                return "not_found"
++            if paste.is_expired():
++                self._unlink(paste_id)
++                return "not_found"
++            if token is None or not secrets.compare_digest(token, paste.delete_token):
++                return "forbidden"
++            self._unlink(paste_id)
++            return "deleted"
+diff --git a/tests/test_pastebin.py b/tests/test_pastebin.py
+new file mode 100644
+index 0000000..307c1f2
+--- /dev/null
++++ b/tests/test_pastebin.py
+@@ -0,0 +1,367 @@
++"""End-to-end tests for the pastebin service, driven over real HTTP."""
++
++from __future__ import annotations
++
++import json
++import os
++import subprocess
++import sys
++import threading
++import time
++from http.client import HTTPConnection
++from typing import Optional
++
++import pytest
++
++SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
++sys.path.insert(0, SRC)
++
++from pastebin.server import make_server  # noqa: E402
++from pastebin.storage import MAX_CONTENT_BYTES  # noqa: E402
++
++
++class Client:
++    def __init__(self, port: int) -> None:
++        self.port = port
++
++    def request(
++        self,
++        method: str,
++        path: str,
++        body: Optional[bytes] = None,
++        headers: Optional[dict] = None,
++    ):
++        connection = HTTPConnection("127.0.0.1", self.port, timeout=10)
++        try:
++            connection.request(method, path, body=body, headers=headers or {})
++            response = connection.getresponse()
++            return response.status, dict(response.getheaders()), response.read()
++        finally:
++            connection.close()
++
++    def json_request(self, method: str, path: str, payload=None, headers=None):
++        body = None if payload is None else json.dumps(payload).encode("utf-8")
++        status, response_headers, raw = self.request(method, path, body, headers)
++        parsed = json.loads(raw) if raw else None
++        return status, response_headers, parsed
++
++    def create(self, **payload):
++        status, _, parsed = self.json_request("POST", "/pastes", payload)
++        assert status == 201, parsed
++        return parsed
++
++
++@pytest.fixture()
++def client(tmp_path):
++    server = make_server(0, str(tmp_path / "data"))
++    thread = threading.Thread(target=server.serve_forever, daemon=True)
++    thread.start()
++    try:
++        yield Client(server.server_address[1])
++    finally:
++        server.shutdown()
++        server.server_close()
++        thread.join(timeout=5)
++
++
++# -- creating and reading ---------------------------------------------------
++
++
++def test_create_returns_id_token_and_url(client):
++    created = client.create(content="hello")
++    assert set(created) == {"id", "delete_token", "url"}
++    assert created["url"] == f"/pastes/{created['id']}"
++    assert created["id"] and created["delete_token"]
++
++
++def test_get_paste_without_expiry(client):
++    created = client.create(content="hello")
++    status, _, paste = client.json_request("GET", f"/pastes/{created['id']}")
++    assert status == 200
++    assert paste["id"] == created["id"]
++    assert paste["content"] == "hello"
++    assert paste["expires_at"] is None
++    assert paste["created_at"].endswith("Z") and len(paste["created_at"]) == 20
++    assert "delete_token" not in paste
++
++
++def test_get_paste_with_expiry_has_iso_timestamps(client):
++    created = client.create(content="hello", expires_in=3600)
++    _, _, paste = client.json_request("GET", f"/pastes/{created['id']}")
++    assert paste["expires_at"] is not None
++    assert paste["expires_at"].endswith("Z")
++
++
++def test_raw_endpoint_returns_plain_text(client):
++    created = client.create(content="hello\nworld")
++    status, headers, body = client.request("GET", f"/pastes/{created['id']}/raw")
++    assert status == 200
++    assert headers["Content-Type"] == "text/plain; charset=utf-8"
++    assert body == b"hello\nworld"
++
++
++def test_unicode_content_round_trips(client):
++    content = "héllo ✓ 🎉"
++    created = client.create(content=content)
++    _, _, paste = client.json_request("GET", f"/pastes/{created['id']}")
++    assert paste["content"] == content
++    _, _, raw = client.request("GET", f"/pastes/{created['id']}/raw")
++    assert raw == content.encode("utf-8")
++
++
++def test_empty_content_is_allowed(client):
++    created = client.create(content="")
++    _, _, raw = client.request("GET", f"/pastes/{created['id']}/raw")
++    assert raw == b""
++
++
++def test_content_at_size_limit_is_accepted(client):
++    created = client.create(content="a" * MAX_CONTENT_BYTES)
++    _, _, raw = client.request("GET", f"/pastes/{created['id']}/raw")
++    assert len(raw) == MAX_CONTENT_BYTES
++
++
++# -- validation errors ------------------------------------------------------
++
++
++def test_invalid_json_is_400(client):
++    status, _, parsed = client.json_request("POST", "/pastes", None)
++    # An empty body is not valid JSON either.
++    assert status == 400 and "error" in parsed
++
++    status, _, parsed = client.request("POST", "/pastes", b"{not json")
++    assert status == 400
++
++
++@pytest.mark.parametrize("payload", [{}, {"content": None}, {"content": 5}, {"content": ["a"]}])
++def test_missing_or_non_string_content_is_400(client, payload):
++    status, _, parsed = client.json_request("POST", "/pastes", payload)
++    assert status == 400
++    assert list(parsed) == ["error"]
++
++
++@pytest.mark.parametrize("expires_in", [0, -1, 2_592_001, "3600", 1.5, None, True])
++def test_invalid_expires_in_is_400(client, expires_in):
++    status, _, parsed = client.json_request(
++        "POST", "/pastes", {"content": "x", "expires_in": expires_in}
++    )
++    assert status == 400
++    assert list(parsed) == ["error"]
++
++
++@pytest.mark.parametrize("expires_in", [1, 3600, 2_592_000])
++def test_expires_in_bounds_are_accepted(client, expires_in):
++    assert client.create(content="x", expires_in=expires_in)
++
++
++def test_oversized_content_is_413(client):
++    status, _, parsed = client.json_request(
++        "POST", "/pastes", {"content": "a" * (MAX_CONTENT_BYTES + 1)}
++    )
++    assert status == 413
++    assert list(parsed) == ["error"]
++
++
++def test_oversized_multibyte_content_is_413(client):
++    # 32769 two-byte characters is 65538 bytes when UTF-8 encoded.
++    status, _, _ = client.json_request("POST", "/pastes", {"content": "é" * 32_769})
++    assert status == 413
++
++
++def test_huge_body_is_413(client):
++    status, _, _ = client.json_request("POST", "/pastes", {"content": "a" * 1_000_000})
++    assert status == 413
++
++
++# -- not found --------------------------------------------------------------
++
++
++@pytest.mark.parametrize(
++    "path",
++    [
++        "/pastes/does-not-exist",
++        "/pastes/does-not-exist/raw",
++        "/pastes",
++        "/pastes/",
++        "/",
++        "/other",
++        "/pastes/abc/raw/extra",
++    ],
++)
++def test_unknown_paths_are_404_with_json_body(client, path):
++    status, headers, parsed = client.json_request("GET", path)
++    assert status == 404
++    assert list(parsed) == ["error"]
++    assert headers["Content-Type"].startswith("application/json")
++
++
++def test_post_to_unknown_path_is_404(client):
++    status, _, _ = client.json_request("POST", "/other", {"content": "x"})
++    assert status == 404
++
++
++def test_post_with_huge_body_to_unknown_path_is_404(client):
++    # 404 for the path still wins over the size of the body.
++    status, _, _ = client.json_request("POST", "/other", {"content": "a" * 1_000_000})
++    assert status == 404
++
++
++def test_request_body_on_unknown_path_does_not_break_the_connection(client):
++    """A body we never look at must not be parsed as the next request."""
++    connection = HTTPConnection("127.0.0.1", client.port, timeout=10)
++    try:
++        connection.request("POST", "/other", body=json.dumps({"content": "x"}).encode())
++        assert connection.getresponse().read()  # drain the 404
++        connection.request("POST", "/pastes", body=json.dumps({"content": "ok"}).encode())
++        response = connection.getresponse()
++        assert response.status == 201, response.read()
++    finally:
++        connection.close()
++
++
++def test_path_traversal_is_404(client):
++    status, _, _ = client.request("GET", "/pastes/..%2f..%2fetc%2fpasswd")
++    assert status == 404
++
++
++# -- deletion ---------------------------------------------------------------
++
++
++def test_delete_with_token_removes_paste(client):
++    created = client.create(content="hello")
++    status, _, body = client.request(
++        "DELETE", f"/pastes/{created['id']}", headers={"X-Delete-Token": created["delete_token"]}
++    )
++    assert status == 204
++    assert body == b""
++    status, _, _ = client.request("GET", f"/pastes/{created['id']}")
++    assert status == 404
++
++
++def test_delete_without_token_is_403(client):
++    created = client.create(content="hello")
++    status, _, parsed = client.json_request("DELETE", f"/pastes/{created['id']}")
++    assert status == 403
++    assert list(parsed) == ["error"]
++    # The paste is still there.
++    status, _, _ = client.request("GET", f"/pastes/{created['id']}")
++    assert status == 200
++
++
++def test_delete_with_wrong_token_is_403(client):
++    created = client.create(content="hello")
++    status, _, _ = client.request(
++        "DELETE", f"/pastes/{created['id']}", headers={"X-Delete-Token": "nope"}
++    )
++    assert status == 403
++
++
++def test_delete_unknown_paste_is_404_even_with_a_token(client):
++    status, _, _ = client.request(
++        "DELETE", "/pastes/nosuchpaste", headers={"X-Delete-Token": "nope"}
++    )
++    assert status == 404
++
++
++# -- expiry -----------------------------------------------------------------
++
++
++def test_expired_paste_behaves_as_missing(client):
++    created = client.create(content="ephemeral", expires_in=1)
++    status, _, _ = client.request("GET", f"/pastes/{created['id']}")
++    assert status == 200
++
++    time.sleep(1.5)
++    for path in (f"/pastes/{created['id']}", f"/pastes/{created['id']}/raw"):
++        status, _, _ = client.request("GET", path)
++        assert status == 404
++    # 404 wins over 403, and over a valid delete token.
++    status, _, _ = client.request(
++        "DELETE", f"/pastes/{created['id']}", headers={"X-Delete-Token": created["delete_token"]}
++    )
++    assert status == 404
++
++
++# -- connection handling ----------------------------------------------------
++
++
++def test_keep_alive_connection_serves_several_requests(client):
++    connection = HTTPConnection("127.0.0.1", client.port, timeout=10)
++    try:
++        ids = []
++        for index in range(5):
++            connection.request(
++                "POST",
++                "/pastes",
++                body=json.dumps({"content": f"paste {index}"}).encode(),
++            )
++            response = connection.getresponse()
++            assert response.status == 201
++            ids.append(json.loads(response.read())["id"])
++        for index, paste_id in enumerate(ids):
++            connection.request("GET", f"/pastes/{paste_id}/raw")
++            response = connection.getresponse()
++            assert response.status == 200
++            assert response.read() == f"paste {index}".encode()
++    finally:
++        connection.close()
++
++
++def test_concurrent_creates_all_get_distinct_ids(client):
++    ids = []
++    lock = threading.Lock()
++
++    def worker(index: int) -> None:
++        created = client.create(content=f"paste {index}")
++        with lock:
++            ids.append(created["id"])
++
++    threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
++    for thread in threads:
++        thread.start()
++    for thread in threads:
++        thread.join(timeout=15)
++    assert len(ids) == 20
++    assert len(set(ids)) == 20
++
++
++# -- persistence and the CLI ------------------------------------------------
++
++
++def _wait_for_listening(process) -> int:
++    line = process.stdout.readline().strip()
++    assert line.startswith("listening on 127.0.0.1:"), line
++    return int(line.rsplit(":", 1)[1])
++
++
++def test_cli_prints_listening_line_and_persists_pastes(tmp_path):
++    data_dir = tmp_path / "nested" / "data"
++    environment = {**os.environ, "PYTHONPATH": SRC, "PYTHONUNBUFFERED": "1"}
++
++    def start():
++        return subprocess.Popen(
++            [sys.executable, "-m", "pastebin", "serve", "--port", "0", "--data", str(data_dir)],
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            text=True,
++            env=environment,
++        )
++
++    process = start()
++    try:
++        port = _wait_for_listening(process)
++        assert data_dir.is_dir()
++        created = Client(port).create(content="survive a restart", expires_in=600)
++    finally:
++        process.terminate()
++        process.wait(timeout=10)
++
++    process = start()
++    try:
++        port = _wait_for_listening(process)
++        status, _, paste = Client(port).json_request("GET", f"/pastes/{created['id']}")
++        assert status == 200
++        assert paste["content"] == "survive a restart"
++    finally:
++        process.terminate()
++        process.wait(timeout=10)
