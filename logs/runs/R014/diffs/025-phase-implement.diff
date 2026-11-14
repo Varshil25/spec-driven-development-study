@@ -1,0 +1,1223 @@
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..b2343bc
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,114 @@
++# accounts
++
++A command-line tool that manages local user accounts with passwords, kept in a
++single store file. Python 3.11+, standard library only.
++
++## Usage
++
++```
++PYTHONPATH=src python -m accounts --store PATH COMMAND USERNAME
++```
++
++The store is the file at `PATH`; it is created on first use and persists
++between runs. Passwords are never passed as command-line arguments — each
++command reads the passwords it needs from standard input, one per line.
++
++| Command            | Reads from stdin                | On success               |
++| ------------------ | ------------------------------- | ------------------------ |
++| `register USERNAME`| new password                     | `registered USERNAME`    |
++| `login USERNAME`   | password                         | `ok`                     |
++| `unlock USERNAME`  | nothing                          | `unlocked USERNAME`      |
++| `passwd USERNAME`  | current password, then new one   | `changed password for …`  |
++| `delete USERNAME`  | password                         | `deleted USERNAME`       |
++
++A username is 3–32 characters of letters, digits and underscores. A password
++must be at least 12 characters.
++
++## Exit statuses
++
++| Status | Meaning                                                   |
++| ------ | --------------------------------------------------------- |
++| 0      | success                                                   |
++| 1      | `invalid credentials` (wrong password)                    |
++| 2      | invalid username, password too short, or bad usage        |
++| 3      | no such user, or `register` of a name that already exists |
++| 4      | `account locked`                                          |
++| 5      | the store is missing a parent it cannot create, unreadable, or corrupt |
++
++Error messages go to standard error; `invalid credentials` and
++`account locked` are written verbatim, as specified.
++
++## Lockout
++
++Each failed `login` increments the account's failed-attempt counter. The fifth
++consecutive failure locks the account; that fifth attempt still reports
++`invalid credentials` (status 1), and every later `login` reports
++`account locked` (status 4) — even with the correct password. A successful
++`login` resets the counter, and `unlock` clears both the lock and the counter.
++
++## Examples
++
++```console
++$ printf 'correct horse battery\n' | python -m accounts --store users.db register alice
++registered alice
++$ printf 'correct horse battery\n' | python -m accounts --store users.db login alice
++ok
++$ printf 'wrong password!!\n' | python -m accounts --store users.db login alice
++invalid credentials          # on stderr, exit status 1
++$ printf 'short\n' | python -m accounts --store users.db register bob
++password too short: at least 12 characters required   # stderr, exit status 2
++```
++
++## Layout
++
++```
++src/accounts/__main__.py    python -m accounts entry point
++src/accounts/cli.py         argument parsing, stdin handling, exit statuses
++src/accounts/service.py     register / login / unlock / passwd / delete, validation, lockout
++src/accounts/passwords.py   scrypt hashing and constant-time verification
++src/accounts/store.py       the JSON store file: tolerant reads, atomic writes
++src/accounts/errors.py      exit statuses and the error type carrying them
++tests/test_accounts.py      end-to-end tests driving python -m accounts
++```
++
++## Tests
++
++```
++PYTHONPATH=src python -m unittest discover -s tests -v
++```
++
++## Notes on how the store works
++
++Passwords are stored as salted `hashlib.scrypt` hashes (16-byte random salt per
++account, n=2^14, r=8, p=1, 32-byte key) and compared with
++`hmac.compare_digest`. Each record keeps its own salt and cost parameters, so
++the parameters can be raised later without invalidating existing accounts.
++
++The store is a JSON object (`{"version": 1, "users": {…}}`) written with
++owner-only permissions (0600). Writes go to a temporary file in the same
++directory, are flushed and fsynced, then renamed over the target, so an
++interrupted run cannot leave a half-written store. A missing or empty file
++reads as an empty store; a corrupt one is reported rather than silently reset.
++
++## Judgment calls where the specification is silent
++
++- `login` for a username that does not exist reports `invalid credentials`
++  (status 1) rather than "no such user", so the tool does not disclose which
++  usernames are registered. Status 3 is used for the non-existent user in
++  `unlock`, `passwd` and `delete`, as specified. An unknown-user login also
++  computes a throwaway hash, so its timing resembles a wrong-password login.
++- Username validation (status 2) is applied to `register`. For the other
++  commands an unusable name simply does not exist in the store, so it is
++  reported as no such user (status 3).
++- Only failed `login` attempts count toward the lockout; a wrong current
++  password in `passwd` or `delete` does not lock the account, and a lock does
++  not block those two commands when the correct password is supplied.
++- In `passwd`, the current password is verified before the new password's
++  length is checked — if both are wrong, the result is status 1.
++- End of input where a password is expected is treated as an empty password,
++  which the usual rules then reject: status 2 for `register` and for the new
++  password in `passwd`, status 1 for `login` and `delete`.
++- A password is taken verbatim apart from its line ending, so leading and
++  trailing spaces are significant; a trailing `\r` from CRLF input is removed.
++- `unlock`, `passwd` and `delete` print a short confirmation line; only the
++  `registered USERNAME` and `ok` outputs are fixed by the specification.
+diff --git a/src/accounts/__init__.py b/src/accounts/__init__.py
+new file mode 100644
+index 0000000..4512337
+--- /dev/null
++++ b/src/accounts/__init__.py
+@@ -0,0 +1,9 @@
++"""Local user account management with a single-file store.
++
++Run as ``python -m accounts --store PATH COMMAND USERNAME`` with ``src/`` on
++``PYTHONPATH``.
++"""
++
++__all__ = ["__version__"]
++
++__version__ = "1.0.0"
+diff --git a/src/accounts/__main__.py b/src/accounts/__main__.py
+new file mode 100644
+index 0000000..8072fe9
+--- /dev/null
++++ b/src/accounts/__main__.py
+@@ -0,0 +1,10 @@
++"""Entry point for ``python -m accounts``."""
++
++from __future__ import annotations
++
++import sys
++
++from .cli import main
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/accounts/cli.py b/src/accounts/cli.py
+new file mode 100644
+index 0000000..e787509
+--- /dev/null
++++ b/src/accounts/cli.py
+@@ -0,0 +1,113 @@
++"""Command-line interface.
++
++Usage::
++
++    python -m accounts --store PATH COMMAND USERNAME
++
++Passwords are never given on the command line: each command reads the
++passwords it needs from standard input, one per line.
++"""
++
++from __future__ import annotations
++
++import argparse
++import sys
++from typing import IO, Sequence
++
++from . import __version__
++from .errors import EXIT_OK, AccountsError, ValidationError
++from .service import AccountService
++from .store import Store
++
++COMMANDS = ("register", "login", "unlock", "passwd", "delete")
++
++# How many password lines each command consumes from standard input.
++PASSWORD_LINES = {
++    "register": 1,  # new password
++    "login": 1,  # password
++    "unlock": 0,
++    "passwd": 2,  # current password, then new password
++    "delete": 1,  # password
++}
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        prog="python -m accounts",
++        description=(
++            "Manage local user accounts kept in a single store file. "
++            "Passwords are read from standard input, one per line."
++        ),
++        epilog=(
++            "exit status: 0 success, 1 invalid credentials, 2 invalid username or "
++            "password, 3 no such user / user already exists, 4 account locked, "
++            "5 store error"
++        ),
++    )
++    parser.add_argument(
++        "--store",
++        required=True,
++        metavar="PATH",
++        help="path to the account store file (created on first use)",
++    )
++    parser.add_argument("--version", action="version", version=f"accounts {__version__}")
++    parser.add_argument("command", choices=COMMANDS, metavar="COMMAND", help=", ".join(COMMANDS))
++    parser.add_argument("username", metavar="USERNAME", help="the account to act on")
++    return parser
++
++
++def read_password(stream: IO[str]) -> str:
++    """Read one password line from ``stream``.
++
++    The trailing newline (and a preceding carriage return) is removed; any
++    other character, including leading or trailing spaces, is part of the
++    password.  End of input yields an empty password, which the normal
++    validation and verification rules then reject.
++    """
++    try:
++        line = stream.readline()
++    except UnicodeDecodeError:
++        raise ValidationError("could not read password: input is not valid UTF-8") from None
++    if line.endswith("\n"):
++        line = line[:-1]
++        if line.endswith("\r"):
++            line = line[:-1]
++    return line
++
++
++def main(argv: Sequence[str] | None = None) -> int:
++    parser = build_parser()
++    args = parser.parse_args(argv)
++
++    stdin = sys.stdin
++    stdout = sys.stdout
++    stderr = sys.stderr
++
++    try:
++        passwords = [read_password(stdin) for _ in range(PASSWORD_LINES[args.command])]
++
++        store = Store(args.store)
++        store.ensure_exists()
++        service = AccountService(store)
++
++        if args.command == "register":
++            message = service.register(args.username, passwords[0])
++        elif args.command == "login":
++            message = service.login(args.username, passwords[0])
++        elif args.command == "unlock":
++            message = service.unlock(args.username)
++        elif args.command == "passwd":
++            message = service.passwd(args.username, passwords[0], passwords[1])
++        elif args.command == "delete":
++            message = service.delete(args.username, passwords[0])
++        else:  # pragma: no cover - argparse restricts the choices
++            parser.error(f"unknown command: {args.command}")
++    except AccountsError as exc:
++        print(exc.message, file=stderr)
++        return exc.status
++    except KeyboardInterrupt:  # pragma: no cover - interactive use only
++        print("interrupted", file=stderr)
++        return 130
++
++    print(message, file=stdout)
++    return EXIT_OK
+diff --git a/src/accounts/errors.py b/src/accounts/errors.py
+new file mode 100644
+index 0000000..997b35c
+--- /dev/null
++++ b/src/accounts/errors.py
+@@ -0,0 +1,50 @@
++"""Exit statuses and the exception used to carry them."""
++
++from __future__ import annotations
++
++# Exit statuses defined by the command-line contract.
++EXIT_OK = 0
++EXIT_INVALID_CREDENTIALS = 1
++EXIT_VALIDATION = 2
++EXIT_NOT_FOUND = 3  # also used for "already exists"
++EXIT_LOCKED = 4
++EXIT_STORE_ERROR = 5  # unreadable / corrupt / unwritable store
++
++
++class AccountsError(Exception):
++    """An error that maps to a message on stderr and a specific exit status."""
++
++    def __init__(self, message: str, status: int) -> None:
++        super().__init__(message)
++        self.message = message
++        self.status = status
++
++
++class ValidationError(AccountsError):
++    def __init__(self, message: str) -> None:
++        super().__init__(message, EXIT_VALIDATION)
++
++
++class InvalidCredentialsError(AccountsError):
++    def __init__(self, message: str = "invalid credentials") -> None:
++        super().__init__(message, EXIT_INVALID_CREDENTIALS)
++
++
++class NoSuchUserError(AccountsError):
++    def __init__(self, username: str) -> None:
++        super().__init__(f"no such user: {username}", EXIT_NOT_FOUND)
++
++
++class UserExistsError(AccountsError):
++    def __init__(self, username: str) -> None:
++        super().__init__(f"user already exists: {username}", EXIT_NOT_FOUND)
++
++
++class AccountLockedError(AccountsError):
++    def __init__(self, message: str = "account locked") -> None:
++        super().__init__(message, EXIT_LOCKED)
++
++
++class StoreError(AccountsError):
++    def __init__(self, message: str) -> None:
++        super().__init__(message, EXIT_STORE_ERROR)
+diff --git a/src/accounts/passwords.py b/src/accounts/passwords.py
+new file mode 100644
+index 0000000..5e1d037
+--- /dev/null
++++ b/src/accounts/passwords.py
+@@ -0,0 +1,86 @@
++"""Password hashing and verification.
++
++Passwords are stored as salted scrypt hashes (``hashlib.scrypt``, standard
++library).  Each record keeps its own salt and cost parameters so that the
++parameters can be raised later without invalidating existing accounts.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import hmac
++import os
++import secrets
++from typing import Any
++
++MIN_PASSWORD_LENGTH = 12
++
++ALGORITHM = "scrypt"
++SALT_BYTES = 16
++KEY_BYTES = 32
++
++# cost parameters: ~16 MiB of memory per hash
++SCRYPT_N = 1 << 14
++SCRYPT_R = 8
++SCRYPT_P = 1
++# hashlib.scrypt requires maxmem >= 128 * n * r * p plus slack.
++SCRYPT_MAXMEM = 64 * 1024 * 1024
++
++
++def _derive(password: str, salt: bytes, n: int, r: int, p: int, length: int) -> bytes:
++    return hashlib.scrypt(
++        password.encode("utf-8"),
++        salt=salt,
++        n=n,
++        r=r,
++        p=p,
++        dklen=length,
++        maxmem=SCRYPT_MAXMEM,
++    )
++
++
++def hash_password(password: str) -> dict[str, Any]:
++    """Return a JSON-serialisable hash record for ``password``."""
++    salt = secrets.token_bytes(SALT_BYTES)
++    digest = _derive(password, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P, KEY_BYTES)
++    return {
++        "algorithm": ALGORITHM,
++        "n": SCRYPT_N,
++        "r": SCRYPT_R,
++        "p": SCRYPT_P,
++        "salt": salt.hex(),
++        "hash": digest.hex(),
++    }
++
++
++def verify_password(password: str, record: dict[str, Any]) -> bool:
++    """Check ``password`` against a hash record produced by :func:`hash_password`."""
++    if not isinstance(record, dict) or record.get("algorithm") != ALGORITHM:
++        return False
++    try:
++        salt = bytes.fromhex(record["salt"])
++        expected = bytes.fromhex(record["hash"])
++        n = int(record["n"])
++        r = int(record["r"])
++        p = int(record["p"])
++    except (KeyError, TypeError, ValueError):
++        return False
++    if not expected or n <= 1 or r <= 0 or p <= 0:
++        return False
++    try:
++        actual = _derive(password, salt, n, r, p, len(expected))
++    except ValueError:
++        return False
++    return hmac.compare_digest(actual, expected)
++
++
++def dummy_verify(password: str) -> None:
++    """Burn roughly one hash worth of work.
++
++    Used when a username does not exist so that the response time of an
++    unknown-user login resembles that of a wrong-password login.
++    """
++    try:
++        _derive(password, os.urandom(SALT_BYTES), SCRYPT_N, SCRYPT_R, SCRYPT_P, KEY_BYTES)
++    except ValueError:  # pragma: no cover - only on an exotic OpenSSL build
++        pass
+diff --git a/src/accounts/service.py b/src/accounts/service.py
+new file mode 100644
+index 0000000..576a53b
+--- /dev/null
++++ b/src/accounts/service.py
+@@ -0,0 +1,171 @@
++"""Account operations: register, login, unlock, passwd, delete.
++
++Each operation loads the store, applies its change, and saves the store again
++(only when something actually changed).  Operations raise ``AccountsError``
++subclasses, which the CLI turns into a message on stderr and an exit status.
++"""
++
++from __future__ import annotations
++
++import datetime as _dt
++import re
++from typing import Any
++
++from .errors import (
++    AccountLockedError,
++    InvalidCredentialsError,
++    NoSuchUserError,
++    UserExistsError,
++    ValidationError,
++)
++from .passwords import MIN_PASSWORD_LENGTH, dummy_verify, hash_password, verify_password
++from .store import Store
++
++USERNAME_MIN = 3
++USERNAME_MAX = 32
++USERNAME_RE = re.compile(rf"\A[A-Za-z0-9_]{{{USERNAME_MIN},{USERNAME_MAX}}}\Z")
++
++MAX_FAILED_ATTEMPTS = 5
++
++
++def _now() -> str:
++    return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
++
++
++def validate_username(username: str) -> str:
++    """Return ``username`` unchanged, or raise :class:`ValidationError`."""
++    if not USERNAME_RE.match(username):
++        raise ValidationError(
++            f"invalid username: {username!r} "
++            f"(use {USERNAME_MIN}-{USERNAME_MAX} letters, digits or underscores)"
++        )
++    return username
++
++
++def validate_password(password: str) -> str:
++    """Return ``password`` unchanged, or raise :class:`ValidationError`."""
++    if len(password) < MIN_PASSWORD_LENGTH:
++        raise ValidationError(
++            f"password too short: at least {MIN_PASSWORD_LENGTH} characters required"
++        )
++    return password
++
++
++def _is_locked(record: dict[str, Any]) -> bool:
++    if record.get("locked") is True:
++        return True
++    return _failed_attempts(record) >= MAX_FAILED_ATTEMPTS
++
++
++def _failed_attempts(record: dict[str, Any]) -> int:
++    value = record.get("failed_attempts", 0)
++    return value if isinstance(value, int) and value > 0 else 0
++
++
++class AccountService:
++    """The operations behind the command-line interface."""
++
++    def __init__(self, store: Store) -> None:
++        self.store = store
++
++    # -- helpers ---------------------------------------------------------
++    def _get(self, data: dict[str, Any], username: str) -> dict[str, Any]:
++        """Return an existing account record or raise :class:`NoSuchUserError`."""
++        record = data["users"].get(username)
++        if record is None:
++            raise NoSuchUserError(username)
++        return record
++
++    # -- commands --------------------------------------------------------
++    def register(self, username: str, password: str) -> str:
++        """Create a new account.  Returns the line to print on success."""
++        validate_username(username)
++        validate_password(password)
++
++        data = self.store.load()
++        if username in data["users"]:
++            raise UserExistsError(username)
++
++        record = hash_password(password)
++        record.update(
++            {
++                "failed_attempts": 0,
++                "locked": False,
++                "created_at": _now(),
++                "updated_at": _now(),
++            }
++        )
++        data["users"][username] = record
++        self.store.save(data)
++        return f"registered {username}"
++
++    def login(self, username: str, password: str) -> str:
++        """Authenticate.  Returns ``"ok"`` on success.
++
++        A failed attempt increments the account's failed-attempt counter; the
++        account is locked once the counter reaches 5.  A locked account is
++        rejected before the password is even checked, so a correct password on
++        a locked account still fails.  An unknown username is reported as
++        invalid credentials (not "no such user") to avoid disclosing which
++        names are registered.
++        """
++        data = self.store.load()
++        record = data["users"].get(username)
++        if record is None:
++            dummy_verify(password)
++            raise InvalidCredentialsError()
++
++        if _is_locked(record):
++            raise AccountLockedError()
++
++        if not verify_password(password, record):
++            record["failed_attempts"] = _failed_attempts(record) + 1
++            if record["failed_attempts"] >= MAX_FAILED_ATTEMPTS:
++                record["locked"] = True
++            record["updated_at"] = _now()
++            self.store.save(data)
++            raise InvalidCredentialsError()
++
++        if _failed_attempts(record) or record.get("locked"):
++            record["failed_attempts"] = 0
++            record["locked"] = False
++            record["updated_at"] = _now()
++            self.store.save(data)
++        return "ok"
++
++    def unlock(self, username: str) -> str:
++        """Unlock an account and reset its failed-attempt counter."""
++        data = self.store.load()
++        record = self._get(data, username)
++        record["failed_attempts"] = 0
++        record["locked"] = False
++        record["updated_at"] = _now()
++        self.store.save(data)
++        return f"unlocked {username}"
++
++    def passwd(self, username: str, current_password: str, new_password: str) -> str:
++        """Change an account's password, given the current one."""
++        data = self.store.load()
++        record = self._get(data, username)
++
++        if not verify_password(current_password, record):
++            raise InvalidCredentialsError()
++        validate_password(new_password)
++
++        updated = hash_password(new_password)
++        record.update(updated)
++        record["updated_at"] = _now()
++        self.store.save(data)
++        return f"changed password for {username}"
++
++    def delete(self, username: str, password: str) -> str:
++        """Delete an account, given its password."""
++        data = self.store.load()
++        record = self._get(data, username)
++
++        if not verify_password(password, record):
++            raise InvalidCredentialsError()
++
++        del data["users"][username]
++        self.store.save(data)
++        return f"deleted {username}"
+diff --git a/src/accounts/store.py b/src/accounts/store.py
+new file mode 100644
+index 0000000..023f15c
+--- /dev/null
++++ b/src/accounts/store.py
+@@ -0,0 +1,137 @@
++"""The account store: a single JSON file holding every account record.
++
++The on-disk format is::
++
++    {
++      "version": 1,
++      "users": {
++        "alice": {
++          "algorithm": "scrypt", "n": 16384, "r": 8, "p": 1,
++          "salt": "<hex>", "hash": "<hex>",
++          "failed_attempts": 0, "locked": false,
++          "created_at": "...", "updated_at": "..."
++        }
++      }
++    }
++
++Reads tolerate a missing file (an empty store).  Writes are atomic: the whole
++store is written to a temporary file in the same directory, flushed, and then
++renamed over the target, so an interrupted run never leaves a half-written
++store behind.  The file is created with owner-only permissions.
++"""
++
++from __future__ import annotations
++
++import json
++import os
++import tempfile
++from pathlib import Path
++from typing import Any
++
++from .errors import StoreError
++
++STORE_VERSION = 1
++FILE_MODE = 0o600
++
++
++class Store:
++    """Read/write access to the JSON store file at ``path``."""
++
++    def __init__(self, path: str | os.PathLike[str]) -> None:
++        self.path = Path(path)
++
++    # -- loading ---------------------------------------------------------
++    def load(self) -> dict[str, Any]:
++        """Return the store contents, or an empty store if the file is absent."""
++        try:
++            raw = self.path.read_text(encoding="utf-8")
++        except FileNotFoundError:
++            return self._empty()
++        except IsADirectoryError:
++            raise StoreError(f"store path is a directory: {self.path}") from None
++        except OSError as exc:
++            raise StoreError(f"cannot read store {self.path}: {exc.strerror or exc}") from None
++
++        if not raw.strip():
++            return self._empty()
++
++        try:
++            data = json.loads(raw)
++        except json.JSONDecodeError as exc:
++            raise StoreError(f"store {self.path} is corrupt: {exc}") from None
++
++        if not isinstance(data, dict):
++            raise StoreError(f"store {self.path} is corrupt: expected a JSON object")
++
++        version = data.get("version", STORE_VERSION)
++        if not isinstance(version, int) or version > STORE_VERSION:
++            raise StoreError(
++                f"store {self.path} has unsupported version {version!r}; "
++                f"this tool understands version {STORE_VERSION}"
++            )
++
++        users = data.get("users", {})
++        if not isinstance(users, dict) or any(
++            not isinstance(k, str) or not isinstance(v, dict) for k, v in users.items()
++        ):
++            raise StoreError(f"store {self.path} is corrupt: bad 'users' section")
++
++        return {"version": STORE_VERSION, "users": users}
++
++    @staticmethod
++    def _empty() -> dict[str, Any]:
++        return {"version": STORE_VERSION, "users": {}}
++
++    # -- saving ----------------------------------------------------------
++    def save(self, data: dict[str, Any]) -> None:
++        """Atomically replace the store file with ``data``."""
++        payload = json.dumps(
++            {"version": STORE_VERSION, "users": data.get("users", {})},
++            indent=2,
++            sort_keys=True,
++            ensure_ascii=True,
++        )
++        directory = self.path.parent if str(self.path.parent) else Path(".")
++        try:
++            directory.mkdir(parents=True, exist_ok=True)
++            fd, tmp_name = tempfile.mkstemp(
++                prefix=f".{self.path.name}.", suffix=".tmp", dir=directory
++            )
++            try:
++                with os.fdopen(fd, "w", encoding="utf-8") as handle:
++                    handle.write(payload)
++                    handle.write("\n")
++                    handle.flush()
++                    os.fsync(handle.fileno())
++                os.chmod(tmp_name, FILE_MODE)
++                os.replace(tmp_name, self.path)
++            except BaseException:
++                # Leave no stray temporary file behind on failure.
++                try:
++                    os.unlink(tmp_name)
++                except OSError:
++                    pass
++                raise
++            self._fsync_dir(directory)
++        except OSError as exc:
++            raise StoreError(f"cannot write store {self.path}: {exc.strerror or exc}") from None
++
++    @staticmethod
++    def _fsync_dir(directory: Path) -> None:
++        try:
++            fd = os.open(directory, os.O_RDONLY)
++        except OSError:
++            return
++        try:
++            os.fsync(fd)
++        except OSError:
++            pass
++        finally:
++            os.close(fd)
++
++    # -- creation --------------------------------------------------------
++    def ensure_exists(self) -> None:
++        """Create an empty store file if it is not there yet ("created on first use")."""
++        if self.path.exists():
++            return
++        self.save(self._empty())
+diff --git a/tests/test_accounts.py b/tests/test_accounts.py
+new file mode 100644
+index 0000000..efc9c84
+--- /dev/null
++++ b/tests/test_accounts.py
+@@ -0,0 +1,479 @@
++"""Tests for the ``accounts`` command-line tool.
++
++Run from the repository root::
++
++    PYTHONPATH=src python -m unittest discover -s tests -v
++"""
++
++from __future__ import annotations
++
++import json
++import os
++import subprocess
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++REPO_ROOT = Path(__file__).resolve().parent.parent
++SRC = REPO_ROOT / "src"
++
++PASSWORD = "correct horse battery"
++OTHER_PASSWORD = "a different passphrase"
++
++EXIT_OK = 0
++EXIT_CREDS = 1
++EXIT_VALIDATION = 2
++EXIT_NOT_FOUND = 3
++EXIT_LOCKED = 4
++
++
++class CliTestCase(unittest.TestCase):
++    """Drives the tool the way a user does: ``python -m accounts`` in a subprocess."""
++
++    def setUp(self) -> None:
++        self._tmp = tempfile.TemporaryDirectory()
++        self.addCleanup(self._tmp.cleanup)
++        self.workdir = Path(self._tmp.name)
++        self.store = self.workdir / "users.db"
++
++    def run_cmd(self, *args: str, stdin: str = "", store: str | None = None):
++        env = dict(os.environ)
++        env["PYTHONPATH"] = str(SRC) + (
++            os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
++        )
++        argv = [sys.executable, "-m", "accounts", "--store", store or str(self.store), *args]
++        return subprocess.run(
++            argv,
++            input=stdin,
++            capture_output=True,
++            text=True,
++            cwd=self.workdir,
++            env=env,
++            timeout=120,
++        )
++
++    # convenience wrappers -------------------------------------------------
++    def register(self, username: str = "alice", password: str = PASSWORD):
++        return self.run_cmd("register", username, stdin=f"{password}\n")
++
++    def login(self, username: str = "alice", password: str = PASSWORD):
++        return self.run_cmd("login", username, stdin=f"{password}\n")
++
++    def assertResult(self, proc, status: int, stdout: str | None = None, stderr: str | None = None):
++        self.assertEqual(
++            proc.returncode,
++            status,
++            f"expected exit {status}, got {proc.returncode}\n"
++            f"stdout={proc.stdout!r}\nstderr={proc.stderr!r}",
++        )
++        if stdout is not None:
++            self.assertEqual(proc.stdout, stdout)
++        if stderr is not None:
++            self.assertEqual(proc.stderr, stderr)
++
++    def users(self) -> dict:
++        return json.loads(self.store.read_text(encoding="utf-8"))["users"]
++
++
++class TestRegister(CliTestCase):
++    def test_register_prints_confirmation_and_creates_store(self):
++        self.assertFalse(self.store.exists())
++        self.assertResult(self.register(), EXIT_OK, stdout="registered alice\n", stderr="")
++        self.assertTrue(self.store.exists())
++        self.assertIn("alice", self.users())
++
++    def test_password_is_not_stored_in_cleartext(self):
++        self.register()
++        self.assertNotIn(PASSWORD, self.store.read_text(encoding="utf-8"))
++
++    def test_each_account_gets_a_distinct_salt_and_hash(self):
++        self.register("alice")
++        self.register("bob")
++        records = self.users()
++        self.assertNotEqual(records["alice"]["salt"], records["bob"]["salt"])
++        self.assertNotEqual(records["alice"]["hash"], records["bob"]["hash"])
++
++    def test_duplicate_username_fails(self):
++        self.register()
++        proc = self.register()
++        self.assertResult(proc, EXIT_NOT_FOUND, stdout="")
++        self.assertTrue(proc.stderr.strip())
++
++    def test_duplicate_registration_does_not_change_the_password(self):
++        self.register("alice", PASSWORD)
++        self.register("alice", OTHER_PASSWORD)
++        self.assertResult(self.login("alice", PASSWORD), EXIT_OK)
++        self.assertResult(self.login("alice", OTHER_PASSWORD), EXIT_CREDS)
++
++    def test_short_password_rejected(self):
++        proc = self.register("bob", "short")
++        self.assertResult(proc, EXIT_VALIDATION, stdout="")
++        self.assertTrue(proc.stderr.strip())
++        self.assertNotIn("bob", self.users())
++
++    def test_password_of_exactly_twelve_characters_accepted(self):
++        self.assertResult(self.register("bob", "a" * 12), EXIT_OK)
++
++    def test_password_of_eleven_characters_rejected(self):
++        self.assertResult(self.register("bob", "a" * 11), EXIT_VALIDATION)
++
++    def test_empty_stdin_is_a_too_short_password(self):
++        proc = self.run_cmd("register", "alice", stdin="")
++        self.assertResult(proc, EXIT_VALIDATION)
++
++    def test_invalid_usernames_rejected(self):
++        for username in ("ab", "a" * 33, "has space", "dash-dash", "a.b", "pünkt", "", "al/ice"):
++            with self.subTest(username=username):
++                proc = self.run_cmd("register", username, stdin=f"{PASSWORD}\n")
++                self.assertResult(proc, EXIT_VALIDATION, stdout="")
++
++    def test_valid_usernames_accepted(self):
++        for username in ("abc", "a" * 32, "Alice_99", "___", "0123"):
++            with self.subTest(username=username):
++                self.assertResult(self.register(username), EXIT_OK)
++
++    def test_password_may_contain_spaces_and_unicode(self):
++        secret = "  mot de passe très sûr  "
++        self.assertResult(self.register("alice", secret), EXIT_OK)
++        self.assertResult(self.login("alice", secret), EXIT_OK)
++        self.assertResult(self.login("alice", secret.strip()), EXIT_CREDS)
++
++
++class TestLogin(CliTestCase):
++    def test_correct_password(self):
++        self.register()
++        self.assertResult(self.login(), EXIT_OK, stdout="ok\n", stderr="")
++
++    def test_wrong_password(self):
++        self.register()
++        proc = self.login("alice", "wrong password!!")
++        self.assertResult(proc, EXIT_CREDS, stdout="", stderr="invalid credentials\n")
++
++    def test_unknown_user_reports_invalid_credentials(self):
++        self.register()
++        proc = self.login("ghost")
++        self.assertResult(proc, EXIT_CREDS, stdout="", stderr="invalid credentials\n")
++
++    def test_login_against_missing_store(self):
++        self.assertResult(self.login(), EXIT_CREDS, stdout="")
++
++    def test_password_persists_between_runs(self):
++        self.register()
++        for _ in range(3):
++            self.assertResult(self.login(), EXIT_OK)
++
++
++class TestLockout(CliTestCase):
++    def fail_login(self, times: int, username: str = "alice"):
++        results = []
++        for _ in range(times):
++            results.append(self.login(username, "definitely wrong pw"))
++        return results
++
++    def test_fifth_failure_still_reports_invalid_credentials(self):
++        self.register()
++        results = self.fail_login(5)
++        for index, proc in enumerate(results, start=1):
++            with self.subTest(attempt=index):
++                self.assertResult(proc, EXIT_CREDS, stderr="invalid credentials\n")
++
++    def test_sixth_attempt_is_locked(self):
++        self.register()
++        self.fail_login(5)
++        proc = self.login("alice", "definitely wrong pw")
++        self.assertResult(proc, EXIT_LOCKED, stdout="", stderr="account locked\n")
++
++    def test_correct_password_rejected_once_locked(self):
++        self.register()
++        self.fail_login(5)
++        proc = self.login()
++        self.assertResult(proc, EXIT_LOCKED, stdout="", stderr="account locked\n")
++
++    def test_four_failures_do_not_lock(self):
++        self.register()
++        self.fail_login(4)
++        self.assertResult(self.login(), EXIT_OK, stdout="ok\n")
++
++    def test_successful_login_resets_the_counter(self):
++        self.register()
++        self.fail_login(4)
++        self.assertResult(self.login(), EXIT_OK)
++        self.assertEqual(self.users()["alice"]["failed_attempts"], 0)
++        self.fail_login(4)
++        self.assertResult(self.login(), EXIT_OK)
++
++    def test_lockout_is_per_account(self):
++        self.register("alice")
++        self.register("bob")
++        self.fail_login(5, "alice")
++        self.assertResult(self.login("alice"), EXIT_LOCKED)
++        self.assertResult(self.login("bob"), EXIT_OK)
++
++    def test_lockout_survives_across_runs(self):
++        self.register()
++        self.fail_login(5)
++        self.assertTrue(self.users()["alice"]["locked"])
++        self.assertResult(self.login(), EXIT_LOCKED)
++
++
++class TestUnlock(CliTestCase):
++    def test_unlock_restores_login_and_resets_counter(self):
++        self.register()
++        for _ in range(5):
++            self.login("alice", "definitely wrong pw")
++        self.assertResult(self.run_cmd("unlock", "alice"), EXIT_OK, stderr="")
++        self.assertEqual(self.users()["alice"]["failed_attempts"], 0)
++        self.assertFalse(self.users()["alice"]["locked"])
++        self.assertResult(self.login(), EXIT_OK, stdout="ok\n")
++
++    def test_unlock_resets_partial_failures(self):
++        self.register()
++        for _ in range(3):
++            self.login("alice", "definitely wrong pw")
++        self.run_cmd("unlock", "alice")
++        self.assertEqual(self.users()["alice"]["failed_attempts"], 0)
++
++    def test_unlock_of_unlocked_account_succeeds(self):
++        self.register()
++        self.assertResult(self.run_cmd("unlock", "alice"), EXIT_OK)
++
++    def test_unlock_unknown_user(self):
++        proc = self.run_cmd("unlock", "ghost")
++        self.assertResult(proc, EXIT_NOT_FOUND, stdout="")
++        self.assertTrue(proc.stderr.strip())
++
++    def test_unlock_reads_no_password(self):
++        self.register()
++        proc = self.run_cmd("unlock", "alice", stdin="")
++        self.assertResult(proc, EXIT_OK)
++
++    def test_unlock_does_not_change_the_password(self):
++        self.register()
++        self.run_cmd("unlock", "alice")
++        self.assertResult(self.login(), EXIT_OK)
++
++
++class TestPasswd(CliTestCase):
++    def passwd(self, username: str, current: str, new: str):
++        return self.run_cmd("passwd", username, stdin=f"{current}\n{new}\n")
++
++    def test_change_password(self):
++        self.register()
++        self.assertResult(self.passwd("alice", PASSWORD, OTHER_PASSWORD), EXIT_OK, stderr="")
++        self.assertResult(self.login("alice", OTHER_PASSWORD), EXIT_OK, stdout="ok\n")
++        self.assertResult(self.login("alice", PASSWORD), EXIT_CREDS)
++
++    def test_wrong_current_password(self):
++        self.register()
++        proc = self.passwd("alice", "not my password", OTHER_PASSWORD)
++        self.assertResult(proc, EXIT_CREDS, stdout="", stderr="invalid credentials\n")
++        self.assertResult(self.login("alice", PASSWORD), EXIT_OK)
++
++    def test_short_new_password(self):
++        self.register()
++        proc = self.passwd("alice", PASSWORD, "tiny")
++        self.assertResult(proc, EXIT_VALIDATION, stdout="")
++        self.assertTrue(proc.stderr.strip())
++        self.assertResult(self.login("alice", PASSWORD), EXIT_OK)
++
++    def test_new_password_of_exactly_twelve_characters(self):
++        self.register()
++        self.assertResult(self.passwd("alice", PASSWORD, "b" * 12), EXIT_OK)
++        self.assertResult(self.login("alice", "b" * 12), EXIT_OK)
++
++    def test_missing_new_password_line(self):
++        self.register()
++        proc = self.run_cmd("passwd", "alice", stdin=f"{PASSWORD}\n")
++        self.assertResult(proc, EXIT_VALIDATION)
++        self.assertResult(self.login("alice", PASSWORD), EXIT_OK)
++
++    def test_unknown_user(self):
++        self.register()
++        proc = self.passwd("ghost", PASSWORD, OTHER_PASSWORD)
++        self.assertResult(proc, EXIT_NOT_FOUND, stdout="")
++
++    def test_new_salt_is_used(self):
++        self.register()
++        before = self.users()["alice"]["salt"]
++        self.passwd("alice", PASSWORD, OTHER_PASSWORD)
++        self.assertNotEqual(before, self.users()["alice"]["salt"])
++
++    def test_change_to_the_same_password_is_allowed(self):
++        self.register()
++        self.assertResult(self.passwd("alice", PASSWORD, PASSWORD), EXIT_OK)
++        self.assertResult(self.login(), EXIT_OK)
++
++
++class TestDelete(CliTestCase):
++    def test_delete_account(self):
++        self.register()
++        proc = self.run_cmd("delete", "alice", stdin=f"{PASSWORD}\n")
++        self.assertResult(proc, EXIT_OK, stderr="")
++        self.assertNotIn("alice", self.users())
++        self.assertResult(self.login(), EXIT_CREDS)
++
++    def test_delete_with_wrong_password(self):
++        self.register()
++        proc = self.run_cmd("delete", "alice", stdin="nope nope nope\n")
++        self.assertResult(proc, EXIT_CREDS, stdout="", stderr="invalid credentials\n")
++        self.assertIn("alice", self.users())
++
++    def test_delete_unknown_user(self):
++        proc = self.run_cmd("delete", "ghost", stdin=f"{PASSWORD}\n")
++        self.assertResult(proc, EXIT_NOT_FOUND, stdout="")
++
++    def test_delete_leaves_other_accounts_alone(self):
++        self.register("alice")
++        self.register("bob", OTHER_PASSWORD)
++        self.run_cmd("delete", "alice", stdin=f"{PASSWORD}\n")
++        self.assertResult(self.login("bob", OTHER_PASSWORD), EXIT_OK)
++
++    def test_username_can_be_reused_after_delete(self):
++        self.register()
++        self.run_cmd("delete", "alice", stdin=f"{PASSWORD}\n")
++        self.assertResult(self.register("alice", OTHER_PASSWORD), EXIT_OK)
++        self.assertResult(self.login("alice", OTHER_PASSWORD), EXIT_OK)
++
++
++class TestStoreFile(CliTestCase):
++    def test_store_is_created_on_first_use(self):
++        self.assertFalse(self.store.exists())
++        self.run_cmd("unlock", "ghost")
++        self.assertTrue(self.store.exists())
++        self.assertEqual(json.loads(self.store.read_text())["users"], {})
++
++    def test_store_is_owner_only(self):
++        self.register()
++        self.assertEqual(self.store.stat().st_mode & 0o777, 0o600)
++
++    def test_multiple_accounts_share_one_file(self):
++        for name in ("alice", "bob", "carol"):
++            self.assertResult(self.register(name), EXIT_OK)
++        self.assertEqual(sorted(self.users()), ["alice", "bob", "carol"])
++
++    def test_separate_stores_are_independent(self):
++        other = self.workdir / "other.db"
++        self.register()
++        self.assertResult(self.login("alice", PASSWORD), EXIT_OK)
++        proc = self.run_cmd("login", "alice", stdin=f"{PASSWORD}\n", store=str(other))
++        self.assertResult(proc, EXIT_CREDS)
++
++    def test_store_in_a_missing_directory_is_created(self):
++        nested = self.workdir / "deep" / "dir" / "users.db"
++        proc = self.run_cmd("register", "alice", stdin=f"{PASSWORD}\n", store=str(nested))
++        self.assertResult(proc, EXIT_OK)
++        self.assertTrue(nested.exists())
++
++    def test_corrupt_store_is_reported_not_silently_reset(self):
++        self.register()
++        self.store.write_text("{not json", encoding="utf-8")
++        proc = self.login()
++        self.assertNotEqual(proc.returncode, EXIT_OK)
++        self.assertTrue(proc.stderr.strip())
++        self.assertEqual(self.store.read_text(encoding="utf-8"), "{not json")
++
++    def test_no_temporary_files_are_left_behind(self):
++        self.register()
++        leftovers = [p.name for p in self.workdir.iterdir() if p.name != "users.db"]
++        self.assertEqual(leftovers, [])
++
++
++class TestUsage(CliTestCase):
++    def test_missing_store_option(self):
++        env = dict(os.environ)
++        env["PYTHONPATH"] = str(SRC)
++        proc = subprocess.run(
++            [sys.executable, "-m", "accounts", "register", "alice"],
++            input=f"{PASSWORD}\n",
++            capture_output=True,
++            text=True,
++            env=env,
++            timeout=60,
++        )
++        self.assertEqual(proc.returncode, EXIT_VALIDATION)
++
++    def test_unknown_command(self):
++        proc = self.run_cmd("frobnicate", "alice", stdin=f"{PASSWORD}\n")
++        self.assertEqual(proc.returncode, EXIT_VALIDATION)
++
++    def test_missing_username(self):
++        proc = self.run_cmd("login", stdin=f"{PASSWORD}\n")
++        self.assertEqual(proc.returncode, EXIT_VALIDATION)
++
++    def test_help(self):
++        proc = self.run_cmd("--help")
++        self.assertEqual(proc.returncode, EXIT_OK)
++        self.assertIn("register", proc.stdout)
++
++
++class TestUnits(unittest.TestCase):
++    """Direct tests of the pieces behind the CLI."""
++
++    def test_hash_and_verify(self):
++        from accounts.passwords import hash_password, verify_password
++
++        record = hash_password(PASSWORD)
++        self.assertTrue(verify_password(PASSWORD, record))
++        self.assertFalse(verify_password(PASSWORD + "x", record))
++        self.assertFalse(verify_password("", record))
++
++    def test_verify_rejects_damaged_records(self):
++        from accounts.passwords import hash_password, verify_password
++
++        record = hash_password(PASSWORD)
++        for key, value in (("salt", "zz"), ("hash", ""), ("n", 0), ("algorithm", "md5")):
++            with self.subTest(key=key):
++                broken = dict(record, **{key: value})
++                self.assertFalse(verify_password(PASSWORD, broken))
++
++    def test_read_password_strips_only_the_line_ending(self):
++        import io
++
++        from accounts.cli import read_password
++
++        self.assertEqual(read_password(io.StringIO("  pw  \nnext\n")), "  pw  ")
++        self.assertEqual(read_password(io.StringIO("pw\r\n")), "pw")
++        self.assertEqual(read_password(io.StringIO("pw")), "pw")
++        self.assertEqual(read_password(io.StringIO("")), "")
++
++    def test_read_password_reads_lines_in_order(self):
++        import io
++
++        from accounts.cli import read_password
++
++        stream = io.StringIO("first\nsecond\n")
++        self.assertEqual(read_password(stream), "first")
++        self.assertEqual(read_password(stream), "second")
++
++    def test_validators(self):
++        from accounts.errors import ValidationError
++        from accounts.service import validate_password, validate_username
++
++        self.assertEqual(validate_username("abc"), "abc")
++        with self.assertRaises(ValidationError):
++            validate_username("ab")
++        with self.assertRaises(ValidationError):
++            validate_password("a" * 11)
++
++    def test_main_is_callable_in_process(self):
++        from accounts.cli import main
++
++        with tempfile.TemporaryDirectory() as tmp:
++            store = os.path.join(tmp, "users.db")
++            stdin, stdout = sys.stdin, sys.stdout
++            import io
++
++            try:
++                sys.stdin = io.StringIO(f"{PASSWORD}\n")
++                sys.stdout = io.StringIO()
++                status = main(["--store", store, "register", "alice"])
++                self.assertEqual(status, 0)
++                self.assertEqual(sys.stdout.getvalue(), "registered alice\n")
++            finally:
++                sys.stdin, sys.stdout = stdin, stdout
++
++
++if __name__ == "__main__":
++    sys.path.insert(0, str(SRC))
++    unittest.main(verbosity=2)
