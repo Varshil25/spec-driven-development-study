@@ -10,9 +10,11 @@ None yet.
 | --- | --- | --- |
 | 2026-11-14 | Oracle, seven `ai_specs/` files and corpus list (17 trusted, 3 rejected) drafted; every URL, date and licence in `corpus/sources.csv` checked against the source page, except where left blank | Claude |
 
+| 2026-11-14 | Pipeline scripts: `collect.py`, `distill.py`, `voice_check.py`, `synthesize.py`, `index.py`, `query.py`, `batch.sh`; 18 offline tests pass. S08 collected over HTTP; a second run found it unchanged (incremental check, collect step) | Claude |
+
 ## Next
 
 1. Author approves the Oracle (perspective, rejected sources X01–X03, key questions Q1–Q8).
-2. `collect.py`, `distill.py`, `voice_check.py`, `synthesize.py`, `index.py`, `query.py`, `batch.sh`.
+2. Network access: the operator's workspace reaches only GitHub, so S01–S07 and S09–S17 need either the author's domain allowlist or `collect.py --from-dir` with copies.
 3. One-source trial (S12 or S03): run, read, fix the spec, re-run, until the article passes the voice check and reads in the Oracle's voice.
 4. Full corpus; incremental check (batch-process.md); OpenKB on the same corpus and model; both asked Q1–Q8.
