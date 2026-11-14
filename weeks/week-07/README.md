@@ -18,7 +18,7 @@
 
 | Run | Project | Approach | Purpose | Status |
 | --- | --- | --- | --- | --- |
-| R002 | T-SPLIT-01 | unstructured | mechanics | to do |
-| R003 | T-SPLIT-01 | sdd_clarify | mechanics | to do |
+| R002 | T-SPLIT-01 | unstructured | mechanics | done 11-03 |
+| R003 | T-SPLIT-01 | sdd_clarify | mechanics | done 11-03 |
 | R024 | T-QCOUNT-01 | unstructured | mechanics-java | to do |
 | R025 | T-QCOUNT-01 | sdd_clarify | mechanics-java | to do |

@@ -15,7 +15,7 @@ its collected data. It contains:
 - **Milestone 3 (Weeks 5–9):** the design of the controlled study (5 tasks ×
   3 conditions = 15 runs), its pre-registration and runbook, `sddlog` 1.3,
   the task set, the scoring tools, and one practice comparison on a login task.
-  The 15 study runs have not been carried out yet. See the
+  This first design (15 runs) was widened in Week 7, below. See the
   [Weeks 5–9 report](docs/WEEKS-5-9-REPORT.md).
 - **Week 7:** a Java/Quarkus extension (2 tasks × 3 conditions = 6 more runs,
   R024–R033), added before freezing and analysed separately from the Python
@@ -25,7 +25,27 @@ its collected data. It contains:
   constitution); a **change request** per Python task, run on each build's own
   code, so the study also covers existing projects (107 more sealed held-out
   cases); and a run tool that drives every run in Claude Code. The Python
-  design is now 5 tasks × 4 approaches = 20 builds and 20 change requests.
+  design is now 5 tasks × 4 approaches = 20 builds and 20 change requests,
+  plus a required replication set (R021–R023, R039), 48 Python runs in all.
+  The design was frozen on 4 November 2026 (PR #6).
+- **Weeks 8–10:** the study runs, in four counterbalanced rounds. See
+  [Status](#status) below and the [run log](schedule/run-log.md).
+
+## Status
+
+*Updated 14 November 2026.*
+
+| Part | Done | Total | Where |
+| --- | --- | --- | --- |
+| Python mechanics runs (R002, R003) | 2 | 2 | [weeks/week-07](weeks/week-07/) |
+| Python study runs, round 1 (R004–R008 + change requests) | 10 | 10 | [weeks/week-08](weeks/week-08/) |
+| Python study runs, round 2 (R009–R013 + change requests) | 5 | 10 | [weeks/week-08](weeks/week-08/) |
+| Python study runs, rounds 3–4 (R014–R018, R034–R038 + change requests) | 0 | 20 | [weeks/week-09](weeks/week-09/), [weeks/week-10](weeks/week-10/) |
+| Replication (R021–R023, R039 + change requests) | 0 | 8 | [weeks/week-10](weeks/week-10/) |
+| Java runs (R024–R025 mechanics, R026–R031 study) | 0 | 8 | run on the author's machine |
+
+Every finished run passed the stopping rule and the 6 integrity checks. Scoring
+against the sealed held-out tests starts once the last run is finished.
 
 **Start here:** [docs/STUDY-OVERVIEW.md](docs/STUDY-OVERVIEW.md) explains the
 whole study in plain language, and [weeks/](weeks/) indexes the work week by
@@ -61,7 +81,9 @@ published suites are the ones frozen before any data existed.
 | [tasks/](tasks/) | Task texts and stopping-rule examples: 5 Python study tasks, 2 Java/Quarkus study tasks (T-QNOTES-01, T-QIMPORT-01), the pilot task T-SPLIT-01, the Java mechanics task T-QCOUNT-01, and the practice task T-LOGIN-01 |
 | [operator/answer-sheets/](operator/answer-sheets/) | Product-owner answers to each task's open points, and the rules for answering |
 | [prompts/](prompts/) | The fixed constitution and plan prompts (Python and Java versions), and what is typed in each phase |
-| [schedule/](schedule/) | Counterbalanced run order (seed 20261023) and the run log |
+| [schedule/](schedule/) | Counterbalanced run order (seed 20261023) and the [run log](schedule/run-log.md): one row per run with its date, cost and outcome |
+| [logs/runs/](logs/runs/) | Each run's event log, diffs, artifact snapshots, metrics and report (R001 pilot, R002 onwards study) |
+| [logs/bundles/](logs/bundles/) | A git bundle of each run's full working repository, so every build can be checked out exactly as it finished |
 | [coding/](coding/) | Requirement register for the Part III traceability and security coding |
 | [sealed/](sealed/) | The sealed held-out suites (Python builds, Python change requests, and Java once sealed), encrypted until the last study run |
 | [practice/T-LOGIN-01/](practice/T-LOGIN-01/) | Practice comparison, excluded from analysis: both builds, their scores, and the task's held-out tests |
