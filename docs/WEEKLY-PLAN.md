@@ -9,6 +9,27 @@ This plan replaces the Weeks 10–16 schedule in the [Weeks 5–9 report](WEEKS-
 (section 8): there are six weeks left, not ten, so the study runs, Part III and
 Part IV all finish by Week 11, and Week 12 is for writing.
 
+## Revised plan, 14 November: submit by Tuesday 1 December
+
+The author moved the submission to **1 December 2026**. Decisions taken on 14 November:
+the full Python design stays (48 runs), run around the clock; if it is not finished by
+**21 November**, the four replication change requests are dropped and logged. The Java
+extension is dropped (not run; see the deviations log). Part IV starts now, in parallel
+with the runs.
+
+| Dates | Work | Who | Gate |
+| --- | --- | --- | --- |
+| 14–21 Nov | Python runs: R019C, R012–R013, round 3, round 4, replication | Claude | All Python runs closed by 21 Nov, or the replication change requests are cut |
+| 14–17 Nov | Part IV: Oracle, seven `ai_specs/` files, corpus list (15–20 sources) | Claude drafts, author approves | Author approves the Oracle and the rejected sources |
+| 17–21 Nov | Part IV: `collect.py`, `distill.py`, one-source trial, whole corpus, index; OpenKB on the same corpus | Claude builds, author reviews | Both wikis answer the Oracle's key questions |
+| 22–23 Nov | Unseal (author's passphrases), score every run, run `analyze.py`, fill the results tables | Claude, author unseals | Results tables final |
+| 22–25 Nov | Manual coding, one task per sitting in the drawn order | Author | All sheets coded |
+| 27–29 Nov | Intra-rater re-code (30%, at least 5 days after first coding), Cohen's κ; discussion and conclusion | Author; Claude drafts | Report complete |
+| 30 Nov | Final check: every number against its source, every link | Claude, then author | — |
+| 1 Dec | Submit | Author | — |
+
+The original plan follows.
+
 | Week | Dates | Focus | Gate at the end of the week |
 | --- | --- | --- | --- |
 | **7** | Mon 26 Oct – Sun 1 Nov | Java/Quarkus extension built and validated; pre-registration frozen; mechanics checks | Hashes sent to the advisor; no study run before this |

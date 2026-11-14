@@ -3,7 +3,7 @@
 **Study**: Evaluating and Extending Spec-Driven Development (Parts II–III)
 **Adds**: 2 Java/Quarkus tasks × 3 conditions = 6 study runs (R026–R031), 2 mechanics checks (R024–R025), 2 spare IDs (R032–R033)
 **Instrument**: unchanged (`sddlog` 1.3, logging protocol 1.3, Spec Kit 1.0.6, Claude Code, same model string)
-**Status**: written in Week 7, before any study run; frozen together with `PREREGISTRATION.md` in one commit before R004
+**Status**: written in Week 7, before any study run; frozen together with `PREREGISTRATION.md` in one commit before R004. **Not run:** on 14 November 2026 the author dropped the Java extension to meet the 1 December submission date (the runs needed the author's own machine). No Java run was started and the Java suite was never sealed, so no data exists; see the deviations log in `PREREGISTRATION.md` section 12.
 **Sealed held-out suite**: `sealed-heldout-java-v1.zip`, hashes in section 9
 
 ---

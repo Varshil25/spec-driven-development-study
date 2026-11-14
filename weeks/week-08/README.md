@@ -26,5 +26,5 @@ Each build is run with [run_build.py](../../tools/study/run_build.py) in a fresh
 
 | Run | Project | Approach | Status |
 | --- | --- | --- | --- |
-| R026 | T-QNOTES-01 | unstructured | to do |
-| R027 | T-QIMPORT-01 | sdd_clarify | to do |
+| R026 | T-QNOTES-01 | unstructured | dropped (not run; see deviations log) |
+| R027 | T-QIMPORT-01 | sdd_clarify | dropped (not run; see deviations log) |

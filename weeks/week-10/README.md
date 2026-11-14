@@ -16,8 +16,8 @@ Each build is run with [run_build.py](../../tools/study/run_build.py) in a fresh
 
 | Run | Project | Approach | Status |
 | --- | --- | --- | --- |
-| R030 | T-QNOTES-01 | sdd | to do |
-| R031 | T-QIMPORT-01 | unstructured | to do |
+| R030 | T-QNOTES-01 | sdd | dropped (not run; see deviations log) |
+| R031 | T-QIMPORT-01 | unstructured | dropped (not run; see deviations log) |
 
 ## Replication (required since Week 8)
 

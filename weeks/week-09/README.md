@@ -16,7 +16,7 @@ Each build is run with [run_build.py](../../tools/study/run_build.py) in a fresh
 
 | Run | Project | Approach | Status |
 | --- | --- | --- | --- |
-| R028 | T-QNOTES-01 | sdd_clarify | to do |
-| R029 | T-QIMPORT-01 | sdd | to do |
+| R028 | T-QNOTES-01 | sdd_clarify | dropped (not run; see deviations log) |
+| R029 | T-QIMPORT-01 | sdd | dropped (not run; see deviations log) |
 
 Part IV starts this week: the Oracle and the seven `ai_specs/` files (see the weekly plan).
