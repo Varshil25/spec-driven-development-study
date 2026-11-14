@@ -2,7 +2,7 @@
 
 > **OpenOwls SD-KDP** — Read by the advisor, the author and the agent.
 > What this knowledge base is, why it exists, who it is for, and how it is built.
-> **Status:** draft by Claude, 14 Nov 2026 — awaiting the author's approval.
+> **Status:** drafted by Claude and approved by the author, 14 Nov 2026.
 
 ---
 

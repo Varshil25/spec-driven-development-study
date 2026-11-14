@@ -12,9 +12,10 @@ None yet.
 
 | 2026-11-14 | Pipeline scripts: `collect.py`, `distill.py`, `voice_check.py`, `synthesize.py`, `index.py`, `query.py`, `batch.sh`; 18 offline tests pass. S08 collected over HTTP; a second run found it unchanged (incremental check, collect step) | Claude |
 
+| 2026-11-14 | Author approved the Oracle as drafted; chose the subscription (`claude` backend) for distillation, after the last study run; will allow all domains for collection | Author |
+
 ## Next
 
-1. Author approves the Oracle (perspective, rejected sources X01–X03, key questions Q1–Q8).
-2. Network access: the operator's workspace reaches only GitHub, so S01–S07 and S09–S17 need either the author's domain allowlist or `collect.py --from-dir` with copies.
-3. One-source trial (S12 or S03): run, read, fix the spec, re-run, until the article passes the voice check and reads in the Oracle's voice.
-4. Full corpus; incremental check (batch-process.md); OpenKB on the same corpus and model; both asked Q1–Q8.
+1. Collect S01–S17 once the workspace may reach all domains.
+2. One-source trial (S12 or S03): run, read, fix the spec, re-run, until the article passes the voice check and reads in the Oracle's voice.
+3. Full corpus (after the last study run); incremental check (batch-process.md); OpenKB on the same corpus and model; both asked Q1–Q8. OpenKB cannot use a Claude subscription (it needs an API key, or an OAuth provider such as GitHub Copilot), so how OpenKB is built is still open.

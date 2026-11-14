@@ -2,7 +2,7 @@
 
 > **OpenOwls SD-KDP** — Read by the author, the advisor and the distillation agent before every run.
 > Declares whose view this knowledge base takes, which sources that view trusts and rejects, and the questions it must answer.
-> **Status:** draft by Claude, 14 Nov 2026 — awaiting the author's approval.
+> **Status:** drafted by Claude and approved by the author, 14 Nov 2026.
 
 ---
 

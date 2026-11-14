@@ -48,6 +48,10 @@ The counts from each run are logged in `state/batch.log` and copied into the rep
   first full distillation is scheduled for after the last study run, or run on an API key.
 - `anthropic`: the Anthropic API with `ANTHROPIC_API_KEY` from `.env` (git-ignored).
 
+**Decision (author, 14 Nov 2026):** the `claude` backend on the author's subscription. The first
+full distillation runs after the last Part III study run, so it does not take usage the runs need;
+the one-source trial (a few calls) may run earlier.
+
 The model ID is set once in `llm.py` and written into every article. **The OpenKB comparison uses
 the same model** (OpenKB reads `LLM_API_KEY` and a `provider/model` string, e.g.
 `anthropic/<model>`), so both knowledge bases differ in method, not in model.
