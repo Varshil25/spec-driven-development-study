@@ -1,0 +1,248 @@
+diff --git a/specs/001-bookmark-cli-manager/checklists/requirements.md b/specs/001-bookmark-cli-manager/checklists/requirements.md
+new file mode 100644
+index 0000000..eeddd64
+--- /dev/null
++++ b/specs/001-bookmark-cli-manager/checklists/requirements.md
+@@ -0,0 +1,55 @@
++# Specification Quality Checklist: Command-Line Bookmark Manager
++
++**Purpose**: Validate specification completeness and quality before proceeding to planning
++**Created**: 2026-11-14
++**Feature**: [spec.md](../spec.md)
++
++## Content Quality
++
++- [x] No implementation details (languages, frameworks, APIs)
++- [x] Focused on user value and business needs
++- [x] Written for non-technical stakeholders
++- [x] All mandatory sections completed
++
++## Requirement Completeness
++
++- [x] No [NEEDS CLARIFICATION] markers remain
++- [x] Requirements are testable and unambiguous
++- [x] Success criteria are measurable
++- [x] Success criteria are technology-agnostic (no implementation details)
++- [x] All acceptance scenarios are defined
++- [x] Edge cases are identified
++- [x] Scope is clearly bounded
++- [x] Dependencies and assumptions identified
++
++## Feature Readiness
++
++- [x] All functional requirements have clear acceptance criteria
++- [x] User scenarios cover primary flows
++- [x] Feature meets measurable outcomes defined in Success Criteria
++- [x] No implementation details leak into specification
++
++## Notes
++
++Validation pass 1 (2026-11-14) — all items pass. Two items warrant an explicit note:
++
++- **"No implementation details" / "No implementation details leak"**: the spec names the
++  invocation form `python -m bookmarks [--db PATH] COMMAND ...` in FR-001 and names Python
++  3.11+, SQLite and the `src/bookmarks` package layout in the Assumptions section. These are
++  not inferred technical choices — the requester mandated them, and for a command-line tool
++  the invocation string, exit statuses and output formats *are* the user interface, so they
++  belong in the requirements. Everything that is a solution constraint rather than observable
++  behaviour is confined to the final block of the Assumptions section and is deliberately kept
++  out of the functional requirements and success criteria.
++- **"Written for non-technical stakeholders"**: the audience for this feature is a person
++  working in a terminal, so tab-separated output, exit statuses and CSV/JSON are part of the
++  user's vocabulary rather than hidden mechanics. No internal design (schema, modules,
++  algorithms) appears in the spec.
++
++Two details the request left open were settled as documented decisions rather than
++[NEEDS CLARIFICATION] markers, since each has a clear default and neither changes scope:
++ids are never reused after a deletion, and duplicate URLs are allowed as distinct bookmarks.
++Both are stated in the Assumptions section and covered by acceptance scenarios, so planning
++is not blocked on them. If either default is wrong, say so and the spec is a one-line change.
++
++- Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`
+diff --git a/specs/001-bookmark-cli-manager/spec.md b/specs/001-bookmark-cli-manager/spec.md
+new file mode 100644
+index 0000000..dfced2f
+--- /dev/null
++++ b/specs/001-bookmark-cli-manager/spec.md
+@@ -0,0 +1,181 @@
++# Feature Specification: Command-Line Bookmark Manager
++
++**Feature Branch**: `001-bookmark-cli-manager`
++
++**Created**: 2026-11-14
++
++**Status**: Draft
++
++**Input**: User description: "Build a command-line bookmark manager that stores bookmarks in an SQLite database. Run it as `python -m bookmarks [--db PATH] COMMAND ...` with commands `add`, `list`, `search`, `delete` and `export`, tab-separated listing output, CSV/JSON export, URL validation with exit status 2, missing-id deletion with exit status 3, Python 3.11+ standard library only, package `bookmarks` under `src/`."
++
++## User Scenarios & Testing *(mandatory)*
++
++The actor throughout is a single person working in a terminal who wants to keep a durable, greppable list of web links without a browser or an online service.
++
++### User Story 1 - Capture a link and see it again later (Priority: P1)
++
++Someone finds a page worth keeping. They run one command with the URL, optionally giving it a title and some tags, and get back a number identifying the saved bookmark. Later — in a different shell, on a different day — they run the listing command and the bookmark is still there, shown with its id, URL, title and tags.
++
++**Why this priority**: Capture plus recall is the entire point of a bookmark manager. Without it nothing else has anything to operate on, and with only this the tool is already useful on its own.
++
++**Independent Test**: Add two bookmarks in one invocation each, then run the listing command in a separate invocation against the same store and confirm both appear, in ascending id order, with the ids that were printed when they were added.
++
++**Acceptance Scenarios**:
++
++1. **Given** an empty or not-yet-existing store, **When** the user adds `https://docs.python.org` with title `Python docs` and tags `python,docs`, **Then** the tool prints `1`, exits 0, and the store now exists and contains that bookmark.
++2. **Given** a store already holding one bookmark, **When** the user adds `https://example.com` with no title and no tags, **Then** the tool prints `2` and exits 0.
++3. **Given** the two bookmarks above, **When** the user lists bookmarks in a new invocation, **Then** output is exactly two lines in ascending id order: `1<TAB>https://docs.python.org<TAB>Python docs<TAB>docs,python` and `2<TAB>https://example.com<TAB><TAB>`.
++4. **Given** any store, **When** the user adds a URL that does not begin with `http://` or `https://` (for example `ftp://example.com`), **Then** nothing is added, an error message naming the problem is written to standard error, nothing is written to standard output, and the exit status is 2.
++5. **Given** no store location is supplied, **When** the user adds a bookmark, **Then** the store used is `bookmarks.db` in the current working directory, created if absent.
++
++---
++
++### User Story 2 - Find the link you half-remember (Priority: P2)
++
++The list has grown past what fits on a screen. The user remembers a word from the title or the URL, or remembers only that they tagged it `python`. They narrow the list by free text or by tag and get back just the matching bookmarks in the same per-line format as the full listing.
++
++**Why this priority**: Retrieval value decays fast as the collection grows; this is what makes the tool worth using past the first dozen links. It depends on capture (P1) existing but is independently demonstrable.
++
++**Independent Test**: With a known set of bookmarks in the store, run a search whose casing differs from the stored text and a tag filter for a tag held by only some bookmarks; confirm each returns exactly the expected subset in ascending id order.
++
++**Acceptance Scenarios**:
++
++1. **Given** bookmark 1 titled `Python docs` at `https://docs.python.org` and bookmark 2 at `https://example.com`, **When** the user searches for `PYTHON`, **Then** only bookmark 1's line is printed and the exit status is 0.
++2. **Given** the same store, **When** the user searches for text that appears in a URL but in different letter case, **Then** the matching bookmark is printed (matching ignores case for both title and URL).
++3. **Given** bookmarks tagged `docs,python` and `python` and one with no tags, **When** the user lists with the tag filter `docs`, **Then** only the bookmark carrying the `docs` tag is printed.
++4. **Given** any store, **When** a search or tag filter matches nothing, **Then** no lines are printed and the exit status is 0.
++
++---
++
++### User Story 3 - Remove a link that no longer belongs (Priority: P3)
++
++A bookmark is stale or was saved by mistake. The user deletes it by the id shown in the listing. If they mistype the id, the tool tells them so rather than silently doing nothing.
++
++**Why this priority**: Pruning matters for a collection kept over time, but a user can live without it longer than without capture, recall or search.
++
++**Independent Test**: Delete an existing id and confirm it disappears from the listing while the others are untouched; then delete the same id again and confirm the documented failure behaviour.
++
++**Acceptance Scenarios**:
++
++1. **Given** bookmarks with ids 1 and 2, **When** the user deletes id 1, **Then** the exit status is 0 and a subsequent listing shows only bookmark 2.
++2. **Given** a store with no bookmark id 42, **When** the user deletes id 42, **Then** nothing is deleted, an error message naming the missing id is written to standard error, and the exit status is 3.
++3. **Given** a bookmark has been deleted, **When** the user adds a new bookmark, **Then** the new bookmark receives an id greater than every id ever assigned in that store (ids are never reused).
++
++---
++
++### User Story 4 - Hand the collection to another tool (Priority: P4)
++
++The user wants the whole collection in a machine-readable form — to load into a spreadsheet, to pipe into a script, or to keep as a backup. They export it as CSV or as JSON on standard output.
++
++**Why this priority**: Valuable for portability and for trusting the tool with data, but the collection is already usable without it.
++
++**Independent Test**: With a known set of bookmarks, export in each format and confirm the output parses as that format and round-trips every bookmark's id, URL, title and tags.
++
++**Acceptance Scenarios**:
++
++1. **Given** a store with bookmarks, **When** the user exports as CSV, **Then** the first line is exactly `id,url,title,tags`, one row follows per bookmark in ascending id order, the tags field holds that bookmark's tags joined by commas in alphabetical order, and the exit status is 0.
++2. **Given** a store with bookmarks, **When** the user exports as JSON, **Then** standard output is a JSON array whose elements are objects with keys `id` (a number), `url`, `title` and `tags` (an array of strings in alphabetical order), in ascending id order, and the exit status is 0.
++3. **Given** an empty store, **When** the user exports as CSV, **Then** only the header line is printed; **When** the user exports as JSON, **Then** an empty array is printed. Both exit 0.
++4. **Given** any store, **When** the user requests an export format other than `csv` or `json`, **Then** an error message is written to standard error and the exit status is non-zero.
++
++---
++
++### Edge Cases
++
++- **URL rejected**: anything not beginning with `http://` or `https://` — including an empty string, a bare domain, `HTTP://` in other casing, or another scheme — is rejected with a stderr diagnostic and exit status 2, leaving the store unchanged. (The prefix check is literal and case-sensitive; see Assumptions.)
++- **No tags given**: the bookmark has an empty tag set; its tags field in listings, searches and CSV is empty, and its JSON `tags` value is an empty array.
++- **Untidy tag input**: surrounding whitespace around each tag is ignored, empty entries from input like `python,,cli` or a trailing comma are dropped, and a tag repeated in one input is stored once.
++- **Tag display order**: tags are always presented alphabetically, regardless of the order they were supplied in.
++- **Duplicate URLs**: adding a URL that is already stored succeeds and creates a second, independently addressable bookmark; the tool does not deduplicate.
++- **Missing title**: title defaults to the empty string, printed as an empty field.
++- **Non-numeric or missing id on delete**: reported as a usage error on standard error with a non-zero exit status, nothing is deleted.
++- **Unknown command, unknown option, or missing required argument**: reported on standard error with a non-zero exit status and no change to the store.
++- **Store cannot be opened or created** (for example the given path's parent directory does not exist, or the path is not writable): an error naming the path and the problem is written to standard error and the exit status is non-zero; no partial store is left behind beyond what the operating system creates.
++- **Non-ASCII text**: titles, URLs and tags containing non-ASCII characters are stored and reproduced unchanged in every output format.
++- **Empty store**: listing and searching print nothing and exit 0 — an empty collection is a success, not an error.
++
++## Requirements *(mandatory)*
++
++### Functional Requirements
++
++Invocation and store:
++
++- **FR-001**: The tool MUST be invokable as `python -m bookmarks [--db PATH] COMMAND ...`, accepting the commands `add`, `list`, `search`, `delete` and `export`.
++- **FR-002**: The tool MUST use the file given by `--db PATH` as its store, and MUST use `bookmarks.db` in the current working directory when `--db` is not given.
++- **FR-003**: The tool MUST create the store file if it does not exist, and MUST NOT require any separate initialisation step.
++- **FR-004**: Bookmarks written by one invocation MUST be readable by later invocations against the same store path (persistence across runs).
++- **FR-005**: Every command that completes its requested work MUST exit with status 0.
++- **FR-006**: Every diagnostic for a rejected or failed command MUST be written to standard error, MUST name what was wrong, and MUST be accompanied by a non-zero exit status; the store MUST be left unchanged by a failed command.
++
++Adding:
++
++- **FR-007**: `add URL [--title TITLE] [--tags TAGS]` MUST store a bookmark and print its numeric id, and nothing else, on standard output.
++- **FR-008**: Assigned ids MUST start at 1 for the first bookmark in a store and MUST strictly increase for each subsequent bookmark, and MUST NOT be reused after a deletion.
++- **FR-009**: `add` MUST reject any URL that does not begin with the literal prefix `http://` or `https://`, writing a diagnostic to standard error and exiting with status 2 without storing anything.
++- **FR-010**: `--title` MUST default to the empty string when omitted.
++- **FR-011**: `--tags` MUST accept a comma-separated list (for example `python,cli`) and MUST default to no tags when omitted; each tag MUST be trimmed of surrounding whitespace, empty entries MUST be discarded, and a tag repeated within one input MUST be stored once.
++
++Listing and searching:
++
++- **FR-012**: `list` MUST print every bookmark in the store, ordered by ascending id.
++- **FR-013**: `list --tag TAG` MUST print only bookmarks that carry the tag TAG, matched in full and exactly (not as a substring), ordered by ascending id.
++- **FR-014**: `search TEXT` MUST print every bookmark whose title or URL contains TEXT as a substring, ignoring letter case, ordered by ascending id.
++- **FR-015**: `list` and `search` MUST print one bookmark per line as four tab-separated fields in this order: id, URL, title, and the bookmark's tags joined by commas in alphabetical order. A bookmark with no tags and no title MUST therefore yield two trailing empty fields.
++- **FR-016**: `list` and `search` that match no bookmarks MUST print nothing and exit with status 0.
++
++Deleting:
++
++- **FR-017**: `delete ID` MUST remove the bookmark with that id and exit with status 0, leaving all other bookmarks untouched.
++- **FR-018**: `delete ID` for an id not present in the store MUST write a diagnostic naming the id to standard error and exit with status 3, deleting nothing.
++
++Exporting:
++
++- **FR-019**: `export --format csv` MUST print all bookmarks as CSV on standard output, beginning with the exact header row `id,url,title,tags`, one row per bookmark in ascending id order, with the tags field holding that bookmark's tags joined by commas in alphabetical order, and with field values that contain the delimiter, quotes or line breaks escaped per standard CSV quoting so the output re-reads as the same values.
++- **FR-020**: `export --format json` MUST print all bookmarks as a JSON array of objects on standard output, in ascending id order, each object having the keys `id` (a number), `url` (text), `title` (text) and `tags` (an array of strings in alphabetical order).
++- **FR-021**: `export` MUST reject a format other than `csv` or `json` with a diagnostic on standard error and a non-zero exit status.
++- **FR-022**: Exporting an empty store MUST succeed, printing the header row alone for CSV and an empty array for JSON.
++
++Data fidelity:
++
++- **FR-023**: URLs, titles and tags MUST be stored and reproduced exactly as supplied (no case folding, trimming beyond the tag trimming in FR-011, or other normalisation) in every output format.
++
++### Key Entities
++
++- **Bookmark**: one saved link. Attributes: **id** (a positive whole number, unique within a store, assigned by the tool, never reused); **url** (required, must begin with `http://` or `https://`); **title** (free text, empty string when not supplied); **tags** (a set of tag labels, possibly empty).
++- **Tag**: a short label attached to a bookmark, supplied as part of a comma-separated list. A bookmark may carry any number of tags; the same label may be carried by many bookmarks. Tags have no attributes of their own beyond their text and are always presented in alphabetical order.
++- **Store**: the single file holding all bookmarks for a given `--db` path. It is created on first use and is the unit of persistence; two different paths are two independent, non-interacting collections.
++
++## Success Criteria *(mandatory)*
++
++### Measurable Outcomes
++
++- **SC-001**: A user who has never used the tool can save their first bookmark with a single command and no setup step, and sees its id printed immediately.
++- **SC-002**: Every bookmark saved is still present and byte-identical in its URL, title and tags when listed in a later, separate run against the same store — 100% of the time, with no data loss across runs.
++- **SC-003**: All five commands produce the documented exit status in every case covered by the acceptance scenarios: 0 on success, 2 for a rejected URL, 3 for deleting an absent id, and non-zero for every other rejected input. 100% of these cases are covered by automated tests.
++- **SC-004**: Each of the 23 functional requirements, including every error path, is covered by at least one automated test that names the requirement it verifies.
++- **SC-005**: Listing, searching and exporting a collection of 1,000 bookmarks each return their full output in under one second on ordinary developer hardware, so the tool feels instantaneous in interactive use.
++- **SC-006**: Listing and search output can be fed directly into standard text tools (field-splitting on tabs) and CSV/JSON exports can be re-read by any standard parser for that format with no post-processing, for 100% of stored bookmarks including those with non-ASCII text.
++- **SC-007**: A failed command never leaves the collection altered: after any rejected input, a listing is identical to the listing taken before it.
++
++## Assumptions
++
++Chosen defaults where the request did not specify (each is a decision, not an open question):
++
++- **Single user, one command at a time**: no concurrent access from multiple processes to the same store is required, and no locking or multi-user behaviour is in scope.
++- **Ids are never reused**: after deleting the highest id, the next bookmark added takes a still-higher id. This keeps a printed id a stable reference for the life of the store.
++- **No deduplication**: the same URL may be saved any number of times, each time as a distinct bookmark. Reconciling duplicates is the user's business.
++- **URL check is a literal prefix test**: exactly `http://` or `https://`, case-sensitive, with no further parsing or reachability check. `HTTPS://example.com` is therefore rejected. Nothing about the URL beyond that prefix is validated, and no network access is ever made.
++- **Tag matching is exact and case-sensitive**: `--tag Python` does not match a bookmark tagged `python`. Only `search` ignores case.
++- **Case-insensitive search covers ASCII letters at minimum**; broader case folding for other alphabets is welcome but not required.
++- **Fields are assumed free of tabs and newlines** for the tab-separated listing format. Such characters are stored faithfully (FR-023) but the listing format gives them no escaping, so a title containing a tab will produce an ambiguous line. CSV and JSON export remain unambiguous in that case, and this is the recommended route for such data.
++- **CSV row terminators and quoting follow standard CSV conventions** as produced by a conventional CSV writer; the request fixes the header text and the field order but not the newline convention, so either `\n` or `\r\n` terminators satisfy FR-019.
++- **JSON output is a single array**, pretty-printing optional, with non-ASCII characters permitted either literally or escaped since both parse to the same value.
++- **Exit status 1 (or any non-zero value other than 2 and 3) is acceptable** for failures the request does not assign a specific status to — usage errors, an unopenable store, an unknown export format. Only 2 (bad URL) and 3 (absent id on delete) are fixed by the request.
++- **No other commands or options are in scope**: there is no edit/update command, no import, no tag renaming, no interactive mode, no output colouring, no configuration file, and no environment-variable override of the store path.
++
++Constraints given by the requester and by the project constitution (recorded here because they bound the solution rather than describing user-visible behaviour):
++
++- Python 3.11 or newer, standard library only at runtime (`sqlite3` included); `pytest` is the one permitted development dependency.
++- Bookmarks are held in an SQLite database file.
++- The code lives in a package named `bookmarks` under `src/`, runnable as `python -m bookmarks` when `src/` is on `PYTHONPATH`.
++- Diagnostics on standard error with meaningful non-zero exit statuses, per the constitution's "Fail Loudly" principle; no silent fallbacks and no writes outside the store path the caller supplied.

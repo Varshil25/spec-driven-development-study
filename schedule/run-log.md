@@ -29,8 +29,8 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R019C | 2026-11-14 | T-REDACT-01-CR | sdd_clarify | OK | 0 | no | ok | rerun of R011C (spare ID), on R011's finished build from a fresh clone; operated by Claude; plan resumed after the usage limit (same session); Claude Code 2.1.325; Claude Code cost $24.74 |
 | R012 | 2026-11-14 | T-PASTE-01 | unstructured | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $2.43 |
 | R012C | 2026-11-14 | T-PASTE-01-CR | unstructured | OK | 0 | no | ok | change request on R012; operated by Claude; Claude Code 2.1.317 (pinned); the agent's own pkill matched the harness and ended its first call, and the resumed session then stopped at the usage limit; both resumed with the fixed message; cost excludes the calls that were cut off; Claude Code cost $2.61 |
-| R013 | | T-BOOKMARKS-01 | sdd | | | | |  |
-| R013C | | T-BOOKMARKS-01-CR | sdd | | | | | change request on R013 |
+| R013 | 2026-11-14 | T-BOOKMARKS-01 | sdd | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $9.91 |
+| R013C | 2026-11-14 | T-BOOKMARKS-01-CR | sdd | OK | 0 | no | ok | change request on R013; operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $10.44 |
 | R028 | | T-QNOTES-01 | sdd_clarify | | | | |  |
 | R029 | | T-QIMPORT-01 | sdd | | | | |  |
 | R014 | | T-ACCOUNTS-01 | unstructured | | | | |  |
