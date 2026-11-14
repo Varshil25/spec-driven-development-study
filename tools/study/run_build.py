@@ -316,12 +316,19 @@ def classify(operator, answers, message, phase):
 # ---------------------------------------------------------------------------
 
 
-def run_phase(args, kit, task, condition, phase, operator, answers, log_dir):
+def run_phase(args, kit, task, condition, phase, operator, answers, log_dir, resume=None):
     agent = Agent(args, log_dir)
-    sddlog("phase", phase, "--start")
+    if resume:
+        # The phase is already open: its session was interrupted (RUNBOOK 5). Resume that session
+        # with the fixed resume message, as pre-registered in section 6.1.
+        agent.session = resume
+        note("RESUME: %s session interrupted (operator's workspace restarted); resumed %s" % (phase, resume))
+        message = RESUME
+    else:
+        sddlog("phase", phase, "--start")
+        message = phase_prompt(kit, task, condition, phase)
     opened = time.time()
     follow_ups = 0
-    message = phase_prompt(kit, task, condition, phase)
     while True:
         result, failed = agent.send(message, phase)
         if failed:
@@ -415,10 +422,15 @@ def main(argv=None):
                         help="continue an open run from PHASE (the run was stopped with --stop-after)")
     parser.add_argument("--stop-after", metavar="PHASE", default=None,
                         help="leave the run open after PHASE; continue later with --start-at")
+    parser.add_argument("--resume-session", metavar="ID", default=None,
+                        help="with --start-at: resume this interrupted session of that open phase "
+                             "with the fixed resume message instead of opening the phase anew")
     parser.add_argument("--clean-env", metavar="DIR", default=None,
                         help="give each claude call only a minimal environment and a fresh config "
                              "folder DIR/<run id> (no user skills, plugins, hooks or host tools)")
     args = parser.parse_args(argv)
+    if args.resume_session and not args.start_at:
+        parser.error("--resume-session needs --start-at")
 
     kit = Path(args.kit).resolve()
     script = Path(args.script).read_text().splitlines() if args.script else None
@@ -429,7 +441,7 @@ def main(argv=None):
         first, last = phase_range(phases, args.start_at, args.stop_after)
         answers = answer_sheets(kit, task)
         log_dir = Path("logs") / "runs" / args.run_id / "headless"
-        if first == 0:
+        if first == 0 and not args.resume_session:
             prepare_repository(condition, stage, args)
             sddlog("run-start", "--run-id", args.run_id, "--task", task, "--condition", condition,
                    "--stage", stage, "--model", args.model)
@@ -441,7 +453,8 @@ def main(argv=None):
         print("Run %s: %s, %s, %s stage. Phases: %s" % (
             args.run_id, task, condition, stage, " -> ".join(phases)))
         for phase in phases[first:last + 1]:
-            run_phase(args, kit, task, condition, phase, operator, answers, log_dir)
+            resume = args.resume_session if phase == phases[first] else None
+            run_phase(args, kit, task, condition, phase, operator, answers, log_dir, resume)
         if last < len(phases) - 1:
             print("\nRun %s left open after %s. Continue with: run_build.py %s --start-at %s" % (
                 args.run_id, phases[last], args.run_id, phases[last + 1]))

@@ -1,0 +1,461 @@
+diff --git a/src/bookmarks/cli.py b/src/bookmarks/cli.py
+index b2a63de..6411e69 100644
+--- a/src/bookmarks/cli.py
++++ b/src/bookmarks/cli.py
+@@ -4,10 +4,12 @@ from __future__ import annotations
+ 
+ import argparse
+ import csv
++import html
++import io
+ import json
+ import sqlite3
+ import sys
+-from typing import Sequence
++from typing import Iterable, NamedTuple, Sequence
+ 
+ from .storage import Bookmark, Store, parse_tags
+ 
+@@ -17,8 +19,32 @@ ALLOWED_SCHEMES = ("http://", "https://")
+ EXIT_OK = 0
+ EXIT_ERROR = 1
+ EXIT_BAD_URL = 2
++EXIT_BAD_IMPORT = 2
+ EXIT_NO_SUCH_BOOKMARK = 3
+ 
++CSV_HEADER = ("id", "url", "title", "tags")
++
++HTML_PROLOGUE = (
++    "<!DOCTYPE html>\n"
++    "<html>\n"
++    '<head><meta charset="utf-8"><title>Bookmarks</title></head>\n'
++    "<body>\n"
++    "<ul>"
++)
++HTML_EPILOGUE = "</ul>\n</body>\n</html>"
++
++
++class NewBookmark(NamedTuple):
++    """A bookmark read from an import file, ready to be stored."""
++
++    url: str
++    title: str
++    tags: tuple[str, ...]
++
++
++class BadImportFile(Exception):
++    """Raised when an import file cannot be read or has the wrong shape."""
++
+ 
+ def build_parser() -> argparse.ArgumentParser:
+     parser = argparse.ArgumentParser(
+@@ -49,7 +75,13 @@ def build_parser() -> argparse.ArgumentParser:
+     delete.add_argument("id", metavar="ID", type=int)
+ 
+     export = commands.add_parser("export", help="export every bookmark")
+-    export.add_argument("--format", required=True, choices=("csv", "json"))
++    export.add_argument("--format", required=True, choices=("csv", "json", "html"))
++
++    importing = commands.add_parser(
++        "import", help="add every bookmark from a file written by export"
++    )
++    importing.add_argument("file", metavar="FILE")
++    importing.add_argument("--format", required=True, choices=("csv", "json"))
+ 
+     return parser
+ 
+@@ -79,6 +111,8 @@ def dispatch(args: argparse.Namespace, store: Store) -> int:
+         return cmd_delete(args, store)
+     if args.command == "export":
+         return cmd_export(args, store)
++    if args.command == "import":
++        return cmd_import(args, store)
+     raise AssertionError(f"unhandled command {args.command!r}")
+ 
+ 
+@@ -105,14 +139,150 @@ def cmd_export(args: argparse.Namespace, store: Store) -> int:
+     bookmarks = store.all()
+     if args.format == "csv":
+         writer = csv.writer(sys.stdout, lineterminator="\n")
+-        writer.writerow(("id", "url", "title", "tags"))
++        writer.writerow(CSV_HEADER)
+         writer.writerows(bookmark.as_row() for bookmark in bookmarks)
++    elif args.format == "html":
++        write_html(bookmarks)
+     else:
+         json.dump([bookmark.as_dict() for bookmark in bookmarks], sys.stdout, indent=2)
+         print()
+     return EXIT_OK
+ 
+ 
++def write_html(bookmarks: Iterable[Bookmark]) -> None:
++    """Print the bookmarks as an HTML page, one list item per bookmark."""
++    print(HTML_PROLOGUE)
++    for bookmark in bookmarks:
++        href = html.escape(bookmark.url, quote=True)
++        title = html.escape(bookmark.title, quote=False)
++        tags = html.escape(bookmark.tag_string, quote=False)
++        print(f'<li><a href="{href}">{title}</a> <small>{tags}</small></li>')
++    print(HTML_EPILOGUE)
++
++
++def cmd_import(args: argparse.Namespace, store: Store) -> int:
++    """Add every bookmark in a file, or nothing at all if it is unusable."""
++    try:
++        text = read_import_file(args.file)
++        if args.format == "csv":
++            new = read_csv(text)
++        else:
++            new = read_json(text)
++    except BadImportFile as exc:
++        print(f"error: {exc}", file=sys.stderr)
++        return EXIT_BAD_IMPORT
++    store.add_many(new)
++    print(f"imported {len(new)}")
++    return EXIT_OK
++
++
++def read_import_file(path: str) -> str:
++    try:
++        # newline="" leaves line endings alone, as the csv module wants.
++        with open(path, encoding="utf-8", newline="") as handle:
++            return handle.read()
++    except UnicodeDecodeError:
++        raise BadImportFile(f"{path} is not valid UTF-8 text") from None
++    except OSError as exc:
++        raise BadImportFile(f"could not read {path}: {exc.strerror or exc}") from None
++
++
++def read_csv(text: str) -> list[NewBookmark]:
++    """Parse the CSV that ``export --format csv`` writes."""
++    try:
++        rows = list(csv.reader(io.StringIO(text, newline="")))
++    except csv.Error as exc:
++        raise BadImportFile(f"not valid CSV: {exc}") from None
++    if not rows:
++        raise BadImportFile(
++            "not valid CSV: the file is empty, expected the header row "
++            + ",".join(CSV_HEADER)
++        )
++    if tuple(field.strip() for field in rows[0]) != CSV_HEADER:
++        raise BadImportFile(
++            "not valid CSV: the header row must be "
++            + ",".join(CSV_HEADER)
++            + f", got {','.join(rows[0])!r}"
++        )
++    new = []
++    for number, row in enumerate(rows[1:], start=2):
++        where = f"line {number}"
++        if len(row) != len(CSV_HEADER):
++            raise BadImportFile(
++                f"{where}: expected {len(CSV_HEADER)} fields, got {len(row)}"
++            )
++        _ignored_id, url, title, tags = row
++        new.append(make_bookmark(url, title, parse_tags(tags), where))
++    return new
++
++
++def read_json(text: str) -> list[NewBookmark]:
++    """Parse the JSON that ``export --format json`` writes."""
++    try:
++        data = json.loads(text)
++    except ValueError as exc:
++        raise BadImportFile(f"not valid JSON: {exc}") from None
++    if not isinstance(data, list):
++        raise BadImportFile(
++            f"not valid JSON: expected an array of bookmarks, got {type_name(data)}"
++        )
++    new = []
++    for index, item in enumerate(data, start=1):
++        where = f"item {index}"
++        if not isinstance(item, dict):
++            raise BadImportFile(
++                f"{where}: expected an object, got {type_name(item)}"
++            )
++        if "url" not in item:
++            raise BadImportFile(f'{where}: missing "url"')
++        title = item.get("title", "")
++        if not isinstance(title, str):
++            raise BadImportFile(
++                f'{where}: "title" must be a string, got {type_name(title)}'
++            )
++        new.append(make_bookmark(item["url"], title, json_tags(item, where), where))
++    return new
++
++
++def json_tags(item: dict, where: str) -> tuple[str, ...]:
++    """The ``tags`` value of a JSON bookmark, with the rules ``add`` uses.
++
++    The tags already arrive as a list, so unlike ``--tags`` there is nothing
++    to split; whitespace is stripped, blanks dropped and duplicates
++    collapsed, and the result is sorted alphabetically.
++    """
++    raw = item.get("tags", [])
++    if not isinstance(raw, list) or not all(isinstance(tag, str) for tag in raw):
++        raise BadImportFile(f'{where}: "tags" must be a list of strings')
++    tags = {tag.strip() for tag in raw}
++    tags.discard("")
++    return tuple(sorted(tags))
++
++
++def make_bookmark(
++    url: object, title: str, tags: tuple[str, ...], where: str
++) -> NewBookmark:
++    """Check one imported bookmark the way ``add`` checks its arguments."""
++    if not isinstance(url, str):
++        raise BadImportFile(f'{where}: "url" must be a string, got {type_name(url)}')
++    if not url.startswith(ALLOWED_SCHEMES):
++        raise BadImportFile(f"{where}: url must start with http:// or https://: {url}")
++    return NewBookmark(url, title, tags)
++
++
++def type_name(value: object) -> str:
++    """A JSON-flavoured name for a value's type, for error messages."""
++    return {
++        type(None): "null",
++        bool: "a boolean",
++        int: "a number",
++        float: "a number",
++        str: "a string",
++        list: "an array",
++        dict: "an object",
++    }.get(type(value), type(value).__name__)
++
++
+ def print_lines(bookmarks: list[Bookmark]) -> int:
+     """Print one tab-separated line per bookmark."""
+     for bookmark in bookmarks:
+diff --git a/src/bookmarks/storage.py b/src/bookmarks/storage.py
+index 079e2a4..f9d4689 100644
+--- a/src/bookmarks/storage.py
++++ b/src/bookmarks/storage.py
+@@ -104,6 +104,26 @@ class Store:
+             )
+         return bookmark_id
+ 
++    def add_many(self, bookmarks: Iterable[tuple[str, str, Iterable[str]]]) -> list[int]:
++        """Store several ``(url, title, tags)`` triples in one transaction.
++
++        Either every bookmark is stored or, if the database rejects one of
++        them, none of them are.  Returns the new ids in input order.
++        """
++        ids: list[int] = []
++        with self._conn:
++            for url, title, tags in bookmarks:
++                cursor = self._conn.execute(
++                    "INSERT INTO bookmarks (url, title) VALUES (?, ?)", (url, title)
++                )
++                bookmark_id = int(cursor.lastrowid)
++                self._conn.executemany(
++                    "INSERT INTO tags (bookmark_id, tag) VALUES (?, ?)",
++                    [(bookmark_id, tag) for tag in sorted(set(tags))],
++                )
++                ids.append(bookmark_id)
++        return ids
++
+     def delete(self, bookmark_id: int) -> bool:
+         """Delete a bookmark; return whether it existed."""
+         with self._conn:
+diff --git a/tests/test_bookmarks.py b/tests/test_bookmarks.py
+index fa5ee0a..1dbff4a 100644
+--- a/tests/test_bookmarks.py
++++ b/tests/test_bookmarks.py
+@@ -234,6 +234,200 @@ def test_export_requires_a_known_format(db):
+     assert db("export", "--format", "yaml").returncode != 0
+ 
+ 
++# --- export html --------------------------------------------------------
++
++HTML_HEAD = (
++    "<!DOCTYPE html>\n"
++    "<html>\n"
++    '<head><meta charset="utf-8"><title>Bookmarks</title></head>\n'
++    "<body>\n"
++    "<ul>\n"
++)
++HTML_TAIL = "</ul>\n</body>\n</html>\n"
++
++
++def test_export_html(db):
++    db("add", "https://docs.python.org", "--title", "Python docs",
++       "--tags", "python,docs")
++    db("add", "https://example.com", "--title", "Example")
++    assert ok(db("export", "--format", "html")) == (
++        HTML_HEAD
++        + '<li><a href="https://docs.python.org">Python docs</a>'
++        " <small>docs,python</small></li>\n"
++        '<li><a href="https://example.com">Example</a> <small></small></li>\n'
++        + HTML_TAIL
++    )
++
++
++def test_export_html_empty_is_an_empty_list(db):
++    assert ok(db("export", "--format", "html")) == HTML_HEAD + HTML_TAIL
++
++
++def test_export_html_is_ordered_by_id(db):
++    for host in ("c", "a", "b"):
++        db("add", f"https://{host}.example")
++    items = [
++        line for line in ok(db("export", "--format", "html")).splitlines()
++        if line.startswith("<li>")
++    ]
++    assert [line.split('"')[1] for line in items] == [
++        "https://c.example",
++        "https://a.example",
++        "https://b.example",
++    ]
++
++
++def test_export_html_escapes_markup(db):
++    db("add", "https://x.example/?a=1&b=2", "--title", "<b>bold</b> & 日本語",
++       "--tags", "a<b")
++    page = ok(db("export", "--format", "html"))
++    assert '<a href="https://x.example/?a=1&amp;b=2">' in page
++    assert "&lt;b&gt;bold&lt;/b&gt; &amp; 日本語</a>" in page
++    assert "<small>a&lt;b</small>" in page
++
++
++# --- import -------------------------------------------------------------
++
++
++def write(run, name: str, text: str) -> str:
++    (run.tmp_path / name).write_text(text, encoding="utf-8")
++    return name
++
++
++def test_import_json(run, db):
++    write(run, "in.json", json.dumps([
++        {"url": "https://docs.python.org", "title": "Python docs",
++         "tags": ["python", "docs"]},
++        {"url": "https://example.com", "title": "Example", "tags": []},
++    ]))
++    assert ok(db("import", "in.json", "--format", "json")) == "imported 2\n"
++    assert ok(db("list")) == (
++        f"1{TAB}https://docs.python.org{TAB}Python docs{TAB}docs,python\n"
++        f"2{TAB}https://example.com{TAB}Example{TAB}\n"
++    )
++
++
++def test_import_csv(run, db):
++    write(run, "in.csv", 'id,url,title,tags\n'
++          '7,https://docs.python.org,Python docs,"python,docs"\n'
++          '9,https://example.com,,\n')
++    assert ok(db("import", "in.csv", "--format", "csv")) == "imported 2\n"
++    assert ok(db("list")) == (
++        f"1{TAB}https://docs.python.org{TAB}Python docs{TAB}docs,python\n"
++        f"2{TAB}https://example.com{TAB}{TAB}\n"
++    )
++
++
++@pytest.mark.parametrize("fmt", ["csv", "json"])
++def test_import_round_trips_an_export(run, db, fmt):
++    db("add", "https://a.example", "--title", 'He said "hi", loudly',
++       "--tags", "b,a")
++    db("add", "https://b.example", "--title", "日本語", "--tags", "日本")
++    db("add", "https://c.example")
++    exported = ok(db("export", "--format", fmt))
++    write(run, f"dump.{fmt}", exported)
++    assert ok(run("--db", "copy.db", "import", f"dump.{fmt}", "--format", fmt)) == (
++        "imported 3\n"
++    )
++    assert ok(run("--db", "copy.db", "list")) == ok(db("list"))
++    assert ok(run("--db", "copy.db", "export", "--format", fmt)) == exported
++
++
++def test_import_appends_and_assigns_new_ids(run, db):
++    db("add", "https://first.example")
++    write(run, "in.json", json.dumps([{"url": "https://second.example",
++                                       "title": "", "tags": []}]))
++    assert ok(db("import", "in.json", "--format", "json")) == "imported 1\n"
++    assert ok(db("add", "https://third.example")) == "3\n"
++    assert [line.split(TAB)[0] for line in ok(db("list")).splitlines()] == [
++        "1", "2", "3",
++    ]
++
++
++def test_import_empty_collections_import_nothing(run, db):
++    write(run, "in.json", "[]")
++    write(run, "in.csv", "id,url,title,tags\n")
++    assert ok(db("import", "in.json", "--format", "json")) == "imported 0\n"
++    assert ok(db("import", "in.csv", "--format", "csv")) == "imported 0\n"
++    assert ok(db("list")) == ""
++
++
++def test_import_json_tags_are_sorted_trimmed_and_deduplicated(run, db):
++    write(run, "in.json", json.dumps(
++        [{"url": "https://a.example", "title": "A",
++          "tags": [" python ", "docs", "python", ""]}]
++    ))
++    ok(db("import", "in.json", "--format", "json"))
++    assert ok(db("list")) == f"1{TAB}https://a.example{TAB}A{TAB}docs,python\n"
++
++
++def test_import_json_title_and_tags_may_be_omitted(run, db):
++    write(run, "in.json", json.dumps([{"url": "https://a.example"}]))
++    assert ok(db("import", "in.json", "--format", "json")) == "imported 1\n"
++    assert ok(db("list")) == f"1{TAB}https://a.example{TAB}{TAB}\n"
++
++
++@pytest.mark.parametrize(
++    "fmt,text",
++    [
++        ("json", "not json at all"),
++        ("json", '{"url": "https://a.example"}'),          # object, not array
++        ("json", '["https://a.example"]'),                  # not objects
++        ("json", '[{"title": "no url", "tags": []}]'),      # missing url
++        ("json", '[{"url": "ftp://a.example"}]'),           # url rule
++        ("json", '[{"url": 42}]'),                          # url not a string
++        ("json", '[{"url": "https://a.example", "title": 42}]'),
++        ("json", '[{"url": "https://a.example", "tags": "python"}]'),
++        ("json", '[{"url": "https://a.example", "tags": [1]}]'),
++        ("csv", ""),                                        # no header row
++        ("csv", "url,title\nhttps://a.example,A\n"),        # wrong header
++        ("csv", "id,url,title,tags\n1,https://a.example\n"),  # short row
++        ("csv", "id,url,title,tags\n1,ftp://a.example,A,\n"),  # url rule
++    ],
++)
++def test_import_rejects_unusable_files(run, db, fmt, text):
++    write(run, "in.txt", text)
++    result = db("import", "in.txt", "--format", fmt)
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert result.stderr.strip() != ""
++    assert ok(db("list")) == ""  # nothing was imported
++
++
++def test_import_imports_nothing_when_a_later_entry_is_bad(run, db):
++    write(run, "in.csv", "id,url,title,tags\n"
++          "1,https://good.example,Good,\n"
++          "2,ftp://bad.example,Bad,\n")
++    assert db("import", "in.csv", "--format", "csv").returncode == 2
++    assert ok(db("list")) == ""
++
++
++def test_import_missing_file_exits_two(db):
++    result = db("import", "nosuch.json", "--format", "json")
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert result.stderr.strip() != ""
++
++
++def test_import_requires_a_file_and_a_known_format(run, db):
++    write(run, "in.json", "[]")
++    assert db("import", "in.json").returncode != 0
++    assert db("import", "--format", "json").returncode != 0
++    assert db("import", "in.json", "--format", "html").returncode != 0
++
++
++def test_imported_bookmarks_are_searchable_and_deletable(run, db):
++    write(run, "in.json", json.dumps(
++        [{"url": "https://docs.python.org", "title": "Python docs",
++          "tags": ["python"]}]
++    ))
++    ok(db("import", "in.json", "--format", "json"))
++    assert ok(db("search", "PYTHON")).startswith("1" + TAB)
++    assert ok(db("list", "--tag", "python")).startswith("1" + TAB)
++    assert ok(db("delete", "1")) == ""
++    assert ok(db("list")) == ""
++
++
+ # --- database handling --------------------------------------------------

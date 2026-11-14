@@ -1,0 +1,273 @@
+diff --git a/specs/001-pastebin-service/checklists/requirements.md b/specs/001-pastebin-service/checklists/requirements.md
+new file mode 100644
+index 0000000..cc9fc69
+--- /dev/null
++++ b/specs/001-pastebin-service/checklists/requirements.md
+@@ -0,0 +1,64 @@
++# Specification Quality Checklist: Pastebin Service
++
++**Purpose**: Validate specification completeness and quality before proceeding to planning
++**Created**: 2026-11-09
++**Feature**: [spec.md](../spec.md)
++
++## Content Quality
++
++- [x] No implementation details (languages, frameworks, APIs) — *with a documented exception, see Notes 1*
++- [x] Focused on user value and business needs
++- [x] Written for non-technical stakeholders
++- [x] All mandatory sections completed
++
++## Requirement Completeness
++
++- [x] No [NEEDS CLARIFICATION] markers remain
++- [x] Requirements are testable and unambiguous
++- [x] Success criteria are measurable
++- [x] Success criteria are technology-agnostic (no implementation details)
++- [x] All acceptance scenarios are defined
++- [x] Edge cases are identified
++- [x] Scope is clearly bounded
++- [x] Dependencies and assumptions identified
++
++## Feature Readiness
++
++- [x] All functional requirements have clear acceptance criteria
++- [x] User scenarios cover primary flows
++- [x] Feature meets measurable outcomes defined in Success Criteria
++- [x] No implementation details leak into specification — *see Notes 1*
++
++## Notes
++
++1. **Documented exception — the API contract is the product.** The feature request specified
++   the exact endpoint paths, HTTP methods, header name (`X-Delete-Token`), JSON field names,
++   status codes, and the runtime platform (Python 3.11+, standard library only, a `pastebin`
++   package under `src/`). For a service whose entire user interface *is* its HTTP API, these
++   are the observable behaviour, not implementation choices, so they belong in the
++   requirements. Two containment measures were applied so the exception stays bounded:
++   - Requirements FR-001–FR-037 are written in behavioural terms ("report not found",
++     "acknowledge with a no-content success response") with the mandated status code given
++     in parentheses, rather than as instructions about code.
++   - Platform and packaging constraints — Python version, dependency ban, `src/pastebin`
++     layout, command form — are quarantined in a separate **Constraints** section marked as
++     imposed by the request, and are deliberately absent from the Functional Requirements and
++     Success Criteria.
++
++   Success criteria SC-001–SC-008 are free of technology references and verifiable without
++   knowing how the service is built.
++
++2. **Deliberate under-specification, recorded in Assumptions rather than as clarifications.**
++   Four details were left open because no reasonable default is load-bearing and each is
++   genuinely an implementation choice: identifier and credential length/alphabet, the
++   on-disk layout within the storage directory, whether expired snippets are reclaimed
++   eagerly or lazily, and behaviour under a backwards clock jump. Each is named explicitly in
++   the Assumptions section so that planning knows it is free to decide.
++
++3. **Constitution alignment.** The standard-library-only constraint matches Principle I. The
++   error requirements (FR-005, FR-006, FR-032–FR-037) encode Principle II: every specified
++   failure mode has a named, explanatory outcome and none may be swallowed. SC-008 encodes
++   Principle III by requiring each FR identifier to be named by at least one passing test.
++
++4. Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`.
++   None are incomplete.
+diff --git a/specs/001-pastebin-service/spec.md b/specs/001-pastebin-service/spec.md
+new file mode 100644
+index 0000000..a1cb873
+--- /dev/null
++++ b/specs/001-pastebin-service/spec.md
+@@ -0,0 +1,197 @@
++# Feature Specification: Pastebin Service
++
++**Feature Branch**: `001-pastebin-service`
++
++**Created**: 2026-11-09
++
++**Status**: Draft
++
++**Input**: User description: "Build a small HTTP service for sharing text snippets ("pastes"), using only Python's standard library (for example `http.server`). Run it as `python -m pastebin serve --port PORT --data DIR`. It listens on 127.0.0.1 at PORT, stores pastes under the directory DIR (creating it if needed) so that they survive a restart, and prints `listening on 127.0.0.1:PORT` to standard output once it is ready to accept requests. [full API, error, and packaging details as given in the request]"
++
++## User Scenarios & Testing *(mandatory)*
++
++### User Story 1 - Publish a snippet and share a link to it (Priority: P1)
++
++Someone has a chunk of text — a log excerpt, a config fragment, a note — that they want to hand to another person or tool without emailing it around. They submit the text to the service and immediately get back a short identifier and a location. Anyone who knows that location can read the text back, either as structured data (with its metadata) or as the plain text itself, suitable for piping straight into a file or another program.
++
++**Why this priority**: This is the whole point of the service. Without create-and-read there is no product; every other story is a refinement of this one. It is also the smallest slice that is independently useful — a service that can only create and read snippets, with no expiry and no deletion, is already a working pastebin.
++
++**Independent Test**: Start the service against an empty storage directory, submit a snippet, and confirm the response carries an identifier and a location. Fetch that location and confirm the original text comes back along with its creation time. Fetch the plain-text variant of that location and confirm the response body is byte-for-byte the submitted text and is labelled as UTF-8 plain text.
++
++**Acceptance Scenarios**:
++
++1. **Given** a running service, **When** a caller submits a snippet containing `hello`, **Then** the service reports successful creation, returns a unique identifier, a deletion credential, and a location of the form `/pastes/<id>`.
++2. **Given** a snippet that was just created, **When** a caller requests it by its location, **Then** the service returns the identifier, the exact original text, the creation time, and an indication that it has no expiry.
++3. **Given** a snippet that was just created, **When** a caller requests the plain-text form of it, **Then** the response body is exactly the stored text with no wrapper, framing, or added characters, and is labelled as UTF-8 plain text.
++4. **Given** a running service, **When** two callers each submit a snippet, **Then** the two snippets receive different identifiers and each reads back its own text.
++5. **Given** a running service, **When** a caller submits text containing non-ASCII characters, emoji, embedded newlines, and an empty string, **Then** each is stored and read back unchanged.
++6. **Given** a running service, **When** a caller requests an identifier that was never issued, **Then** the service reports that it was not found.
++
++---
++
++### User Story 2 - Give a snippet a limited lifetime (Priority: P2)
++
++Someone is sharing something they do not want to leave lying around forever — a one-off credential rotation note, a debugging dump. When publishing, they state how long the snippet should remain available. Until that moment arrives the snippet behaves normally; afterwards it behaves exactly as though it had never existed, so nobody can tell from the response whether a snippet expired or was never created.
++
++**Why this priority**: Time-limited sharing is the feature that distinguishes this from a plain file drop, and it is the main privacy control the service offers. It is nonetheless a refinement: snippets without an expiry are already useful.
++
++**Independent Test**: Publish a snippet with a short lifetime and confirm it reads back normally with a stated expiry time. Advance past that moment and confirm every way of reaching the snippet reports it as not found. Separately, submit out-of-range and non-integer lifetimes and confirm each is rejected as invalid input.
++
++**Acceptance Scenarios**:
++
++1. **Given** a running service, **When** a caller publishes a snippet with a lifetime of one hour, **Then** the snippet is created and reading it back reports an expiry time one hour after its creation time.
++2. **Given** a snippet whose expiry moment has passed, **When** a caller requests it in either structured or plain-text form, **Then** the service reports that it was not found.
++3. **Given** a snippet whose expiry moment has passed, **When** a caller attempts to delete it using the correct deletion credential, **Then** the service reports that it was not found rather than confirming a deletion.
++4. **Given** a running service, **When** a caller publishes a snippet with a lifetime of zero, a negative lifetime, a lifetime longer than thirty days, a fractional lifetime, or a lifetime that is not a number, **Then** the service rejects the request as invalid input and creates nothing.
++5. **Given** a running service, **When** a caller publishes a snippet with a lifetime of exactly one second or exactly thirty days, **Then** the snippet is created successfully.
++
++---
++
++### User Story 3 - Withdraw a snippet before it expires (Priority: P2)
++
++Someone realises that what they published should not stay up — they pasted the wrong thing, or the recipient has finished with it. Using the deletion credential they received when publishing, they withdraw the snippet. From that point it is gone for everyone. Someone who does not hold the credential cannot withdraw it, and a failed attempt tells them nothing about whether the snippet exists in the first place beyond what they could already learn by reading it.
++
++**Why this priority**: Equal in importance to expiry — both are about the author retaining control — but it serves a narrower need, since most unwanted snippets can be left to expire.
++
++**Independent Test**: Publish a snippet, withdraw it with the credential returned at publication, confirm the service acknowledges the deletion with no content, and confirm the snippet can no longer be read. Separately, publish a snippet and attempt withdrawal with no credential and with a wrong credential, confirming both are refused and that the snippet is still readable afterwards.
++
++**Acceptance Scenarios**:
++
++1. **Given** a snippet and its deletion credential, **When** the holder requests deletion presenting that credential, **Then** the service acknowledges with an empty success response and the snippet is afterwards reported as not found.
++2. **Given** an existing snippet, **When** someone requests deletion without presenting any credential, **Then** the service refuses the request and the snippet remains readable.
++3. **Given** an existing snippet, **When** someone requests deletion presenting an incorrect credential, **Then** the service refuses the request and the snippet remains readable.
++4. **Given** an identifier that was never issued, **When** someone requests deletion with any credential or none, **Then** the service reports that it was not found rather than refusing on credential grounds.
++5. **Given** a snippet that has already been deleted, **When** the holder requests deletion again with the same credential, **Then** the service reports that it was not found.
++
++---
++
++### User Story 4 - Snippets outlive a restart of the service (Priority: P3)
++
++An operator restarts the service — to apply a configuration change, after a crash, or because the host rebooted. Snippets published before the restart are still there afterwards, with their text, creation times, expiry times, and deletion credentials intact. The operator points the service at a storage location of their choosing, and that location is created for them if it does not yet exist.
++
++**Why this priority**: Durability matters for a service people are expected to trust with a link, but it is invisible during normal operation and only exercised on restart. The first three stories deliver a working service without it.
++
++**Independent Test**: Start the service against a fresh storage location, publish several snippets (with and without expiry), stop the service, start a new instance against the same location, and confirm each snippet still reads back identically and can still be deleted with its original credential.
++
++**Acceptance Scenarios**:
++
++1. **Given** a storage location that does not exist, **When** the service is started pointing at it, **Then** the location is created and the service begins accepting requests normally.
++2. **Given** snippets published to a running service, **When** the service is stopped and a new instance is started against the same storage location, **Then** every snippet reads back with the same identifier, text, and creation time as before.
++3. **Given** a snippet published with an expiry before a restart, **When** the service is restarted, **Then** the snippet's expiry moment is unchanged — restarting neither extends nor shortens it.
++4. **Given** a snippet published before a restart, **When** its original deletion credential is presented after the restart, **Then** the deletion succeeds.
++5. **Given** a snippet whose expiry moment passed while the service was stopped, **When** the service is restarted and the snippet is requested, **Then** it is reported as not found.
++
++---
++
++### Edge Cases
++
++- **Text at and over the size limit**: text of exactly 65,536 bytes when UTF-8 encoded is accepted; text of 65,537 bytes is rejected as too large. The limit is measured in encoded bytes, not characters, so a snippet of 40,000 multi-byte characters can exceed the limit even though its character count does not.
++- **Empty text**: an empty string is valid text and produces a readable snippet whose plain-text form is an empty body.
++- **Malformed submissions**: a body that is not well-formed structured data, a body that is well-formed but is not an object (a bare list, number, or string), a submission with no text field at all, and a submission whose text field is a number, boolean, list, object, or null are each rejected as invalid input.
++- **Lifetime field present but empty-valued**: a lifetime explicitly given as null is treated as "no expiry" and is accepted; a lifetime given as a numeric string such as `"3600"` is rejected as invalid.
++- **Precedence between "not found" and "refused"**: when a deletion names an unknown or already-expired snippet *and* presents a wrong credential, the service reports not found. A caller must never be able to use the deletion endpoint to learn that an identifier exists when reading it would not have revealed that.
++- **Unrecognised locations and methods**: any path the service does not define — including the service root, a snippet path with extra trailing segments, and a snippet path with an unexpected suffix — is reported as not found. The same applies to a defined path used with a method it does not support.
++- **A snippet that expires between two requests**: a read that arrives before the expiry moment succeeds and a read arriving at or after it reports not found; there is no window in which a snippet is partially available.
++- **Unknown extra fields in a submission**: additional fields the service does not define are ignored rather than treated as errors, so that callers written against a future version are not broken by this one.
++- **Storage location problems**: if the storage location cannot be created or written to, the service reports the problem clearly and refuses to start rather than silently serving snippets that will be lost.
++- **Port already in use**: if the requested port cannot be bound, the service reports the problem clearly and exits without printing its ready message.
++
++## Requirements *(mandatory)*
++
++### Functional Requirements
++
++**Service lifecycle and operation**
++
++- **FR-001**: The service MUST be startable as a command that accepts a port to listen on and a storage location for snippets.
++- **FR-002**: The service MUST accept requests only on the local loopback interface at the requested port.
++- **FR-003**: The service MUST create the storage location if it does not already exist, including any missing parent directories.
++- **FR-004**: The service MUST write the line `listening on 127.0.0.1:PORT`, with `PORT` replaced by the actual port, to standard output once — and not before — it is ready to accept requests.
++- **FR-005**: If the service cannot bind the requested port or cannot create or write to the storage location, it MUST report the reason on the error stream and exit with a non-zero status, without printing the ready message.
++- **FR-006**: The service MUST reject a missing, non-numeric, or out-of-range port, and a missing storage location, with a clear message on the error stream and a non-zero exit status.
++
++**Publishing a snippet**
++
++- **FR-007**: Callers MUST be able to publish a snippet by submitting a structured body containing the snippet's text.
++- **FR-008**: The service MUST require the text field to be present and to be a string; a submission missing it, or giving it a non-string value, MUST be rejected as invalid input.
++- **FR-009**: The service MUST accept text of up to and including 65,536 bytes measured as UTF-8 encoded bytes, and MUST reject longer text as too large.
++- **FR-010**: The service MUST accept an optional lifetime field expressed as a whole number of seconds; when present it MUST be an integer from 1 to 2,592,000 inclusive, and any other value MUST be rejected as invalid input.
++- **FR-011**: The service MUST treat an absent lifetime, or a lifetime given as null, as "this snippet never expires".
++- **FR-012**: On successful publication the service MUST report created status and return the snippet's identifier, a deletion credential, and the snippet's location in the form `/pastes/<id>`.
++- **FR-013**: The service MUST assign each snippet an identifier that is unique among all snippets it has ever issued and that is not guessable from other identifiers.
++- **FR-014**: The service MUST assign each snippet a deletion credential that is unpredictable and not derivable from the snippet's identifier, and MUST return it only in the publication response.
++- **FR-015**: The service MUST ignore fields in a submission that it does not define, rather than rejecting the submission.
++- **FR-016**: The service MUST reject a submission whose body is not well-formed structured data, or is well-formed but is not an object, as invalid input.
++
++**Reading a snippet**
++
++- **FR-017**: Callers MUST be able to read a snippet by its location and receive its identifier, its text, its creation time, and its expiry time.
++- **FR-018**: The service MUST report the expiry time as absent for a snippet that never expires.
++- **FR-019**: The service MUST express all times as ISO 8601 timestamps in UTC with second precision and a trailing `Z`, for example `2026-10-23T20:15:00Z`.
++- **FR-020**: Callers MUST be able to read a snippet's text on its own, receiving exactly the stored text as the whole response body, labelled as UTF-8 plain text.
++- **FR-021**: The service MUST return a snippet's text unchanged across the full range of valid text, including the empty string, embedded newlines, and non-ASCII characters.
++
++**Withdrawing a snippet**
++
++- **FR-022**: Callers MUST be able to delete a snippet by presenting its deletion credential alongside the deletion request.
++- **FR-023**: On successful deletion the service MUST acknowledge with a no-content success response and MUST afterwards treat the snippet as not found.
++- **FR-024**: The service MUST refuse a deletion of an existing, unexpired snippet when the credential is missing or does not match, and MUST leave the snippet intact and readable.
++- **FR-025**: The service MUST compare the presented credential against the stored one in a way that does not reveal, through differences in timing, how much of the credential was correct.
++- **FR-026**: When a deletion names a snippet that is unknown or expired, the service MUST report not found regardless of the credential presented — "not found" takes precedence over "refused".
++
++**Expiry**
++
++- **FR-027**: The service MUST treat a snippet whose expiry moment has been reached or passed as though it does not exist, for reading, reading-as-text, and deletion alike.
++- **FR-028**: The service MUST compute a snippet's expiry moment once, at publication, as its creation time plus the requested lifetime, and MUST NOT change it thereafter.
++
++**Persistence**
++
++- **FR-029**: The service MUST store published snippets in the storage location such that a later instance started against the same location can read, serve, and delete them.
++- **FR-030**: The service MUST preserve a snippet's identifier, text, creation time, expiry time, and deletion credential across a restart.
++- **FR-031**: The service MUST treat a snippet as deleted permanently, so that a restart does not resurrect it.
++
++**Errors**
++
++- **FR-032**: Every unsuccessful response MUST carry a structured body consisting of a single error field whose value is a human-readable message naming what was wrong.
++- **FR-033**: The service MUST report invalid input — malformed body, missing or non-string text, or an invalid lifetime — as a client input error (400).
++- **FR-034**: The service MUST report text exceeding the size limit as a payload-too-large error (413), distinct from other invalid input.
++- **FR-035**: The service MUST report a refused deletion as a forbidden error (403).
++- **FR-036**: The service MUST report an unknown snippet, an expired snippet, any undefined path, and any defined path used with an unsupported method, as not found (404).
++- **FR-037**: The service MUST NOT return an unhandled-failure response for any input described in this specification; every rejection MUST be one of the defined error responses.
++
++### Key Entities
++
++- **Snippet**: a single shared piece of text. Carries an identifier (unique, unguessable, used in its location), the text itself (UTF-8, 0 to 65,536 bytes encoded), a creation time, an expiry time (a moment in time, or none), and a deletion credential (unpredictable, disclosed once at publication). A snippet is reachable until it is deleted or its expiry moment passes, whichever comes first.
++- **Storage location**: the directory the operator nominates at startup, holding every snippet the service has published and not deleted. It is the sole source of truth across restarts and is created on demand.
++
++## Success Criteria *(mandatory)*
++
++### Measurable Outcomes
++
++- **SC-001**: A person who has the service running can publish a snippet and read it back with a single command each, using nothing beyond a standard command-line HTTP client, with no setup step between the two.
++- **SC-002**: Text published to the service reads back byte-for-byte identical in 100% of cases across the full supported range: empty, maximum-size, multi-byte, and newline-containing text.
++- **SC-003**: 100% of the invalid inputs enumerated in this specification produce the specified outcome with an explanatory message, and none produce an unhandled failure or an unexplained empty response.
++- **SC-004**: After the service is stopped and restarted against the same storage location, 100% of snippets that had not expired or been deleted are still readable with unchanged content, identifier, creation time, and expiry time.
++- **SC-005**: A snippet given a lifetime is readable at every point before its expiry moment and unreadable at every point at or after it, with no observable difference between an expired snippet and one that never existed.
++- **SC-006**: Someone who does not hold a snippet's deletion credential cannot delete it, and cannot learn anything from a deletion attempt that reading the snippet would not already have told them.
++- **SC-007**: The service becomes ready and announces itself within 2 seconds of being started on a storage location holding up to 1,000 snippets.
++- **SC-008**: Every functional requirement above is exercised by at least one automated test that names its identifier, and the whole suite passes.
++
++## Assumptions
++
++- **Single operator, trusted-ish network**: the service binds the loopback interface only, so it is reachable from the host it runs on. There is no account system, no rate limiting, and no quota on how many snippets a caller may publish — authorship is represented solely by holding a snippet's deletion credential. This matches the described scope; exposing the service beyond the local host would require additions that are out of scope here.
++- **Expiry is evaluated lazily**: an expired snippet stops being served the moment it expires, which is what callers observe. Whether its stored copy is removed promptly, on next access, or not at all is left to the implementation; no background reclamation process is required, and none is specified.
++- **Identifier and credential shape are unspecified**: the specification requires identifiers to be unique and unguessable and credentials to be unpredictable, but does not dictate their length or alphabet. Both are assumed to be URL-safe text, since the identifier appears in a location path.
++- **Clock is the host clock**: creation and expiry times come from the host's wall clock in UTC. Behaviour under a clock that jumps backwards is not specified.
++- **Second precision is sufficient**: timestamps are specified to the second, so two snippets published within the same second share a creation time. This is acceptable because nothing in the service orders snippets by time.
++- **Concurrency is modest**: the service is expected to handle occasional overlapping requests correctly — a read must never see a half-written snippet — but is not required to sustain high concurrent load. No throughput target is set.
++- **Storage is a local filesystem**: the nominated storage location is an ordinary writable directory on the host, not a network share with unusual semantics. Snippets are the only thing the service puts there, and no other process modifies them while it is running.
++- **Out of scope for this feature**: listing or searching snippets, editing a published snippet, syntax highlighting or any rendering of content, web pages or forms, authentication and user accounts, transport encryption, and snippet size or count limits beyond the per-snippet byte limit.
++
++## Constraints *(imposed by the request)*
++
++These were specified in the feature request and bound the implementation rather than the behaviour; they are recorded here so that planning treats them as fixed.
++
++- Python 3.11 or newer, standard library only — no third-party runtime dependency (consistent with Constitution Principle I).
++- The code lives in a package named `pastebin` under `src/`, runnable as `python -m pastebin` when `src/` is on the module search path.
++- The command form is `python -m pastebin serve --port PORT --data DIR`.
++- The endpoint paths, methods, header name (`X-Delete-Token`), response field names, and status codes are exactly as given in the request and are reproduced in the requirements above.

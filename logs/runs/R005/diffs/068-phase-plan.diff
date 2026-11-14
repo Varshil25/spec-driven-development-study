@@ -1,0 +1,823 @@
+diff --git a/specs/001-tar-archive-cli/contracts/cli-contract.md b/specs/001-tar-archive-cli/contracts/cli-contract.md
+new file mode 100644
+index 0000000..6bcb1f3
+--- /dev/null
++++ b/specs/001-tar-archive-cli/contracts/cli-contract.md
+@@ -0,0 +1,128 @@
++# CLI Contract: `tarx`
++
++**Feature**: `001-tar-archive-cli` | **Date**: 2026-11-05 | **Spec**: [../spec.md](../spec.md)
++
++This is the project's only external interface: a command-line program. The contract below is
++normative — the test suite asserts against these exact strings and statuses, and nothing outside
++this document is part of the public surface.
++
++## Invocation
++
++```text
++python -m tarx list    ARCHIVE
++python -m tarx extract ARCHIVE DEST [--overwrite]
++```
++
++- Requires `src/` on `PYTHONPATH` (the package lives at `src/tarx/`).
++- `prog` is set explicitly to `tarx`, so usage text reads `usage: tarx ...` rather than
++  `usage: __main__.py ...` (research R7).
++- Exactly two subcommands exist; both are required to be spelled in full (FR-001).
++- No environment variables, config files, or stdin input affect behavior.
++
++## Commands
++
++### `list ARCHIVE`
++
++| | |
++|---|---|
++| Positional | `ARCHIVE` — path to a tar or gzip-compressed tar archive (exactly one; FR-002) |
++| Options | none |
++| stdout | one line per member: the member's recorded name followed by `\n` (FR-005) |
++| Order | the archive's recorded order; no sorting, filtering, or de-duplication (FR-006) |
++| Membership | every member, including directories and non-file/non-directory entries (FR-007) |
++| Directory names | no trailing path separator (FR-008) |
++| stderr on success | empty (FR-009) |
++| Exit on success | `0` |
++
++Empty archive → stdout empty, exit `0`.
++
++### `extract ARCHIVE DEST [--overwrite]`
++
++| | |
++|---|---|
++| Positionals | `ARCHIVE`, then `DEST` — exactly two (FR-003) |
++| Options | `--overwrite` — replace existing regular files at colliding paths (FR-021) |
++| stdout | exactly one line: `extracted N files\n` (FR-014) |
++| `N` | decimal count of distinct regular files written; excludes directories and skipped members; the literal word `files` is used for every `N`, including `0` and `1` (FR-015) |
++| stderr on success | empty (FR-014) |
++| Exit on success | `0` |
++
++Write behavior:
++
++- Regular-file members are recreated at `DEST/<member name>` with byte-identical contents (FR-010).
++- Directories needed by a member, and directory members with no files in them, are created (FR-011).
++- `DEST` and any missing parents are created when absent (FR-012).
++- Non-colliding pre-existing entries under `DEST` are left untouched (FR-013).
++- Members that are neither regular files nor directories are skipped without failing (FR-016).
++- Members are written in archive order, so a path stored twice ends with the later entry's contents
++  and is counted once.
++
++## Compression
++
++Both subcommands accept uncompressed and gzip-compressed tar archives and behave identically
++(FR-017). Compression is detected from the archive's **content**, never its name, so `.tar`,
++`.tar.gz`, `.tgz`, and unconventional names all work, including a gzip archive named `.tar`
++(FR-018, research R2).
++
++## Exit statuses
++
++Used consistently and exclusively (FR-028):
++
++| Status | Meaning |
++|---|---|
++| `0` | Success |
++| `2` | Every failure except an overwrite conflict — unusable archive, unusable destination, kind collision, member path escaping the destination, permission error, invocation error |
++| `3` | `extract` without `--overwrite` would have replaced an existing regular file |
++
++Status `3` is reserved for the one condition that re-running with `--overwrite` resolves. When both
++a status-2 condition and a status-3 condition are present, **status 2 is reported** (research R8).
++
++Validation order within `extract`:
++
++1. Archive is readable and parses → else `2`
++2. `DEST` exists and is not a directory → `2`
++3. Any member path escapes the destination → `2`
++4. Any kind collision → `2`
++5. Any overwrite conflict and no `--overwrite` → `3`
++6. Writes begin
++
++Steps 1–5 touch no files, so a failure in any of them leaves the destination exactly as it was
++(FR-020).
++
++## Diagnostics
++
++Every failure writes a short, human-readable, single-line diagnostic to stderr that names the
++offending path or member, and writes nothing to stdout (FR-027). No failure is signalled by exit
++status alone, and no internal traceback ever reaches the user.
++
++Format: `tarx: <message>` on one line.
++
++`tarfile` raises a multi-line `ReadError` that enumerates every compression method it tried
++(research R4); that text is never forwarded. The messages below are the project's own.
++
++| Condition | Message | Status | Requirement |
++|---|---|---|---|
++| Archive path missing | `cannot read archive '<path>': no such file` | 2 | FR-024 |
++| Archive is a directory | `cannot read archive '<path>': is a directory` | 2 | FR-024 |
++| Archive unreadable | `cannot read archive '<path>': permission denied` | 2 | FR-024 |
++| Not a tar archive | `'<path>' is not a valid tar archive` | 2 | FR-024 |
++| `DEST` exists as non-directory | `destination '<path>' exists and is not a directory` | 2 | FR-025 |
++| `DEST` cannot be created/written | `cannot write to destination '<path>': <reason>` | 2 | FR-025 |
++| Member escapes destination | `refusing to extract member '<name>' outside destination` | 2 | FR-026 |
++| File member vs. existing directory | `cannot replace directory '<path>' with file from member '<name>'` | 2 | FR-023 |
++| Directory member vs. existing non-directory | `cannot replace '<path>' with directory from member '<name>'` | 2 | FR-023 |
++| Overwrite conflict, no `--overwrite` | `'<path>' already exists; use --overwrite to replace it` | 3 | FR-019 |
++
++Paths in diagnostics are shown as given on the command line, joined with the member name where a
++member is involved, so the message is actionable without the user re-deriving it.
++
++Invocation errors (no subcommand, unknown subcommand, wrong argument count, unknown option) produce
++`argparse`'s usage guidance on stderr and exit `2`, with no other action taken (FR-004). This is
++`argparse`'s own default behavior and is therefore not restated in the table above.
++
++## Out of contract
++
++Not provided, and asserted nowhere: archive creation, member selection or filtering, compression
++formats beyond detection-by-content, reading archives from stdin or a URL, preservation of
++permissions / ownership / modification times, recursion into nested archives, progress output,
++colors, headers, or totals beyond the specified lines.
+diff --git a/specs/001-tar-archive-cli/data-model.md b/specs/001-tar-archive-cli/data-model.md
+new file mode 100644
+index 0000000..971d4ea
+--- /dev/null
++++ b/specs/001-tar-archive-cli/data-model.md
+@@ -0,0 +1,140 @@
++# Phase 1 Data Model: Tar Archive List & Extract CLI
++
++**Feature**: `001-tar-archive-cli` | **Date**: 2026-11-05 | **Spec**: [spec.md](./spec.md)
++
++This feature has no persistent storage and no schema. The "data model" is the small set of
++in-memory values that flow from the command line, through the archive, to the filesystem. Per
++Principle IV (Simplicity) these are plain data — stdlib types and one tuple-like record — not
++custom classes, except where a behavior requires otherwise.
++
++## Entities
++
++### Archive
++
++The tar container named on the command line, optionally gzip-compressed.
++
++| Aspect | Representation |
++|---|---|
++| Identity | `pathlib.Path` from the `ARCHIVE` argument |
++| Runtime type | `tarfile.TarFile`, opened `mode="r:*"` (see research R2) |
++| Contents | An ordered sequence of members; order is the archive's recorded order |
++| Lifetime | Open for the duration of one subcommand, closed via `with` |
++
++- **No custom wrapper type.** `tarfile.TarFile` already is the archive; wrapping it would be the
++  speculative generality Principle IV prohibits.
++- **Validation** (FR-024, all → exit 2): must exist, must be readable, must not be a directory,
++  must parse as a tar archive. Enforced by catching `FileNotFoundError`, `IsADirectoryError`,
++  `PermissionError`, `OSError`, and `tarfile.ReadError` around the open and around member parsing,
++  then reporting the project's own one-line diagnostic (research R4).
++- **No sorting, filtering, or de-duplication** is applied to the member sequence (FR-006).
++
++### Member
++
++One entry in an archive.
++
++| Field | Source | Used for |
++|---|---|---|
++| `name` | `TarInfo.name` — recorded path, POSIX separators, no trailing `/` on directories (research R3) | `list` output (FR-005/008); extraction target path; diagnostics |
++| kind | `TarInfo.isreg()` / `TarInfo.isdir()` | dispatch between write-file, make-directory, and skip |
++| `size` | `TarInfo.size` | implicit; streaming copy reads to EOF |
++| contents | `TarFile.extractfile(member)` — lazy file-like object | byte-identical file contents (FR-010) |
++
++**Kind taxonomy** — exactly three cases, derived rather than stored:
++
++| Kind | Predicate | `list` | `extract` |
++|---|---|---|---|
++| Regular file | `isreg()` | printed | written, counted |
++| Directory | `isdir()` | printed | created, **not** counted |
++| Other (symlink, hardlink, device, FIFO) | neither | printed (FR-007) | skipped silently, not counted (FR-016) |
++
++- **Member name validation** (FR-026, → exit 2), purely lexical, no filesystem access:
++  - rejected if `posixpath.isabs(name)`;
++  - rejected if the name carries a Windows drive letter or UNC prefix;
++  - rejected if `posixpath.normpath(name)` is `..` or starts with `../`.
++  - Otherwise the normalized name is the member's path relative to the destination.
++- Members of kind *other* are skipped before name validation is relevant to writing, but they are
++  still listed, so `list` never rejects a name.
++
++### Destination
++
++The directory under which members are recreated. `extract` only.
++
++| Aspect | Representation |
++|---|---|
++| Identity | `pathlib.Path` from the `DEST` argument |
++| Pre-state | may not exist; may exist as a directory; may exist as a non-directory |
++
++- **Validation** (FR-025, → exit 2): if the path exists and is not a directory, fail before doing
++  anything else. If it does not exist, it is created with `mkdir(parents=True, exist_ok=True)`
++  (FR-012) — but only once validation has passed, so a failed run leaves no new directories.
++- Pre-existing entries that no member collides with are never touched (FR-013).
++
++### ExtractionPlan (derived, transient)
++
++Not a spec entity, but the design's one intermediate value: the result of reading all members and
++deciding what to do, computed **before any write** so FR-020's "nothing created, modified,
++truncated, or deleted" holds by construction.
++
++```text
++plan        : list of (member, target_path, kind)   # archive order preserved
++skipped     : count of "other"-kind members          # dropped from the plan
++violations  : member names failing containment       # → exit 2
++collisions  : kind mismatches against existing paths # → exit 2
++conflicts   : regular-file targets that already exist as regular files  # → exit 3 unless --overwrite
++```
++
++- Represented as plain lists/tuples built by one function; no class.
++- **Validation order is fixed** (research R8): `violations` → exit 2, then `collisions` → exit 2,
++  then `conflicts` → exit 3. Exit 2 outranks exit 3 so that status 3 always means "re-run with
++  `--overwrite`".
++- `collisions` also covers an **existing non-directory ancestor**: for each planned target, any
++  path between the destination and the target that already exists and is not a directory is a
++  collision, caught here rather than as a mid-write `NotADirectoryError`.
++
++### WrittenSet (derived, transient)
++
++A set of destination paths written during the write pass. `len(written)` is the `N` in
++`extracted N files`.
++
++- Exists because a path stored twice in one archive must contribute **once** to the count while the
++  later entry's contents win (FR-015, Edge Cases "Duplicate member names"; research R9). A plain
++  counter would over-report, so this is the minimum structure that satisfies the requirement.
++
++## State transitions
++
++`extract` is a two-phase pipeline. Phase boundaries are where the exit statuses are decided.
++
++```text
++          ┌──────────────── exit 2 ─────────────┐
++          │                                     │
++  argv ──▶ open archive ──▶ validate dest ──▶ build plan ──▶ writes ──▶ "extracted N files" ──▶ exit 0
++                                                   │
++                                                   ├─ containment violation ──▶ exit 2
++                                                   ├─ kind collision ─────────▶ exit 2
++                                                   └─ overwrite conflict ─────▶ exit 3   (no --overwrite)
++```
++
++- Everything left of `writes` is read-only with respect to the filesystem. Exit 2 and exit 3 from
++  the planning phase therefore leave the destination byte-for-byte as it was (FR-020, SC-003).
++- A failure *during* `writes` (for example `PermissionError` on a target, or a truncated archive)
++  still reports a diagnostic and exits 2 rather than printing a success line (Edge Cases "Partial
++  write interrupted by an error"). Files already written are left in place; the spec does not
++  require rollback.
++
++`list` has a single phase: open, iterate, print, exit 0 — or exit 2 from the open/iterate step.
++
++## Error record
++
++One internal exception type carries every specified failure, so the entry point has exactly one
++place that formats diagnostics and chooses a status.
++
++| Field | Meaning |
++|---|---|
++| message | human-readable, one line, names the offending path or member (FR-027) |
++| code | `2` or `3` (FR-028) |
++
++- `0` is never carried by an error; success returns it directly.
++- A class is used here, rather than a tuple, because Python's `raise` requires an exception type —
++  the one place Principle IV's "prefer a plain data structure" is overridden by the language.
++- Exit statuses are named constants (`EXIT_OK = 0`, `EXIT_ERROR = 2`, `EXIT_CONFLICT = 3`) so that
++  FR-028's "consistently and exclusively" is checkable by reading the three definitions.
+diff --git a/specs/001-tar-archive-cli/plan.md b/specs/001-tar-archive-cli/plan.md
+new file mode 100644
+index 0000000..227b202
+--- /dev/null
++++ b/specs/001-tar-archive-cli/plan.md
+@@ -0,0 +1,183 @@
++# Implementation Plan: Tar Archive List & Extract CLI
++
++**Branch**: `001-tar-archive-cli` | **Date**: 2026-11-05 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/001-tar-archive-cli/spec.md`
++
++## Summary
++
++Deliver a zero-dependency Python CLI, `python -m tarx`, with two subcommands: `list ARCHIVE` prints
++every archive member one per line in archive order, and `extract ARCHIVE DEST [--overwrite]`
++recreates regular files and directories under `DEST` and prints `extracted N files`. Plain and
++gzip-compressed tars are both accepted, detected from content rather than file name. Exit statuses
++are 0 for success, 3 for an overwrite conflict, 2 for every other failure, each accompanied by a
++short one-line diagnostic on stderr.
++
++Technical approach: the whole feature is a thin, carefully-error-handled shell over the stdlib
++`tarfile` module. Two decisions shape it.
++
++1. **Open with `tarfile.open(path, "r:*")`** — content sniffing is what satisfies FR-018 with one
++   stdlib call and no magic-byte code of our own.
++2. **Do not use `TarFile.extractall`; write members directly.** `extractall` overwrites
++   unconditionally, cannot report a count of files written, and applies metadata the spec puts out
++   of scope — so FR-019/020, FR-015/021, and FR-016/026 are all unreachable through it. Writing
++   directories with `mkdir` and files with `copyfileobj` is a dozen lines and keeps every specified
++   behavior under this project's control. It also avoids the version-dependent `tarfile` extraction
++   filters entirely, which keeps the 3.11+ support floor honest.
++
++`extract` runs as two phases: a read-only planning pass that resolves every member to a target path
++and collects containment violations, kind collisions, and overwrite conflicts; then a write pass
++that runs only if planning was clean. That split is what makes "nothing is written when the command
++refuses" (FR-020, SC-003) a structural property rather than a promise.
++
++Phase 0 research resolved all unknowns — see [research.md](./research.md). It also resolved one
++genuine internal ambiguity in the spec (FR-019 vs. FR-023 on exit 2 vs. 3), recorded as decision R8
++and reflected in the contract.
++
++## Technical Context
++
++**Language/Version**: Python 3.11+ (per spec's mandated constraints); developed and verified against
++CPython 3.13.17. No syntax or stdlib API newer than 3.11 is used.
++
++**Primary Dependencies**: None at runtime — standard library only (Constitution Principle I). Uses
++`tarfile`, `argparse`, `pathlib`, `posixpath`, `shutil`, `sys`, `os`.
++
++**Storage**: N/A. Reads one archive file; writes plain files and directories under a
++caller-specified destination. No database, no state carried between invocations.
++
++**Testing**: `pytest` (test-only; verified 9.1.1). Tests under `tests/`, runnable as a bare `pytest`
++from the repository root via `pythonpath = src` in `pytest.ini`.
++
++**Target Platform**: POSIX-like systems with CPython 3.11+ (developed on Linux 6.18). No
++platform-specific APIs; Windows-style absolute member paths are rejected defensively as part of
++containment checking.
++
++**Project Type**: Single-package CLI tool, source under `src/`.
++
++**Performance Goals**: SC-007 — an archive of 10,000 members lists in under 5 s and extracts in
++under 30 s; memory must not grow with the size of the largest member. Met by streaming: `list`
++iterates the `TarFile` rather than materializing `getmembers()`, and extraction copies via
++`shutil.copyfileobj(..., length=64*1024)` instead of reading members whole.
++
++**Constraints**: No third-party runtime imports. No configuration surface — behavior is fully
++determined by the command line. Output is plain, unformatted, pipe-friendly text. File metadata
++(mode, owner, mtime) is explicitly not preserved. No uncaught traceback may ever reach the user.
++
++**Scale/Scope**: Two subcommands, 28 functional requirements, 8 success criteria. Roughly 200 lines
++of runtime code across three files plus a test suite; one archive per invocation, local filesystem
++only.
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++Constitution version 1.0.0.
++
++### Pre-Phase-0 evaluation
++
++| Principle | Gate | Verdict |
++|---|---|---|
++| I. Standard Library Only | Runtime imports resolve only to stdlib or first-party modules; `pytest` is test-only and never imported by runtime code | **PASS** — `tarfile`/`argparse`/`pathlib`/`posixpath`/`shutil` are stdlib; the spec's own mandated constraints agree |
++| II. Fail Loudly | Every invalid input produces a specific diagnostic on stderr naming the offending value, plus a non-zero exit; no swallowed exceptions; no partial result in place of failure | **PASS** — FR-024 … FR-028 already specify exactly this; the design adds a single error type so no path can exit silently |
++| III. Every Requirement Is Testable | Each FR maps to ≥ 1 `pytest` test that fails when unmet, traceable by requirement id; error paths asserted on both diagnostic and status | **PASS** — all 28 FRs are stated as observable input → output/status; SC-006 restates the traceability duty |
++| IV. Simplicity | Smallest design satisfying the spec; no speculative abstraction, config hook, or plugin seam; prefer function over class, module over package | **PASS** — see justifications below |
++
++### Simplicity justifications (Principle IV requires these in writing)
++
++Four structures exist beyond the barest possible script. Each is traced to a forcing requirement:
++
++1. **A package `tarx` rather than a single module.** Forced by the spec's mandated constraint
++   "code lives in a package named `tarx` under `src/`, runnable as `python -m tarx`" — `python -m`
++   on a package requires `__main__.py`. Within the package, logic stays in **one** module
++   (`cli.py`); `__main__.py` is a two-line entry point. No `models/`, `services/`, or `lib/`
++   subpackages.
++2. **One internal exception class.** Forced by FR-027 (every failure names its offending path) plus
++   FR-028 (exclusive status codes). Python's `raise` requires an exception type, so this is the one
++   place the "prefer a plain data structure" preference cannot apply. One class, two fields, caught
++   in one place.
++3. **A planning pass before the write pass.** Forced by FR-020: the conflict must be detected
++   "before any member is written". A single-pass design cannot satisfy it. The pass produces plain
++   lists and tuples, not classes.
++4. **A set of written paths instead of an integer counter.** Forced by FR-015 plus the Edge Cases
++   entry "Duplicate member names", which requires a doubly-stored path to be counted once. A counter
++   would over-report.
++
++Explicitly **not** built, per Principle IV: no `Archive`/`Member` wrapper types over `TarFile` and
++`TarInfo`; no abstraction over the two subcommands; no plugin or filter hook; no configuration file,
++environment variable, or logging framework; no progress reporting; no rollback machinery beyond what
++FR-020 requires.
++
++### Post-Phase-1 re-evaluation
++
++Re-checked against the generated design artifacts ([research.md](./research.md),
++[data-model.md](./data-model.md), [contracts/cli-contract.md](./contracts/cli-contract.md),
++[quickstart.md](./quickstart.md)).
++
++| Principle | Verdict after design | Evidence |
++|---|---|---|
++| I. Standard Library Only | **PASS** | The design names every runtime import; all are stdlib. `pytest.ini` is test configuration and declares no runtime dependency. Research R11's choice to hand-write extraction removes the only place a convenience dependency might have been reached for. |
++| II. Fail Loudly | **PASS** | The contract's diagnostics table enumerates a specific message for all ten specified failure conditions, each naming the offending path or member. Research R4 found that `tarfile.ReadError` is multi-line and unhelpful, so the design replaces its text rather than forwarding it — strengthening this gate. Broad `except OSError` backstops exist, but each converts to a named diagnostic plus exit 2, which is the opposite of swallowing. |
++| III. Every Requirement Is Testable | **PASS** | Every contract row and data-model rule is phrased as an assertable input → output/status pair. The quickstart's acceptance checklist carries SC-006's per-FR traceability obligation forward into the test suite that `/speckit-tasks` will enumerate. |
++| IV. Simplicity | **PASS** | The post-design file count is three runtime files and one test-config file. The four justified structures above are unchanged; Phase 1 added no fifth. Design decisions R2 and R11 were both resolved toward *less* code (accept `r:*`'s format superset rather than restrict it; skip defensive `rstrip("/")` once R3 proved it dead). |
++
++**No violations. Complexity Tracking below is intentionally empty.**
++
++One note for transparency, not a gate failure: Phase 0 found that FR-019 and FR-023 conflict for a
++single input (no `--overwrite`, file member, existing directory at the target). Research R8 resolves
++it in favor of exit 2 and explains why. This is a specification ambiguity resolved in the plan, not a
++constitutional deviation — but it is the one place where the implementation's behavior is decided
++here rather than in the spec, so it is worth a reviewer's attention and may warrant a spec amendment.
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/001-tar-archive-cli/
++├── plan.md                      # This file (/speckit-plan output)
++├── spec.md                      # Feature specification (input)
++├── research.md                  # Phase 0 output
++├── data-model.md                # Phase 1 output
++├── quickstart.md                # Phase 1 output
++├── contracts/
++│   └── cli-contract.md          # Phase 1 output — the CLI surface
++└── tasks.md                     # Phase 2 output (/speckit-tasks — NOT created here)
++```
++
++### Source Code (repository root)
++
++```text
++pytest.ini                       # pythonpath = src, testpaths = tests (research R10)
++
++src/
++└── tarx/
++    ├── __init__.py              # package marker; no logic
++    ├── __main__.py              # entry point: sys.exit(main(sys.argv[1:]))
++    └── cli.py                   # argparse wiring, list, extract, planning, diagnostics
++
++tests/
++├── conftest.py                  # archive-building fixtures (plain, gzip, nested, escaping, empty)
++├── test_invocation.py           # FR-001 … FR-004: subcommands, arity, usage errors
++├── test_list.py                 # FR-005 … FR-009: output, order, membership, exit 0
++├── test_extract.py              # FR-010 … FR-016: contents, dirs, count, skipping
++├── test_compression.py          # FR-017, FR-018: gzip vs plain, content-based detection
++├── test_overwrite.py            # FR-019 … FR-023: conflicts, --overwrite, kind collisions
++├── test_failures.py             # FR-024 … FR-028: diagnostics, containment, exit statuses
++└── test_performance.py          # SC-007: 10k-member archive timing and streaming
++```
++
++**Structure Decision**: Single-package CLI layout. `src/tarx/` holds the package the spec mandates,
++with all logic in the single module `cli.py` and `__main__.py` reduced to an entry point, which is
++the fewest moving parts that still supports `python -m tarx` (Principle IV justification 1). Tests
++are split one file per requirement cluster so that SC-006's requirement-to-test traceability is
++visible from the file tree, with `test_performance.py` separated because it is the only slow test.
++No `models/`, `services/`, or `lib/` directories are created — this feature has no layers to
++separate, and inventing them would be the speculative generality Principle IV prohibits.
++
++## Complexity Tracking
++
++> **Fill ONLY if Constitution Check has violations that must be justified**
++
++No violations. The Constitution Check passes both pre-Phase-0 and post-Phase-1; the four structures
++that exceed a bare script are justified inline under *Simplicity justifications*, each traced to the
++specific requirement that forces it.
+diff --git a/specs/001-tar-archive-cli/quickstart.md b/specs/001-tar-archive-cli/quickstart.md
+new file mode 100644
+index 0000000..53bdea3
+--- /dev/null
++++ b/specs/001-tar-archive-cli/quickstart.md
+@@ -0,0 +1,140 @@
++# Quickstart & Validation: Tar Archive List & Extract CLI
++
++**Feature**: `001-tar-archive-cli` | **Date**: 2026-11-05
++
++How to run the tool and how to prove it works end to end. Interface details live in
++[contracts/cli-contract.md](./contracts/cli-contract.md); entity and validation details live in
++[data-model.md](./data-model.md). This file does not duplicate them and contains no implementation
++code.
++
++## Prerequisites
++
++- Python 3.11 or newer (`python3 --version`). Verified against CPython 3.13.17.
++- `pytest` for the automated suite (`python3 -m pytest --version`). Verified against pytest 9.1.1.
++  `pytest` is test-only; the program itself needs nothing beyond the standard library.
++- No installation or build step. The package is run from the source tree.
++
++## Running the tool
++
++From the repository root, with `src/` on the import path:
++
++```bash
++export PYTHONPATH=src
++
++python -m tarx list    ARCHIVE
++python -m tarx extract ARCHIVE DEST [--overwrite]
++```
++
++## Running the automated suite
++
++The constitution requires a bare invocation from the repository root to work; `pytest.ini` supplies
++`pythonpath = src` so no environment setup is needed (research R10):
++
++```bash
++pytest
++```
++
++Everything must pass before the feature is considered complete. Tests that invoke
++`python -m tarx` as a subprocess set `PYTHONPATH=src` in the child environment themselves, because
++the `pythonpath` ini option applies only to the pytest process.
++
++## Manual end-to-end walkthrough
++
++Run in a scratch directory. This exercises one scenario from each user story.
++
++### Setup — build a fixture archive
++
++```bash
++mkdir -p demo/photos demo/empty-dir
++printf 'alpha' > demo/photos/a.jpg
++printf 'bravo' > demo/photos/b.jpg
++tar -cf photos.tar -C demo photos empty-dir
++gzip -c photos.tar > photos.tar.gz
++```
++
++### Scenario 1 — list (User Story 1)
++
++```bash
++PYTHONPATH=src python -m tarx list photos.tar; echo "exit=$?"
++```
++
++Expected: the archive's members one per line in archive order, directory entries included and
++printed without a trailing `/`, nothing on stderr, `exit=0`.
++
++Repeat with `photos.tar.gz` — identical stdout and status, which demonstrates content-based
++compression detection. Renaming `photos.tar.gz` to `mislabeled.tar` and listing it must also give
++the same result.
++
++### Scenario 2 — extract into a fresh destination (User Story 2)
++
++```bash
++PYTHONPATH=src python -m tarx extract photos.tar out; echo "exit=$?"
++diff -r demo out && echo "contents match"
++```
++
++Expected: `extracted 2 files` on stdout, `exit=0`, `diff -r` reports no differences — so relative
++paths and byte contents are preserved, `out/empty-dir` exists, and the empty directory is not
++counted.
++
++### Scenario 3 — refuse to clobber, then allow it (User Story 3)
++
++```bash
++PYTHONPATH=src python -m tarx extract photos.tar out; echo "exit=$?"
++```
++
++Expected: a diagnostic on stderr naming a conflicting path, nothing on stdout, `exit=3`, and
++`diff -r demo out` still clean — the destination was not touched.
++
++```bash
++printf 'stale' > out/photos/a.jpg
++PYTHONPATH=src python -m tarx extract photos.tar out --overwrite; echo "exit=$?"
++cat out/photos/a.jpg; echo
++```
++
++Expected: `extracted 2 files`, `exit=0`, and `out/photos/a.jpg` reads `alpha` again.
++
++A directory that already exists where the archive stores a directory is not a conflict — the second
++run above proves it, since `out/photos` and `out/empty-dir` already existed.
++
++### Scenario 4 — failures are scriptable (User Story 4)
++
++```bash
++PYTHONPATH=src python -m tarx list missing.tar;            echo "exit=$?"
++head -c 500 /dev/urandom > junk.bin
++PYTHONPATH=src python -m tarx list junk.bin;               echo "exit=$?"
++PYTHONPATH=src python -m tarx list demo;                   echo "exit=$?"
++touch blocker
++PYTHONPATH=src python -m tarx extract photos.tar blocker;  echo "exit=$?"
++PYTHONPATH=src python -m tarx;                             echo "exit=$?"
++PYTHONPATH=src python -m tarx frobnicate photos.tar;       echo "exit=$?"
++```
++
++Expected for each: a short one-line diagnostic on stderr naming the offending path, empty stdout,
++`exit=2`, and no Python traceback anywhere. The last two print usage guidance.
++
++A hand-built archive containing a member named `../escape.txt` or `/etc/escape.txt` must also exit
++`2` with the member named on stderr, and must create nothing outside the destination. This case
++cannot be produced with GNU `tar` conveniently, so it is covered by a programmatically built fixture
++in the suite rather than in this walkthrough.
++
++## Acceptance checklist
++
++Trace back to the success criteria in [spec.md](./spec.md). The feature is done when all hold:
++
++- [ ] `pytest` passes from the repository root with no arguments.
++- [ ] Every functional requirement FR-001 … FR-028 names at least one covering test, traceable by
++      requirement id in the test name or docstring (SC-006, Constitution Principle III).
++- [ ] `list` output matches member names and order exactly for compressed and uncompressed forms
++      (SC-001).
++- [ ] Extraction into an empty destination reproduces every regular file byte-identically with the
++      correct count (SC-002).
++- [ ] Re-extraction without `--overwrite` exits 3 and leaves pre-existing files byte-unchanged,
++      verified by comparing before and after (SC-003).
++- [ ] Re-extraction with `--overwrite` exits 0 and leaves targets byte-identical to the archive
++      (SC-004).
++- [ ] Every specified failure case exits with its assigned status and writes a non-empty diagnostic,
++      with zero tracebacks (SC-005).
++- [ ] An archive of 10,000 members lists in under 5 s and extracts in under 30 s, with memory flat
++      with respect to the largest member (SC-007).
++- [ ] Runtime code imports only the standard library and `tarx` itself (Constitution Principle I) —
++      checkable by grepping the import lines under `src/`.
+diff --git a/specs/001-tar-archive-cli/research.md b/specs/001-tar-archive-cli/research.md
+new file mode 100644
+index 0000000..a8374d3
+--- /dev/null
++++ b/specs/001-tar-archive-cli/research.md
+@@ -0,0 +1,202 @@
++# Phase 0 Research: Tar Archive List & Extract CLI
++
++**Feature**: `001-tar-archive-cli` | **Date**: 2026-11-05 | **Spec**: [spec.md](./spec.md)
++
++All findings below were verified empirically on the development machine (CPython 3.13.17,
++`pytest` 9.1.1) before being recorded. Nothing here is assumed from documentation alone.
++
++## Summary of unknowns resolved
++
++| # | Unknown from Technical Context | Status |
++|---|---|---|
++| R1 | Python version / interpreter available | Resolved |
++| R2 | How to detect gzip vs. plain tar from content, not file name | Resolved |
++| R3 | How `tarfile` reports directory member names (trailing separator) | Resolved |
++| R4 | Which exceptions map to exit status 2, and their message quality | Resolved |
++| R5 | Whether an empty archive is readable | Resolved |
++| R6 | Constant-memory extraction of large members | Resolved |
++| R7 | `argparse` program name under `python -m tarx` | Resolved |
++| R8 | Precedence between exit status 2 and exit status 3 (spec ambiguity) | Resolved |
++| R9 | Counting rule for duplicate member paths | Resolved |
++| R10 | Making a bare `pytest` run from the repository root import `src/tarx` | Resolved |
++| R11 | Whether to use `TarFile.extractall` or write members directly | Resolved |
++
++---
++
++## R1 — Language and version
++
++- **Decision**: Target Python 3.11+ as the specification mandates; develop and verify against the
++  installed CPython **3.13.17**. Use no syntax or stdlib API newer than 3.11.
++- **Rationale**: The spec's "Mandated implementation constraints" assumption fixes 3.11 as the
++  floor. Everything this feature needs (`tarfile`, `argparse`, `pathlib`, `shutil`, `posixpath`)
++  has been stable since well before 3.11, so there is no reason to raise the floor.
++- **Alternatives considered**: Pinning to 3.13 (rejected — narrows the supported range for no
++  gain); using `tarfile`'s extraction *filters* (added 3.12, see R11) — rejected because it would
++  break the 3.11 floor and is not needed.
++
++## R2 — Content-based compression detection
++
++- **Decision**: Open every archive with `tarfile.open(path, mode="r:*")`.
++- **Rationale**: Verified that `r:*` sniffs the stream and reads a gzip-compressed tar whose name
++  is `mis.tar` (output: `['a.txt']`), satisfying FR-018 with a single stdlib call and zero custom
++  magic-byte code. `mode="r"` behaves identically; `r:*` is written explicitly so the intent is
++  readable.
++- **Side effect, accepted deliberately**: `r:*` also accepts bzip2- and xz-compressed tars. The
++  spec requires that tar and gzip work and lists other compression formats as out of scope; it does
++  not require other formats to be *rejected*, and a bzip2-compressed tar is still a valid tar
++  archive, so FR-024 is not contradicted. Accepting the superset is strictly less code than
++  restricting it, which is what Principle IV (Simplicity) asks for.
++- **Alternatives considered**: Sniffing the gzip magic bytes (`\x1f\x8b`) and choosing `r:gz` or
++  `r:` by hand — rejected: more code, more failure modes, no requirement behind it.
++
++## R3 — Directory member names
++
++- **Decision**: Print `TarInfo.name` verbatim; add no trailing-separator handling.
++- **Rationale**: FR-008 requires directory names without a trailing separator. Verified against an
++  archive produced by system GNU `tar` (which stores directories as `real/`): `tarfile` reports
++  `'real'` and `'real/sub'` — it strips the trailing slash while parsing the header. Archives
++  written by `tarfile` itself also report no trailing slash. So FR-008 holds with no extra code.
++- **Alternatives considered**: Defensively `rstrip("/")` — rejected as dead code; a test asserting
++  the GNU-`tar` case covers the requirement instead.
++
++## R4 — Failure exceptions and diagnostics
++
++Verified mapping from input to raised exception when calling `tarfile.open(..., "r:*")`:
++
++| Input | Exception | Exit status (FR-024/028) |
++|---|---|---|
++| Path does not exist | `FileNotFoundError` | 2 |
++| Path is a directory | `IsADirectoryError` | 2 |
++| Path unreadable | `PermissionError` | 2 |
++| File of random bytes | `tarfile.ReadError` | 2 |
++| Zero-byte file | `tarfile.ReadError` | 2 |
++
++- **Decision**: Catch these and re-raise as one internal error type carrying a message and an exit
++  status; the entry point prints `tarx: <message>` on one line to stderr and returns the status.
++  Never let the raw exception text reach the user.
++- **Rationale**: `ReadError` from `r:*` is **multi-line** — the observed text was:
++
++  ```
++  file could not be opened successfully:
++  - method gz: ReadError('not a gzip file')
++  - method bz2: ReadError('not a bzip2 file')
++  - method xz: ReadError('not an lzma file')
++  - method tar: ReadError('invalid header')
++  ```
++
++  FR-027 demands a short one-line diagnostic naming the offending path, so this text must be
++  replaced, not forwarded. This finding is the direct reason the design owns its own message
++  catalogue (see [contracts/cli-contract.md](./contracts/cli-contract.md)).
++- **Alternatives considered**: Letting exceptions propagate (violates FR-027 and Principle II's
++  "no uncaught internal error trace"); printing `str(exc)` (violates the one-line requirement).
++
++## R5 — Empty archives
++
++- **Decision**: Treat an archive with zero members as an ordinary success path; no special case.
++- **Rationale**: Verified that a valid tar holding only end-of-archive blocks (10240 bytes, as
++  written by `tarfile.open(..., "w")` with nothing added) opens cleanly and reports
++  `getmembers() == []`. So `list` prints nothing and `extract` prints `extracted 0 files`, both
++  exit 0, with no branch needed. Distinctly, a **zero-byte** file is *not* a valid archive and
++  raises `ReadError` → exit 2. These two cases are easy to conflate and get separate tests.
++
++## R6 — Constant-memory extraction
++
++- **Decision**: Copy each regular member with `shutil.copyfileobj(src, dst, length=64 * 1024)`
++  where `src = tar.extractfile(member)`.
++- **Rationale**: SC-007 requires memory that does not grow with the size of the largest member.
++  `copyfileobj` with an explicit buffer length streams in fixed-size chunks; `extractfile` returns
++  a lazy file-like object over the archive stream. `member.read()` / `extractfile(...).read()`
++  would buffer a whole member in RAM and fail SC-007.
++- For `list`, iterate the `TarFile` object directly (`for member in tar:`) rather than calling
++  `getmembers()`, so member metadata is consumed as it is parsed. For `extract`, `getmembers()` is
++  used because the design needs two passes (validate, then write); 10,000 `TarInfo` headers is a
++  few megabytes of metadata, independent of member *contents*, so SC-007 still holds.
++
++## R7 — `argparse` program name under `python -m`
++
++- **Decision**: Construct the parser with an explicit `prog="tarx"`.
++- **Rationale**: Verified that running a package as `python -m probepkg` sets
++  `sys.argv[0]` to `.../probepkg/__main__.py`, so `argparse` derives `prog == "__main__.py"`.
++  Usage text reading `usage: __main__.py ...` would undercut SC-008 (self-explanatory output).
++  Setting `prog` explicitly is a one-argument fix.
++- **Alternatives considered**: Rewriting `sys.argv[0]` (obscure side effect); accepting the default
++  (fails SC-008).
++
++## R8 — Exit-status precedence (spec ambiguity resolved)
++
++The specification is internally ambiguous for one case: **no `--overwrite`, a regular-file member,
++and a directory already at that destination path.**
++
++- FR-019 says any file member whose target path holds "a file or directory" → exit **3**.
++- FR-023 and the Edge Cases entry "Existing directory where the archive stores a regular file" say
++  that collision fails with exit **2**, "even when `--overwrite` is given".
++
++- **Decision**: **Exit 2 wins.** Kind collisions (file member vs. existing directory, directory
++  member vs. existing non-directory) are exit 2 regardless of `--overwrite`. Exit 3 is reserved for
++  the case `--overwrite` would actually have fixed: a regular-file member whose target is an
++  existing regular file.
++- **Rationale**: FR-023 and the Edge Cases list are the more specific statements and are explicit
++  about being flag-independent. It also gives the flag a coherent meaning: exit 3 means "re-run with
++  `--overwrite`", and it would be misleading to return 3 for a conflict that `--overwrite` cannot
++  resolve. Validation therefore runs in a fixed order: (a) member-path containment → 2,
++  (b) kind collisions → 2, (c) overwrite conflicts → 3.
++- **Follow-on decision**: Archive errors are reported before destination errors, so an invalid
++  archive plus an unusable destination reports the archive. Both are exit 2, so no observable status
++  depends on this; it is fixed only so the diagnostic is deterministic.
++
++## R9 — Duplicate member paths
++
++- **Decision**: Count **distinct destination paths written**, not members processed. Track written
++  targets in a set and report `len(written)`.
++- **Rationale**: The Edge Cases entry "Duplicate member names" requires that a path stored twice
++  contributes **once** to the count while the later entry's contents win. Writing in archive order
++  gives "later entry wins" for free; the set gives the count. A naive `count += 1` per regular
++  member would over-report.
++- Overwrite conflicts are evaluated against the destination's **pre-existing** state only. Because
++  all validation happens before any write (FR-020), a path written earlier in the same run can never
++  be mistaken for a pre-existing conflict — the ordering requirement is satisfied structurally
++  rather than by a special case.
++
++## R10 — Bare `pytest` from the repository root
++
++- **Decision**: Add a minimal `pytest.ini` at the repository root with `pythonpath = src` and
++  `testpaths = tests`.
++- **Rationale**: The constitution's Technology Constraints require tests to live under `tests/` and
++  be "runnable with a bare `pytest` invocation from the repository root", while the spec requires the
++  package to live under `src/`. pytest's `pythonpath` ini option (pytest ≥ 7; installed version is
++  9.1.1) inserts `src` on `sys.path` for the test session, which bridges the two with three lines of
++  configuration and no runtime dependency declaration.
++- **Alternatives considered**: `pyproject.toml` with `[tool.pytest.ini_options]` — equivalent, but
++  pulls in a packaging file this feature does not otherwise need; a `conftest.py` that mutates
++  `sys.path` — more code and more magic for the same effect; requiring `PYTHONPATH=src pytest` —
++  violates the "bare `pytest`" constraint.
++- Tests that exercise `python -m tarx` as a subprocess must pass `PYTHONPATH=src` in the child
++  environment explicitly, since `pythonpath` only affects the pytest process.
++
++## R11 — Direct writes instead of `TarFile.extractall`
++
++- **Decision**: Do **not** use `TarFile.extract` / `extractall`. Create directories with
++  `Path.mkdir(parents=True, exist_ok=True)` and write regular files with an explicit `open(..., "wb")`
++  plus `copyfileobj`.
++- **Rationale**: Three requirements are unreachable through `extractall`:
++  1. FR-019/FR-020 — refusing to overwrite, with *nothing written* before the refusal. `extractall`
++     overwrites unconditionally.
++  2. FR-015/FR-021 — an exact count of regular files written, with duplicates counted once.
++  3. FR-016/FR-026 — skipping non-file/non-directory members and rejecting escaping paths with the
++     project's own diagnostics and exit statuses.
++
++  `extractall` would also apply file metadata (modes, mtimes), which the spec explicitly leaves out
++  of scope. Writing the two member types directly is roughly a dozen lines and keeps every specified
++  behavior in code this project controls.
++- **Secondary benefit**: it sidesteps the `tarfile` extraction-filter transition entirely. The
++  `filter=` parameter arrived in 3.12 and the default changes across versions; a design that never
++  calls `extract*` has no version-dependent behavior and no `DeprecationWarning` to manage, which
++  keeps the 3.11+ support range honest.
++- **Path containment approach**: reject a member when `posixpath.isabs(name)`, when the name has a
++  Windows drive or UNC prefix, or when `posixpath.normpath(name)` equals `..` or begins with `../`.
++  This is a purely lexical check on the recorded name — it needs no filesystem access, cannot be
++  defeated by symlinks already present in the destination, and is evaluated before anything is
++  written, as FR-026 requires.
++- **Alternatives considered**: `os.path.realpath` containment checks against the resolved
++  destination — rejected: it touches the filesystem, its result depends on symlinks inside the
++  destination, and it cannot run before the destination exists.

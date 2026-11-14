@@ -14,8 +14,8 @@ study plan and the weekly reports.
 | 4 | II · Pilot | Milestone 2: pilot repository, logging protocol, pilot report | [week-04](week-04/) | `week-04` |
 | 5 | II · Design | Five study projects, hidden tests, prompts, answer sheets, pre-registration draft | [week-05](week-05/) | — |
 | 6 | II · Design | Practice comparison (vibe coding vs. spec-driven), Weeks 5–9 report, draft paper | [week-06](week-06/) | `week-06` |
-| 7 | II · Freeze | Java extension; secure-spec approach; existing-project change requests; run tool; freeze | [week-07](week-07/) | `week-07` after the freeze |
-| 8 | II · Data | Study rounds 1 and 2 | [week-08](week-08/) | at the end of the week |
+| 7 | II · Freeze | Java extension; secure-spec approach; existing-project change requests; run tool; freeze (4 Nov, PR #6) | [week-07](week-07/) | `week-07` after the freeze |
+| 8 | II · Data | Study rounds 1 and 2 (round 1 done; round 2 in progress) | [week-08](week-08/) | at the end of the week |
 | 9 | II · Data | Study round 3; Part IV starts | [week-09](week-09/) | at the end of the week |
 | 10 | II · Data | Study round 4; all runs done | [week-10](week-10/) | at the end of the week |
 

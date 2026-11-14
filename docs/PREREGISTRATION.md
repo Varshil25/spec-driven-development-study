@@ -435,6 +435,9 @@ Otherwise the result is **"no consistent difference"**. Minimum differences: pas
 
 | Date | Run | Deviation | Reason | Effect on analysis |
 | --- | --- | --- | --- | --- |
+| 2026-11-05 | R004 | The operator's cloud workspace restarted during `implement`, killing `run_build.py`. The same agent session was resumed with the fixed resume message (section 6.1), using a new `run_build.py --resume-session` option that does only that. | Pre-registered handling of an interrupted session; the run stays in. The interrupted call's usage is in the transcripts (`sddlog` tokens) but missing from Claude Code's cost figure. | The 2.8-minute gap is inside active time; reported with the run. |
+| 2026-11-05 to 11-09 | R006 | The `plan` session stopped at the account's usage limit (5 Nov), and the operator's workspace then stopped the run tool twice before it could continue. The same session was resumed on 9 Nov with the fixed message. From then on, run pieces are started as tracked background jobs so they survive between operator turns. | Operator-side outage; pre-registered resume handling. | R006's `plan` and total active time include about four days of idle time and are not used; its active time is recomputed from the session transcript's message timestamps and reported as such. Tokens, turns and outcomes are unaffected. |
+| 2026-11-09 | R006 | In `plan`, the agent listed three decisions "you should confirm before implementation". This was classified as a question; the one covered point got entry I1. The run tool cannot mix an entry with fallbacks in one reply, so the two uncovered points got no reply. | Tool limitation. | Logged in the run's notes; the author reviews the classification. |
 | | | | | |
 
 ## 13. Java/Quarkus extension (added in Week 7, before freezing)
