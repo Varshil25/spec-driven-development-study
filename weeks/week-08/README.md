@@ -18,7 +18,7 @@ Each build is run with [run_build.py](../../tools/study/run_build.py) in a fresh
 | --- | --- | --- | --- | --- |
 | R009 | T-ACCOUNTS-01 | sdd_clarify | R009C | build done 11-10; change request done 11-11 |
 | R010 | T-TARX-01 | sdd_secure | R010C | build done 11-12; change request done 11-12 |
-| R011 | T-REDACT-01 | sdd_clarify | R011C | build done 11-13; change request in progress |
+| R011 | T-REDACT-01 | sdd_clarify | R011C | build done 11-13; change request excluded (operator error), being redone as R019C |
 | R012 | T-PASTE-01 | unstructured | R012C | to do |
 | R013 | T-BOOKMARKS-01 | sdd | R013C | to do |
 

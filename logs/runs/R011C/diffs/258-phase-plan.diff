@@ -1,0 +1,1700 @@
+diff --git a/specs/001-redact-log-pii/contracts/cli-contract.md b/specs/001-redact-log-pii/contracts/cli-contract.md
+index 18c812f..9d3dbec 100644
+--- a/specs/001-redact-log-pii/contracts/cli-contract.md
++++ b/specs/001-redact-log-pii/contracts/cli-contract.md
+@@ -6,6 +6,15 @@ The CLI is the only interface this feature exposes. This document is the authori
+ description of its surface; the redaction rules it applies are in
+ [`redaction-rules.md`](./redaction-rules.md).
+ 
++> **Superseded as of feature `002-redact-phones-out-dir`.** That feature amends two items this
++> document declares stable: the `--count` summary gains a fourth key, `phones`, and a new
++> `--out-dir DIR` option adds a second output destination. The current authoritative contract is
++> [`../../002-redact-phones-out-dir/contracts/cli-contract.md`](../../002-redact-phones-out-dir/contracts/cli-contract.md);
++> the redaction-rule amendments (the `[PHONE]` rule and the narrowing of the card rule) are in
++> [`../../002-redact-phones-out-dir/contracts/redaction-rules.md`](../../002-redact-phones-out-dir/contracts/redaction-rules.md).
++> Everything below still holds except those amendments, and is retained as the record of what
++> feature 001 delivered.
++
+ ---
+ 
+ ## Invocation
+diff --git a/specs/002-redact-phones-out-dir/contracts/cli-contract.md b/specs/002-redact-phones-out-dir/contracts/cli-contract.md
+new file mode 100644
+index 0000000..ec2beee
+--- /dev/null
++++ b/specs/002-redact-phones-out-dir/contracts/cli-contract.md
+@@ -0,0 +1,256 @@
++# Contract: `logredact` command-line interface (v2)
++
++**Feature**: `002-redact-phones-out-dir` | **Date**: 2026-11-14
++
++This document **supersedes**
++[`../../001-redact-log-pii/contracts/cli-contract.md`](../../001-redact-log-pii/contracts/cli-contract.md)
++as the authoritative description of the CLI. Two things changed, both requested by the user and
++both deliberate amendments to what that document declared stable:
++
++1. The `--count` summary gains a fourth key, `phones` (FR-037).
++2. A new option, `--out-dir DIR`, adds a second output destination (FR-040).
++
++Everything else it said still holds. The redaction rules are in
++[`redaction-rules.md`](./redaction-rules.md).
++
++---
++
++## Invocation
++
++```text
++python -m logredact [--count] [--out-dir DIR] [FILE ...]
++```
++
++Requires Python 3.11+ with `src/` on `PYTHONPATH`. No installation step, no third-party package.
++
++### Arguments
++
++| Argument | Cardinality | Meaning |
++|----------|-------------|---------|
++| `--count` | 0 or 1 | Print a redaction summary to stderr after all output. |
++| `--out-dir DIR` | 0 or 1 | Write each FILE's redacted lines to `DIR/<FILE's name>` instead of to stdout. Requires at least one FILE. |
++| `FILE` | 0 or more | Input file to read, in the order given. |
++
++`--count`, `--out-dir`, and FILE arguments may be interleaved in any order: `--out-dir d --count a.log b.log`,
++`a.log --out-dir d b.log --count`, and `a.log b.log --count --out-dir d` are equivalent (FR-001, FR-040).
++
++`-h` / `--help` prints usage to stdout and exits 0 (argparse default; not a redaction run).
++
++### Input selection
++
++| Command line | Input read |
++|--------------|------------|
++| no FILE, no `--out-dir` | standard input (FR-002) |
++| one or more FILE | each FILE in order; **standard input is not read** (FR-003) |
++| the same FILE twice | that file is read twice, producing its output twice |
++| no FILE, with `--out-dir` | **nothing** — invalid usage, exit 2 (FR-051) |
++
++### Output destination
++
++Exactly one destination is in effect for a run, chosen before any input is opened.
++
++| Command line | Redacted output goes to | stdout also carries |
++|--------------|------------------------|---------------------|
++| no `--out-dir` | standard output, one combined stream (unchanged) | nothing else |
++| `--out-dir DIR` | `DIR/<final path component of each FILE>`, one file per FILE | exactly one line, `wrote N files` |
++
++---
++
++## Streams
++
++| Stream | Content |
++|--------|---------|
++| stdin | Log text, read only when no FILE is given and `--out-dir` was not given. |
++| stdout | **Without `--out-dir`**: every input line, in input order, exactly once, with matches replaced. Nothing else — no banners, no progress. **With `--out-dir`**: the single line `wrote N files`, and nothing else (FR-047). |
++| stderr | The `--count` summary, or a diagnostic. Nothing on a successful run without `--count` (FR-023). |
++
++**Encoding**: UTF-8 in and out, with undecodable input bytes round-tripped byte-for-byte.
++Behaviour does not vary with `LANG`, `LC_ALL`, or `PYTHONIOENCODING` (FR-005a, FR-005b).
++
++**Line fidelity**: line terminators are preserved exactly, including CRLF and a missing final
++newline. Text outside a match is emitted byte-for-byte (FR-004, FR-005).
++
++**Output files carry exactly this same contract** (FR-044): the bytes in `DIR/app.log` are
++byte-identical to the bytes `python -m logredact app.log` writes to standard output.
++
++**Ordering**: stdout is flushed before anything is written to stderr, so the `--count` summary
++always follows the complete output — and, under `--out-dir`, the confirmation line — even when both
++streams are redirected to the same file (FR-021, FR-052).
++
++---
++
++## The `--count` summary
++
++Exact form, one line, to **stderr**:
++
++```text
++emails=N ips=N cards=N phones=N
++```
++
++- Always all **four** keys, always in this order, single-space separated, `0` when none
++  (FR-037, FR-038). *This replaces the three-key form of v1.*
++- One summary per run, covering all sources together, written once after all output (FR-021).
++- Each `N` equals the number of replacements of that type actually made — equivalently, the
++  number of placeholders of that type present in the output (SC-010).
++- Identical in both destinations: counts cover all FILE arguments together (FR-052).
++- **Suppressed** when a read fails (FR-026, FR-048), when DIR cannot be created (FR-049), when an
++  output file cannot be written (FR-050), on invalid usage (FR-029, FR-051), and when the output
++  consumer closes early (FR-028). In short: a summary appears only on a run that exits 0 (FR-039).
++
++---
++
++## The `wrote N files` confirmation
++
++Exact form, one line, to **stdout**, only on a fully successful `--out-dir` run:
++
++```text
++wrote N files
++```
++
++- N is the number of output files written — **one per FILE argument processed** (FR-046). When two
++  FILE arguments share a name, two writes happen but one file remains, and N counts two.
++- Printed as given, including `wrote 1 files` for a single file. Never pluralised.
++- Written after every FILE has been processed, and it is the **only** thing an `--out-dir` run
++  writes to standard output (FR-047).
++- Never printed without `--out-dir`, and never printed on a run that failed (FR-047).
++- Precedes the `--count` summary on stderr (FR-052).
++
++---
++
++## Exit status
++
++The tool exits with **0 or 2 and no other value** (FR-053, SC-014).
++
++| Status | Condition |
++|--------|-----------|
++| `0` | Every input was read to the end and, under `--out-dir`, every output file was written (FR-024, FR-046); or the output consumer closed early (FR-028). |
++| `2` | A named FILE could not be opened or read (FR-025, FR-048); DIR could not be created (FR-049); an output file could not be opened, written, or closed (FR-050); or the command line was invalid, including `--out-dir` with no FILE (FR-029, FR-051). |
++
++---
++
++## Failure behaviour
++
++All diagnostics take the inherited form `python -m logredact: <path>: <reason>`, name the path
++**exactly as it would be written** — a FILE as typed on the command line, an output path as
++`DIR/name` — and never print a stack trace.
++
++### Unreadable FILE (FR-025, FR-026, FR-027, FR-048)
++
++Covers every reason the input cannot be read as text: it does not exist, permission is denied,
++it is a directory, or reading fails partway through.
++
++- stderr receives a diagnostic naming the FILE as written on the command line and what went wrong.
++- Processing **stops**; later FILE arguments are not opened.
++- Neither the `--count` summary nor `wrote N files` is printed, so an incomplete run is never
++  presented as a complete one.
++- Without `--out-dir`: output already written for earlier files remains on stdout, valid and
++  complete up to the point of failure.
++- With `--out-dir`: output files already completed for earlier FILE arguments **remain valid and
++  complete**, and the output file opened for the failing FILE, if any, is removed (see below).
++- Exit status `2`.
++
++### DIR cannot be created (FR-049)
++
++For example its parent is a regular file, or is not writable.
++
++- stderr receives a diagnostic naming DIR and what went wrong.
++- **No input is read** — DIR is created before the first FILE is opened (FR-045).
++- stdout is empty; no summary.
++- Exit status `2`.
++
++### Output file cannot be opened, written, or closed (FR-050)
++
++For example the output name already exists as a directory, or the disk is full.
++
++- stderr receives a diagnostic naming the **output path** and what went wrong.
++- Processing stops; later FILE arguments are not opened.
++- stdout is empty; no `wrote N files`, no summary.
++- Exit status `2`.
++
++### The partial-output guarantee (FR-050a)
++
++When a run fails after an output file has been opened but before it has been completely written —
++whether the failure was reading the input or writing the output — that file is **deleted** before
++the tool exits.
++
++- After any failed `--out-dir` run, every file remaining in DIR that this run wrote is a complete
++  redaction of its input. DIR never holds a truncated file under a legitimate name (SC-013a).
++- A file of that name that existed in DIR **before** the run is gone with it. Its previous contents
++  are not restored — opening the output replaced them.
++- A FILE that could not be opened at all never had an output file created, so a pre-existing file
++  of its output name is left untouched.
++- If the deletion itself fails, that is reported on stderr as an **additional** diagnostic and the
++  exit status is still `2`. The tool does not retry and does not fall silent.
++
++### Invalid command line (FR-029, FR-051)
++
++```text
++usage: python -m logredact [-h] [--count] [--out-dir DIR] [files ...]
++python -m logredact: error: unrecognized arguments: --redact-all
++```
++
++- stderr receives a usage message naming the offending argument, or — for `--out-dir` with no FILE
++  — stating that `--out-dir` requires at least one FILE.
++- No input is read, **stdout is empty**, no summary, and **DIR is not created**.
++- The unknown argument is never silently ignored nor reinterpreted as a filename; `--out-dir` is
++  never silently ignored.
++- Exit status `2`.
++
++### Output consumer closes early (FR-028)
++
++When stdout is closed before the tool finishes writing (e.g. `| head -5`):
++
++- Processing stops immediately.
++- **Nothing** is written to stderr: no diagnostic, no `BrokenPipeError` trace, no summary.
++- Exit status `0`.
++- Under `--out-dir` the only thing written to stdout is the confirmation line, so this path is
++  reached only at the very end, after every output file is complete.
++
++---
++
++## Caveat: DIR containing an input FILE
++
++Pointing `--out-dir` at a directory that holds one of the FILE arguments **replaces that input
++file**, because an input file sitting in DIR is exactly the "existing file of that name" FR-043
++says to replace. The tool does no same-path detection. The resulting contents of such a file are
++not part of this contract.
++
++---
++
++## Worked examples
++
++Each is directly executable; see [`../quickstart.md`](../quickstart.md). All were verified against
++the Phase 0 prototype.
++
++| # | Command | stdout | stderr | Status |
++|---|---------|--------|--------|--------|
++| 1 | `echo 'call +14155552671 now' \| python -m logredact` | `call [PHONE] now` | *(empty)* | 0 |
++| 2 | `echo 'a@b.io +442071838750' \| python -m logredact --count` | `[EMAIL] [PHONE]` | `emails=1 ips=0 cards=0 phones=1` | 0 |
++| 3 | `echo '+1234567' \| python -m logredact` | `+1234567` | *(empty)* | 0 |
++| 4 | `echo '+1234567890123456' \| python -m logredact` | `+1234567890123456` | *(empty)* | 0 |
++| 5 | `echo '+4111111111111111' \| python -m logredact --count` | `+4111111111111111` | `emails=0 ips=0 cards=0 phones=0` | 0 |
++| 6 | `echo '+12345678@example.com' \| python -m logredact --count` | `[EMAIL]` | `emails=1 ips=0 cards=0 phones=0` | 0 |
++| 7 | `echo 'build v2+12345678 ok' \| python -m logredact` | `build v2[PHONE] ok` | *(empty)* | 0 |
++| 8 | `python -m logredact --out-dir clean app.log web.log` | `wrote 2 files` | *(empty)* | 0 |
++| 9 | `python -m logredact --out-dir clean var/logs/app.log` | `wrote 1 files` (written to `clean/app.log`) | *(empty)* | 0 |
++| 10 | `python -m logredact --out-dir clean --count app.log` | `wrote 1 files` | `emails=… phones=…` | 0 |
++| 11 | `python -m logredact --out-dir clean good.log missing.log later.log` | *(empty)* — `clean/good.log` complete, `later.log` never opened | names `missing.log` | 2 |
++| 12 | `python -m logredact --out-dir blocker/sub a.log` (`blocker` is a file) | *(empty)* — nothing read | names `blocker/sub` | 2 |
++| 13 | `python -m logredact --out-dir clean a.log` (`clean/a.log` is a directory) | *(empty)* | names `clean/a.log` | 2 |
++| 14 | `python -m logredact --out-dir clean` | *(empty)* — `clean/` not created | usage: `--out-dir` requires at least one FILE | 2 |
++| 15 | `python -m logredact --redact-all` | *(empty)* | usage naming `--redact-all` | 2 |
++
++---
++
++## Stability
++
++The following are part of the contract and may not change without a spec amendment: the four
++placeholder strings, the summary format and its **four** key names, the `wrote N files` form, the
++`{0, 2}` exit-status set, the stream assignment of output vs. confirmation vs. diagnostics, the
++UTF-8 round-trip guarantee, and the partial-output guarantee.
++
++## Internal API (not a public contract)
++
++`src/logredact/` exposes nothing to third parties; only `python -m logredact` is public. The module
++split described in `plan.md` exists for testability (Principle III) and may be reorganised freely
++as long as this contract holds.
+diff --git a/specs/002-redact-phones-out-dir/contracts/redaction-rules.md b/specs/002-redact-phones-out-dir/contracts/redaction-rules.md
+new file mode 100644
+index 0000000..f4a7066
+--- /dev/null
++++ b/specs/002-redact-phones-out-dir/contracts/redaction-rules.md
+@@ -0,0 +1,137 @@
++# Contract: redaction rules (amendment)
++
++**Feature**: `002-redact-phones-out-dir` | **Date**: 2026-11-14
++
++This amends
++[`../../001-redact-log-pii/contracts/redaction-rules.md`](../../001-redact-log-pii/contracts/redaction-rules.md).
++Two changes, and nothing else:
++
++1. A fourth recognition rule, **phone number** → `[PHONE]` (FR-030 … FR-036).
++2. A **narrowing** of the payment-card rule: a digit run immediately preceded by `+` is never a
++   card candidate (FR-032a).
++
++The email and IPv4 rules are untouched. Every example below was verified against the Phase 0
++prototype (research.md R-010, R-011, R-012).
++
++---
++
++## The scanning algorithm — unchanged in shape
++
++One compiled alternation, scanned once per line, left to right, by `re.sub` with a callback:
++
++```text
++(?P<email>…)|(?P<ip>…)|(?P<card>…)|(?P<phone>\+[0-9]{8,15}(?![0-9]))
++```
++
++- **Leftmost wins** (FR-018). A candidate that starts earlier beats one that starts later, however
++  long the later one is.
++- **Branch order breaks a tie** at the same start offset (FR-036):
++  `email → ip → card → phone`. Phone is last; appending it leaves the inherited three-way order
++  untouched.
++- **No re-scanning** (FR-035, FR-020). Scanning resumes after a replaced span, so the digits inside
++  a `[PHONE]` are never re-examined by the card or IPv4 rule and cannot be counted twice. A
++  *rejected* candidate also consumes its span: it is returned whole and unchanged, and the scan
++  resumes after it.
++- A candidate that fails validation increments no counter. Only a replacement counts.
++
++In practice only `email` and `phone` can begin at the same offset, because `+` is in the email
++local-part class while `ip` and `card` candidates begin with a digit.
++
++---
++
++## Rule: phone number — new
++
++| Property | Value |
++|----------|-------|
++| Pattern | `\+[0-9]{8,15}(?![0-9])` |
++| Placeholder | `[PHONE]` |
++| Counter | `phones` |
++| Precedence | 4th (last) |
++| Validation after the match | none — the pattern alone decides |
++
++### What the pattern's three parts mean
++
++| Part | Requirement it carries |
++|------|------------------------|
++| `\+` | The `+` is **part of the match** and is replaced with the digits, so `+14155552671` becomes `[PHONE]` with no leading `+` left behind (FR-031). |
++| `[0-9]{8,15}` | 8 to 15 **ASCII** digits, no separators of any kind. Other scripts' decimal digits do not count (FR-031, FR-033). |
++| `(?![0-9])` | A run followed by another ASCII digit is rejected **whole** — never truncated to its first 15 digits, never partially redacted (FR-032). |
++| *(no lookbehind)* | There is no left-hand guard. Whatever precedes the `+` — a letter, a digit, punctuation, another `+`, or the start of the line — the candidate matches (FR-031a). This differs deliberately from the adjacency guards on the IPv4 and card rules. |
++| *(nothing after)* | Punctuation or any other non-digit immediately after the digits is not consumed (FR-034). |
++
++### Recognition table
++
++| Input | Output | Why |
++|-------|--------|-----|
++| `+14155552671` | `[PHONE]` | 11 digits |
++| `+12345678` | `[PHONE]` | 8 digits — the minimum |
++| `+455673758689985` | `[PHONE]` | 15 digits — the maximum |
++| `+1234567` | *unchanged* | 7 digits — below the minimum (FR-033) |
++| `+1234567890123456` | *unchanged* | 16 digits — rejected whole, not truncated (FR-032) |
++| `+14155552671.` | `[PHONE].` | the full stop is not consumed (FR-034) |
++| `(+14155552671)` | `([PHONE])` | brackets preserved |
++| `v2+12345678` | `v2[PHONE]` | no left-hand guard (FR-031a) |
++| `x=99+12345678` | `x=99[PHONE]` | likewise — accepted over-redaction |
++| `+12345678` at line start | `[PHONE]` | likewise |
++| `++12345678` | `+[PHONE]` | the second `+` starts the candidate |
++| `+14155552671+442071838750` | `[PHONE][PHONE]` | the first match ends at the `+` that starts the second |
++| `+` alone, `+abc` | *unchanged* | no digits follow (FR-033) |
++| `+1 415 555 2671` | *unchanged* | separators are not international format; see the card note below |
++| `14155552671` | *unchanged* | no `+`; falls to the card rule, which rejects it as too short |
++| `+١٤١٥٥٥٥٢٦٧١` | *unchanged* | non-ASCII digits never count (FR-031) |
++| `+1415555٢٦٧١` | *unchanged* | only 7 ASCII digits; and because the run is cut short by a non-ASCII character rather than a digit, FR-032's rejection does not fire either |
++| `[PHONE]` already in the input | *unchanged, uncounted* | nothing matches it (FR-020) |
++
++### Interaction with the other rules
++
++| Input | Output | Why |
++|-------|--------|-----|
++| `+12345678@example.com` | `[EMAIL]` | email and phone both start at the `+`; email wins the tie and is what is counted (FR-036) |
++| `jane+orders@example.com` | `[EMAIL]` | the email candidate starts earlier; the `+` is not followed by 8 digits anyway |
++| `a@b.io +442071838750` | `[EMAIL] [PHONE]` | two separate candidates |
++| `+14155552671 10.0.0.7` | `[PHONE] [IP]` | two separate candidates |
++| `+` then 13–15 Luhn-valid digits | `[PHONE]`, counted once as a phone | the phone candidate starts one character earlier than the card candidate, so leftmost-wins settles it; the digits are never re-examined (FR-035) |
++| `+` then 16–19 Luhn-valid digits | *unchanged* | too long for a phone (FR-032) **and** not a card (FR-032a) |
++
++---
++
++## Rule: payment card — narrowed
++
++The pattern, the 13–19-digit bound, and the Luhn check are all unchanged. One condition is added:
++
++> A card candidate whose first character is immediately preceded by a literal `+` is **rejected**
++> and returned whole and unchanged, whether or not a phone match was made at that `+` (FR-032a).
++
++A leading `+` marks the run as telephone-shaped: the 8-to-15 bound then decides whether it becomes
++`[PHONE]`, and a run outside that bound is simply left alone.
++
++| Input | v1 output | v2 output | Why |
++|-------|-----------|-----------|-----|
++| `4111111111111111` | `[CARD]` | `[CARD]` | unchanged — no leading `+` |
++| `+4111111111111111` | `+[CARD]` | *unchanged* | 16 digits: too long for a phone, and the `+` takes it out of the card rule |
++| `+4111 1111 1111 1111` | `+[CARD]` | *unchanged* | likewise, with separators |
++| `+455673758689985` | `+[CARD]` | `[PHONE]` | 15 digits: the phone rule claims it, starting at the `+` |
++| `+1 415 555 2671` | *unchanged* | *unchanged* | the candidate beginning after the `+` is rejected whole; nothing inside it is re-scanned |
++
++This is a **suppression only** — strictly fewer card matches than v1, never more. The rejection is
++applied to the whole maximal candidate (not by excluding the first digit from the pattern), which
++is what keeps it from being an addition: excluding the first digit would let the scanner restart
++inside the run and find a shorter Luhn-valid tail, producing `[CARD]` where v1 produced nothing.
++Verified; see research.md R-012.
++
++**Accepted cost, recorded in the spec**: a real card number written with a stray leading `+` is no
++longer redacted.
++
++---
++
++## Known deviation (inherited, deliberately not fixed here)
++
++FR-031 states that non-ASCII decimal digits are left unchanged "exactly as the existing IPv4 and
++payment-card rules are read". That is not true of the existing rules: their patterns use `\d`,
++which matches every Unicode decimal digit, and `int()` accepts those digits, so a 13-to-19-digit
++Arabic-Indic run that passes Luhn is redacted as `[CARD]` — and was before this feature.
++
++The new phone rule uses `[0-9]` and is correct. The inherited patterns are **left as they are**,
++because such an input contains neither a phone number nor a `+`-prefixed digit run, and FR-054
++requires its output to be byte-identical to the pre-change tool's. Recorded as spec defect D-2 in
++[`../plan.md`](../plan.md) for a separate decision.
+diff --git a/specs/002-redact-phones-out-dir/data-model.md b/specs/002-redact-phones-out-dir/data-model.md
+new file mode 100644
+index 0000000..f7e2ec8
+--- /dev/null
++++ b/specs/002-redact-phones-out-dir/data-model.md
+@@ -0,0 +1,173 @@
++# Phase 1 Data Model: Phone Redaction and `--out-dir`
++
++**Feature**: `002-redact-phones-out-dir` | **Date**: 2026-11-14
++
++This document records what this feature **adds to or changes in** the model of feature 001
++([`../001-redact-log-pii/data-model.md`](../001-redact-log-pii/data-model.md)). The entities it
++does not mention — input source, line — are unchanged, including their state transitions.
++
++As in 001, "entity" means a concept the design has to keep straight, not a class. Nothing here
++becomes a new type: a redaction type is still a regex group name, counts are still one `dict`, and
++the output destination is still a single optional string plus a `write` parameter.
++
++---
++
++## Entity: Redaction type — **changed** (a fourth member)
++
++| Field | `email` | `ip` | `card` | `phone` *(new)* |
++|-------|---------|------|--------|-----------------|
++| Group name (regex) | `email` | `ip` | `card` | `phone` |
++| Placeholder | `[EMAIL]` | `[IP]` | `[CARD]` | `[PHONE]` (FR-030) |
++| Counter key | `emails` | `ips` | `cards` | `phones` (FR-037) |
++| Precedence (FR-036) | 1 (first) | 2 | 3 | 4 (last) |
++| Candidate shape | local part `@` domain | dotted quad | digit run, optional ` `/`-` separators | `+` then 8–15 ASCII digits (FR-031) |
++| Left-hand guard | none | not preceded by a digit or digit-dot (FR-012) | not preceded by a digit (FR-017) — **and now not preceded by `+`** (FR-032a) | **none, deliberately** (FR-031a) |
++| Right-hand guard | none | not followed by a digit or dot-digit (FR-012) | not followed by a digit | not followed by an ASCII digit (FR-032) |
++| Post-match validation | none (FR-007a) | every octet ≤ 255 (FR-010, FR-011) | 13–19 digits **and** Luhn passes, **and** the character before the candidate is not `+` (FR-032a) | none — the pattern alone decides (R-010) |
++
++**Validation rules**
++
++- "Digit" in the phone rule means ASCII `0`–`9` and nothing else (FR-031). Other scripts' decimal
++  digits neither extend a run nor trigger the FR-032 rejection.
++- A failed candidate of any type is returned **whole and unchanged** and increments nothing. The
++  phone rule has no post-match validation, so its only rejection happens in the pattern, which
++  means a rejected phone candidate never becomes a partial redaction (FR-032).
++- The `+` guard on the card type is a **narrowing** of the inherited rule: strictly fewer card
++  matches than before, never more (FR-032a, FR-054; verified in research.md R-012).
++
++**Precedence** is realised entirely by the order of the branches in the one compiled alternation,
++so this table's "Precedence" row is the implementation, not a description of it. Only `email` and
++`phone` can begin at the same offset, because `+` is in the email local-part class while `ip` and
++`card` candidates begin with a digit; at that offset email wins (FR-036).
++
++---
++
++## Entity: Redaction counts — **changed** (a fourth counter)
++
++| Field | Type | Initial | Notes |
++|-------|------|---------|-------|
++| `emails` | `int` | `0` | |
++| `ips` | `int` | `0` | |
++| `cards` | `int` | `0` | |
++| `phones` | `int` | `0` | **New** (FR-038). |
++
++**Rules**
++
++- One `dict` with exactly these four keys, in this order, produced by `new_counts()` — the single
++  place the key names are written (R-021). The run's totals and the summary's field order both
++  derive from it.
++- A counter is incremented **only** when a replacement is actually made. A rejected candidate, and
++  placeholder text that was already present in the input, increment nothing (FR-038, inherited
++  FR-020).
++- Counts are run-local, never module state: two runs in one process cannot contaminate each other.
++- Totals accumulate across every input read in the run, whichever destination the output went to,
++  and are reported once (FR-037, FR-052).
++- Reported only when `--count` was given, and suppressed entirely on every failure path (FR-039).
++
++---
++
++## Entity: Output destination — **new**
++
++Exactly one destination is in effect for a whole run; it is chosen once, from the command line,
++before any input is opened.
++
++| Field | Type | Notes |
++|-------|------|-------|
++| `out_dir` | `str \| None` | The `--out-dir` value exactly as given; `None` means standard output (FR-040). |
++| `write` | callable | `sys.stdout.write` for the default destination; a per-output-file writer otherwise. The only thing that differs between destinations. |
++
++**States**
++
++```text
++standard output  — out_dir is None. Every FILE's lines go to one combined stream, as today.
++                   No confirmation line is ever printed (FR-047).
++output folder    — out_dir is set and at least one FILE was named. One output file per FILE
++                   argument; nothing but the confirmation line reaches standard output.
++invalid          — out_dir is set and no FILE was named: invalid usage, exit 2 (FR-051).
++```
++
++**Validation rules**
++
++- `out_dir` set with an empty FILE list is rejected before anything else happens: standard input is
++  not read, DIR is not created, standard output stays empty, exit status 2 (FR-051).
++- DIR is created, with every missing parent, before the first FILE is opened (FR-042, FR-045). An
++  existing DIR is used as it is — never emptied, and files in it this run does not write are
++  untouched.
++- DIR that cannot be created is a terminal failure: diagnostic naming DIR, no input read, exit 2
++  (FR-049).
++
++---
++
++## Entity: Output file — **new**
++
++| Field | Type | Notes |
++|-------|------|-------|
++| `path` | `str` | `os.path.join(out_dir, os.path.basename(FILE))` — the FILE's final path component only, its directories dropped (FR-041). |
++| handle | text stream | `"w"`, UTF-8, `errors="surrogateescape"`, `newline=""` — the same contract as standard output (FR-044, R-020). |
++| state | see below | |
++
++**State transitions** (one output file per FILE argument, in command-line order)
++
++```text
++pending ──open(w)──► open ──all lines written, closed──► complete
++   │                   │
++   │                   ├── input read failed      ──► discarded  (FR-048 + FR-050a)
++   │                   └── write or close failed  ──► discarded  (FR-050 + FR-050a)
++   │
++   └── the FILE could not be opened at all ──► never created (R-017)
++```
++
++- `open` → `complete` is the only transition that increments the write counter.
++- `discarded` means: the handle is closed and the file is removed, so DIR holds no file under a
++  legitimate name that is not a complete redaction of its input (FR-050a, SC-013a). A file of that
++  name that existed before the run is gone with it and is **not** restored — `"w"` replaced it the
++  moment the run opened it.
++- A failed removal does not change the state: it is reported as a second diagnostic and the exit
++  status stays 2.
++- `never created` is the non-destructive case recorded in research.md R-017: a FILE that cannot be
++  opened at all leaves any pre-existing file of its output name untouched.
++
++**Collisions.** Two FILE arguments with the same basename resolve to the same `path`. The second
++`open(…, "w")` replaces the first one's contents; both transitions to `complete` count. So the
++write counter can exceed the number of files on disk, by design (spec Assumptions).
++
++---
++
++## Entity: Write confirmation — **new**
++
++| Field | Type | Notes |
++|-------|------|-------|
++| N | `int` | The number of output files that reached `complete`, i.e. one per FILE argument processed (FR-046). |
++| text | `str` | Exactly `wrote N files\n`, including `wrote 1 files` for a single file — the literal form the request specifies, never pluralised. |
++
++**Rules**
++
++- Written to **standard output**, once, after every FILE has been processed, and it is the only
++  thing an `--out-dir` run writes to standard output (FR-046, FR-047).
++- Never written on a run without `--out-dir`, and never on a run that failed (FR-047).
++- Precedes the `--count` summary, which goes to standard error after standard output is flushed
++  (FR-052).
++
++---
++
++## Run-level state
++
++| Name | Type | Purpose |
++|------|------|---------|
++| `count` | `bool` | Whether `--count` was given (FR-001). |
++| `out_dir` | `str \| None` | The destination (FR-040). **New.** |
++| `files` | `list[str]` | FILE arguments in order; empty means read stdin — unless `out_dir` is set, which makes it invalid usage (FR-002, FR-003, FR-051). |
++| counts | 4 × `int` | As above. **Was 3.** |
++| `written` | `int` | Output files completed so far; becomes N in the confirmation line. **New.** |
++| exit status | `int` | `0` or `2` only — never any other value (FR-053, SC-014). |
++
++**Invariants**
++
++- `written` only ever increments, once per FILE argument, after that FILE's output file is closed
++  successfully. It is read only to format the confirmation line, so a failed run's partial value is
++  never observable.
++- At most one output file is open at any moment: FILE *k+1*'s sink is opened only after FILE *k*'s
++  was closed or discarded. Nothing is buffered beyond one line, so memory does not grow with input
++  size in either destination (SC-017).
++- The run is fail-fast. The first unreadable input or unwritable output stops everything: no later
++  FILE is opened, no confirmation line, no summary, exit 2 (FR-048, FR-050).
+diff --git a/specs/002-redact-phones-out-dir/plan.md b/specs/002-redact-phones-out-dir/plan.md
+new file mode 100644
+index 0000000..32242be
+--- /dev/null
++++ b/specs/002-redact-phones-out-dir/plan.md
+@@ -0,0 +1,243 @@
++# Implementation Plan: Redact Phone Numbers and Write Sanitized Copies to an Output Folder
++
++**Branch**: `002-redact-phones-out-dir` | **Date**: 2026-11-14 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/002-redact-phones-out-dir/spec.md`
++
++## Summary
++
++Two additions to the shipped `logredact` tool, both verified by execution during Phase 0:
++
++1. **Phone redaction** — one new branch at the end of the existing single compiled alternation,
++   `\+[0-9]{8,15}(?![0-9])`, plus a fourth counter key. Its position last in the alternation *is*
++   the FR-036 tie-break (email → IPv4 → card → phone); its ASCII `[0-9]` class *is* FR-031; its
++   trailing `(?![0-9])` *is* FR-032; the absence of any lookbehind *is* FR-031a. FR-032a (a digit
++   run preceded by `+` is never a card) is one guard line in the existing card validator, which
++   already has a "return the candidate unchanged" path.
++2. **`--out-dir DIR`** — one new argparse option and one alternative destination inside `cli.py`:
++   create DIR first (FR-045), then per FILE open the input, open a sink named
++   `basename(FILE)`, stream into it, and count one write. A tiny `_OutputError` wrapper lets a
++   single `except` tell an input failure (name the FILE, FR-048) from an output failure (name the
++   output path, FR-050); any failure after the sink was opened deletes the half-written file
++   (FR-050a).
++
++No new module, no new dependency, no new exit status. Measured cost: 1M lines in 8.5 s versus the
++baseline's 8.6 s (SC-017), and the existing suite's only failures are the 25 assertions on the
++three-key summary that SC-015 explicitly licenses.
++
++## Technical Context
++
++**Language/Version**: Python 3.11+ (the `_CARD` pattern's possessive quantifiers require 3.11;
++verified on 3.13.17). Unchanged from feature 001 and restated by the user.
++
++**Primary Dependencies**: None. Standard library only — `re`, `argparse`, `os`, `sys`
++(Constitution Principle I).
++
++**Storage**: Filesystem. New in this feature: the tool creates directories and writes files under
++`--out-dir DIR`. No database, no state carried between runs.
++
++**Testing**: `pytest`, tests under `tests/`, runnable by a bare `pytest` from the repository root
++(`pytest.ini` sets `pythonpath = src`). Unit tests call the pure core in-process; CLI tests drive
++`python -m logredact` through `subprocess` so exit status, stream separation, and real filesystem
++effects are observed rather than simulated.
++
++**Target Platform**: POSIX-like developer machines and CI. The design uses no platform-specific
++call; `os.makedirs`, `os.path.basename`, and `os.remove` carry the behaviour.
++
++**Project Type**: Single-project command-line tool, extending the existing `logredact` package.
++
++**Performance Goals**: Unchanged in character (SC-017) — 1M lines well under 60 s, memory bounded
++by the longest single line, in both destinations. Measured: 8.5 s to `/dev/null`, 8.7 s to
++`--out-dir`, versus 8.6 s for the current tool on the same 88 MB input.
++
++**Constraints**: Output files carry byte-for-byte the same text contract as standard output
++(FR-044): UTF-8, `surrogateescape` round-trip, no line-ending translation. Streaming only — no
++file is buffered whole (FR-044, SC-017). Exit status set stays `{0, 2}` (FR-053, SC-014).
++
++**Scale/Scope**: ~70 lines added to `cli.py`, ~10 to `redact.py`; 2 new test modules and 5
++extended ones. 25 existing assertions updated to the four-key summary form.
++
++No NEEDS CLARIFICATION remains: the spec's four clarifications plus the user's instruction
++(Python 3.11+, standard library only, the spec's interface exactly, pytest) close every open
++question. Two **spec defects** found while planning are recorded at the end of this document;
++neither blocks implementation.
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++| Principle | Gate | Pre-Phase-0 | Post-Phase-1 |
++|-----------|------|-------------|--------------|
++| I. Standard Library Only | No third-party runtime import; runs on a bare interpreter | PASS — `re`, `argparse`, `os`, `sys` only; nothing new imported | PASS — design adds no import at all |
++| II. Fail Loudly | Every new failure mode gets a specific diagnostic naming the offending input, plus exit 2; `except` clauses narrow, recovering or re-raising | PASS — FR-049, FR-050, FR-050a, FR-051 all specify diagnostic + status 2 | PASS with one justified exception, in Complexity Tracking: the `sink.close()` inside the discard path swallows `OSError` on a file being deleted |
++| III. Every Requirement Is Testable | Each of FR-030…FR-054 maps to at least one `pytest` test that fails when unmet; each error path has its own test asserting status *and* diagnostic | PASS — all 28 requirements are observable from stdout/stderr/exit status/filesystem | PASS — traceability table below; 2 new test modules, 5 extended |
++| IV. Simplicity | Smallest design meeting the spec; no speculative abstraction | PASS — one regex branch, one counter key, one option | PASS with two justified additions, in Complexity Tracking: `_OutputError` and the `_sink_writer` closure |
++
++**No gate fails.** Two deliberate, requirement-anchored deviations are recorded in Complexity
++Tracking rather than waved through.
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/002-redact-phones-out-dir/
++├── plan.md                        # This file (/speckit-plan command output)
++├── spec.md                        # Feature specification
++├── research.md                    # Phase 0 output — 12 decisions (R-010 … R-021), all verified by execution
++├── data-model.md                  # Phase 1 output — the entities this feature adds or changes
++├── quickstart.md                  # Phase 1 output — 12 runnable validation scenarios
++├── contracts/                     # Phase 1 output
++│   ├── cli-contract.md            # The extended CLI; supersedes 001's cli-contract.md
++│   └── redaction-rules.md         # The phone rule and the card narrowing; amends 001's redaction-rules.md
++├── checklists/                    # Pre-existing quality checklist
++└── tasks.md                       # Phase 2 output (/speckit-tasks — NOT created here)
++```
++
++### Source Code (repository root)
++
++```text
++src/
++└── logredact/
++    ├── __init__.py                # Unchanged — package marker
++    ├── __main__.py                # Unchanged — `raise SystemExit(main())`
++    ├── redact.py                  # CHANGED: + _PHONE branch, + PHONE_PLACEHOLDER, + "phones" key,
++    │                              #          + the FR-032a guard in the card validator
++    └── cli.py                     # CHANGED: + --out-dir option, + usage check (FR-051),
++                                   #          + DIR creation, + sink open/write/close/discard,
++                                   #          + "wrote N files", + four-key summary
++
++tests/
++├── unit/
++│   ├── test_patterns.py           # EXTENDED: phone recognition and non-recognition (FR-030 … FR-034),
++│   │                              #           the card narrowing (FR-032a)
++│   ├── test_luhn.py               # Unchanged
++│   ├── test_precedence.py         # EXTENDED: phone vs email/card overlap and tie-break (FR-035, FR-036);
++│   │                              #           4-key dict assertions
++│   └── test_counting.py           # EXTENDED: the phones counter (FR-038); 4-key dict assertions
++└── cli/
++    ├── test_invocation.py         # EXTENDED: --out-dir accepted in any position (FR-040); 4-key summary
++    ├── test_output_fidelity.py    # EXTENDED: 4-key summary; phone near-miss control sample (SC-009)
++    ├── test_count_flag.py         # EXTENDED: the four-key summary form (FR-037, FR-039)
++    ├── test_failures.py           # Unchanged — the inherited failure paths must still hold
++    ├── test_broken_pipe.py        # Unchanged
++    ├── test_out_dir.py            # NEW: User Story 3 — naming, creation, replacement, N, --count (FR-040 … FR-047, FR-052)
++    └── test_out_dir_failures.py   # NEW: User Story 4 — every failure path and the partial-file rule (FR-048 … FR-051, FR-050a)
++
++pytest.ini                         # Unchanged
++```
++
++**Structure Decision**: Keep feature 001's two-module split exactly as it is. `redact.py` stays
++pure (text in, text and counts out) and absorbs the whole phone rule; `cli.py` stays the only
++module that touches the process and absorbs the whole `--out-dir` destination. The new code lands
++on the side of the line it already belongs to, so no third module, no I/O layer, and no "sink"
++abstraction is introduced (Principle IV).
++
++Concretely, a destination is **not** modelled as a class or a strategy object. `_redact_stream`
++already takes its lines from any iterable; it gains a `write` parameter, and the two destinations
++are `sys.stdout.write` and a per-file writer. That is the whole polymorphism the spec needs: one
++parameter, two call sites. A `Destination` hierarchy with `StdoutDestination` and
++`DirectoryDestination` would be an extension point no requirement asks for.
++
++The test split mirrors the source split and the spec's user stories: units for recognition rules,
++subprocess tests for everything the contract states about the process and the filesystem. The two
++new CLI modules are split along Story 3 (it works) / Story 4 (it fails correctly) because the
++failure module needs filesystem fixtures — unwritable parents, a path that is a directory,
++`/dev/full` — that the success module does not.
++
++## Phase 0: Research — complete
++
++[research.md](./research.md) records twelve decisions, R-010 through R-021, continuing feature
++001's series. Every one was verified by running code before it was written down; the three that
++changed the design are:
++
++| ID | Decision | Serves |
++|----|----------|--------|
++| R-010 | Phone pattern `\+[0-9]{8,15}(?![0-9])` — ASCII class, trailing-digit guard, **no** lookbehind | FR-030 … FR-034 |
++| R-011 | Phone branch placed **last** in the existing alternation; branch order is the tie-break | FR-035, FR-036 |
++| R-012 | FR-032a implemented **in the card validator**, not as a `(?<!\+)` lookbehind — the lookbehind variant was verified to *create* new `[CARD]` matches (`+1 4111111111111111` → `+1 [CARD]`), which FR-054 forbids | FR-032a, FR-054 |
++| R-013 | The inherited `\d` in the IPv4 and card patterns stays Unicode-wide; FR-054 forbids narrowing it. FR-031's parenthetical about the existing rules is factually wrong (defect D-2 below) | FR-031, FR-054 |
++| R-014 | `--out-dir` as an `argparse` option; `parser.error()` for the no-FILE case, reusing the FR-029 path verbatim | FR-040, FR-051 |
++| R-015 | `os.makedirs(DIR, exist_ok=True)` before the first input opens; `OSError.strerror` supplies the reason | FR-042, FR-045, FR-049 |
++| R-016 | Output name from `os.path.basename(FILE)` | FR-041 |
++| R-017 | **Input opened before the sink.** The spec is ambiguous; this ordering is the non-destructive reading and satisfies every acceptance scenario | FR-048, FR-050a |
++| R-018 | `_OutputError` wrapper around sink open/write/close, so one handler names the right path | FR-048, FR-050 |
++| R-019 | Discard the half-written file on any failure after the sink opened; report a failed removal as a second diagnostic | FR-050a |
++| R-020 | Sink opened `"w"`, UTF-8, `surrogateescape`, `newline=""` — the same four arguments as the stdout reconfigure | FR-044 |
++| R-021 | `new_counts()` is the single source of the counter key names; `totals` and the accumulation loop both derive from it | FR-037, FR-038 |
++
++The design was run against **every** acceptance scenario and edge case in the spec. All produced
++the specified output; the transcripts are in research.md.
++
++## Phase 1: Design & Contracts — complete
++
++- **[data-model.md](./data-model.md)** — the two entities this feature adds (output destination,
++  output file) with their lifecycle, the two it changes (redaction type, redaction counts), and
++  the run-level state including the write counter.
++- **[contracts/cli-contract.md](./contracts/cli-contract.md)** — the extended public interface:
++  the new invocation grammar, the two destinations, the four-key summary, `wrote N files`, the
++  three new failure behaviours, and the partial-file guarantee. Supersedes 001's CLI contract.
++- **[contracts/redaction-rules.md](./contracts/redaction-rules.md)** — the phone pattern, its
++  recognition table, the narrowed card rule, and the four-way precedence, with worked examples.
++- **[quickstart.md](./quickstart.md)** — twelve runnable validation scenarios covering all four
++  user stories, plus the byte-fidelity, partial-file, and performance checks.
++
++### Requirement traceability
++
++| Requirement | Where it is implemented | Where it is tested |
++|-------------|------------------------|--------------------|
++| FR-030, FR-031 | `_PHONE` pattern + `PHONE_PLACEHOLDER` in `redact.py` | `tests/unit/test_patterns.py` |
++| FR-031a | absence of a lookbehind on `_PHONE` | `tests/unit/test_patterns.py` (`v2+…`, `x=99+…`, line start) |
++| FR-032 | `(?![0-9])` trailing guard | `tests/unit/test_patterns.py` (7, 8, 15, 16 digits) |
++| FR-032a | `+`-preceded guard in the card validator | `tests/unit/test_patterns.py`, `tests/unit/test_precedence.py` |
++| FR-033, FR-034 | pattern shape (`{8,15}`, no trailing class) | `tests/unit/test_patterns.py` |
++| FR-035, FR-036 | branch order in `PATTERN`, `re.sub` left-to-right | `tests/unit/test_precedence.py` |
++| FR-037, FR-039 | `_write_summary` format string; return-before-summary on every failure path | `tests/cli/test_count_flag.py`, `tests/cli/test_out_dir_failures.py` |
++| FR-038 | `"phones"` in `new_counts()`; accumulation loop | `tests/unit/test_counting.py`, `tests/cli/test_count_flag.py` |
++| FR-040 | `add_argument("--out-dir")` + `parse_intermixed_args` | `tests/cli/test_invocation.py` |
++| FR-041 | `os.path.join(out_dir, os.path.basename(name))` | `tests/cli/test_out_dir.py` |
++| FR-042, FR-045 | `os.makedirs(exist_ok=True)` before the loop | `tests/cli/test_out_dir.py` |
++| FR-043 | sink opened in `"w"` mode | `tests/cli/test_out_dir.py` |
++| FR-044 | sink `open()` arguments | `tests/cli/test_out_dir.py` (bytes compared against the stdout run) |
++| FR-046, FR-047, FR-052 | `written` counter; single `sys.stdout.write` after the loop | `tests/cli/test_out_dir.py` |
++| FR-048 | `except OSError` naming `name`; return 2 | `tests/cli/test_out_dir_failures.py` |
++| FR-049 | `except OSError` around `makedirs`, naming DIR | `tests/cli/test_out_dir_failures.py` |
++| FR-050 | `except _OutputError` naming `failure.path` | `tests/cli/test_out_dir_failures.py` (`/dev/full`, path-is-a-directory) |
++| FR-050a | `_discard` — close, `os.remove`, report a failed removal | `tests/cli/test_out_dir_failures.py` |
++| FR-051 | `parser.error()` when `out_dir` is set and `files` is empty | `tests/cli/test_out_dir_failures.py` |
++| FR-053, FR-054 | everything above is additive; `tests/cli/test_failures.py` and `test_broken_pipe.py` stay untouched | the unchanged modules, plus a byte-identity test against the pre-change tool |
++
++### Verified against the spec's own numbers
++
++| Success criterion | Phase 0 measurement |
++|-------------------|---------------------|
++| SC-008 / SC-009 | Every phone case and near-miss in the spec produced the specified output, including `+4111111111111111` unchanged |
++| SC-011 / SC-012 | `--out-dir` over 2 files: `wrote 2 files`, contents byte-identical to the stdout run; deep DIR created; a 26-byte pre-existing file replaced by a 9-byte one |
++| SC-013 / SC-013a | All four failure paths: diagnostic naming the path, no confirmation line, no summary, no traceback, exit 2; the half-written file absent, the earlier file complete |
++| SC-015 | The existing suite against the prototype: **25 failures, all 25 on the summary shape** (15 counts-dict assertions, 10 summary-line assertions). Zero redaction-output regressions |
++| SC-017 | 1M lines / 88 MB: baseline 8.6 s, prototype 8.5 s (stdout) and 8.7 s (`--out-dir`) |
++
++### Spec defects found while planning (neither blocks implementation)
++
++- **D-1 — FR-051 has no label.** Its text ("`--out-dir` given with no FILE argument MUST be treated
++  as invalid usage under FR-029…") is appended to the end of FR-050a's paragraph in spec.md:371,
++  while Assumptions and SC-013 both refer to **FR-051** by number. The requirement itself is
++  unambiguous and is implemented as written; the spec should be patched to split the paragraph and
++  restore the `**FR-051**:` label.
++- **D-2 — FR-031's claim about the existing rules is wrong.** FR-031 says non-ASCII decimal digits
++  "MUST be left unchanged, exactly as the existing IPv4 and payment-card rules are read". The
++  existing patterns use `\d`, which in Python matches every Unicode decimal digit, and `int()`
++  accepts them — so a 13-to-19-digit Arabic-Indic run that passes Luhn is redacted as `[CARD]`
++  today. The new phone rule uses `[0-9]` and is correct. Narrowing the inherited patterns would
++  change the output of inputs containing no phone number and no `+`-prefixed run, which **FR-054
++  forbids**, so this plan deliberately leaves `\d` alone. Recorded in research.md R-013; worth a
++  follow-up spec decision, not a change smuggled into this feature.
++
++## Complexity Tracking
++
++> Two additions beyond the most literal design, each demanded by a specific requirement.
++
++| Violation | Why Needed | Simpler Alternative Rejected Because |
++|-----------|------------|-------------------------------------|
++| `_OutputError`, a one-attribute exception class wrapping sink `open`/`write`/`close` failures, plus the `_sink_writer` closure that applies it per line (Principle IV) | FR-048 requires the diagnostic to name the **input** file; FR-050 requires it to name the **output** path. Once both files are open, an `OSError` from the streaming loop is ambiguous — `OSError.filename` is unset for read and write errors on an open handle (verified) — so a single `except OSError` would name the wrong path roughly half the time, violating Principle II's "diagnostics MUST name which input caused it" | Catching `OSError` once and naming the input: verified to misattribute a `/dev/full` write failure to the input file. Inspecting `OSError.filename`: unset in exactly these cases. A per-line `try` on the read side instead: identical cost, and it misattributes the sink's `close()` failure. The measured cost of the closure plus zero-cost `try` is nil — 8.5 s versus the baseline's 8.6 s on 1M lines |
++| `except OSError: pass` around `sink.close()` in the discard path (Principle II forbids swallowing handlers) | FR-050a requires the half-written file to be deleted **and** the original diagnostic (FR-048's input name or FR-050's output path) to be the one reported. The handle must be closed before `os.remove` for the deletion to be portable, and a flush failure at that close is almost always the very error already being reported — re-raising it would replace the primary diagnostic with a duplicate and skip the deletion | Letting it propagate: skips the `os.remove`, leaving exactly the truncated file FR-050a exists to prevent. Reporting it as a second diagnostic: duplicates the primary message on the common `ENOSPC` path, which FR-050a does not ask for — it asks only that a failed *deletion* be reported, and that is reported. The handler is narrow (`OSError`), on a file whose contents are being destroyed by design, and recovers meaningfully: it lets the deletion and the real diagnostic through |
+diff --git a/specs/002-redact-phones-out-dir/quickstart.md b/specs/002-redact-phones-out-dir/quickstart.md
+new file mode 100644
+index 0000000..e79c0f5
+--- /dev/null
++++ b/specs/002-redact-phones-out-dir/quickstart.md
+@@ -0,0 +1,377 @@
++# Quickstart: Validating phone redaction and `--out-dir`
++
++**Feature**: `002-redact-phones-out-dir` | **Date**: 2026-11-14
++
++Runnable scenarios that prove this feature works end to end. Each maps to acceptance criteria in
++[`spec.md`](./spec.md); the authoritative behaviour is in
++[`contracts/cli-contract.md`](./contracts/cli-contract.md) and
++[`contracts/redaction-rules.md`](./contracts/redaction-rules.md).
++
++Feature 001's [`quickstart.md`](../001-redact-log-pii/quickstart.md) still applies unchanged: its
++nine scenarios must keep producing the same results, with the single exception of the `--count`
++summary text, which now has four keys.
++
++---
++
++## Prerequisites
++
++- Python **3.11 or newer** (`python3 --version`).
++- `pytest` (test-time only — the tool itself needs nothing beyond the standard library).
++- No installation step: the package is run from the source tree.
++
++```bash
++cd <repo root>
++export PYTHONPATH=src
++python3 -m logredact --help
++# usage: python -m logredact [-h] [--count] [--out-dir DIR] [files ...]
++```
++
++Fixtures used by the `--out-dir` scenarios:
++
++```bash
++cd "$(mktemp -d)" && export PYTHONPATH=<repo root>/src
++mkdir -p var/logs
++printf 'call +14155552671 now\n'                      > app.log
++printf 'ip 10.0.0.7 card 4111111111111111 a@b.io\n'   > web.log
++printf '+442071838750 rotated\n'                      > var/logs/old.log
++: > empty.log
++```
++
++---
++
++## Scenario 1 — A phone number disappears (US1, FR-030, FR-031)
++
++```bash
++echo 'call +14155552671 now' | python3 -m logredact
++```
++
++Expected stdout exactly, with a trailing newline, **nothing on stderr**, exit status 0:
++
++```text
++call [PHONE] now
++```
++
++The `+` is gone with the digits — a leftover `+[PHONE]` is a failure.
++
++---
++
++## Scenario 2 — Length boundaries and no partial redaction (US1-3, US1-4, FR-032, FR-033)
++
++```bash
++printf '+1234567\n+12345678\n+455673758689985\n+1234567890123456\n' | python3 -m logredact
++```
++
++Expected stdout:
++
++```text
+++1234567
++[PHONE]
++[PHONE]
+++1234567890123456
++```
++
++7 digits is below the minimum; 8 and 15 are the bounds; 16 is rejected **whole** — seeing
++`[PHONE]6` or any truncation is a failure.
++
++---
++
++## Scenario 3 — The `+`-prefixed card is left alone (US1-9, FR-032a)
++
++```bash
++echo '+4111111111111111' | python3 -m logredact --count
++```
++
++Expected stdout `+4111111111111111` — **no `[PHONE]`** (16 digits is too long) and **no `[CARD]`**
++(the leading `+` takes the run out of the card rule) — and on stderr:
++
++```text
++emails=0 ips=0 cards=0 phones=0
++```
++
++Contrast, to confirm the card rule itself still works:
++
++```bash
++echo '4111111111111111' | python3 -m logredact      # -> [CARD]
++```
++
++---
++
++## Scenario 4 — Precedence and no left-hand guard (US1-5, US1-8, FR-031a, FR-036)
++
++```bash
++printf '+12345678@example.com\nbuild v2+12345678 ok\nx=99+12345678\n+14155552671 10.0.0.7\n' \
++  | python3 -m logredact --count
++```
++
++Expected stdout:
++
++```text
++[EMAIL]
++build v2[PHONE] ok
++x=99[PHONE]
++[PHONE] [IP]
++```
++
++Line 1 is `[EMAIL]`, not `[PHONE]@example.com` — email wins at a shared start. Lines 2 and 3 show
++the accepted over-redaction: nothing before the `+` prevents a match. Expected stderr:
++
++```text
++emails=1 ips=1 cards=0 phones=3
++```
++
++---
++
++## Scenario 5 — The four-key summary (US2, FR-037, FR-038)
++
++```bash
++echo 'a@b.io +442071838750' | python3 -m logredact --count
++```
++
++Expected stdout `[EMAIL] [PHONE]`; expected stderr, exactly one line:
++
++```text
++emails=1 ips=0 cards=0 phones=1
++```
++
++All four keys, always in this order, `0` when none, and nothing on stderr at all without the flag:
++
++```bash
++echo 'a@b.io +442071838750' | python3 -m logredact 2>&1 >/dev/null | wc -c    # -> 0
++```
++
++---
++
++## Scenario 6 — A folder of clean copies (US3-1, US3-2, FR-041 … FR-046)
++
++```bash
++rm -rf clean
++python3 -m logredact --out-dir clean app.log web.log var/logs/old.log
++```
++
++Expected stdout exactly one line, nothing on stderr, exit status 0:
++
++```text
++wrote 3 files
++```
++
++Then check the folder:
++
++```bash
++ls clean                      # app.log  old.log  web.log   (the name only; 'var/logs' dropped)
++cat clean/app.log             # call [PHONE] now
++cat clean/old.log             # [PHONE] rotated
++cat clean/web.log             # ip [IP] card [CARD] [EMAIL]
++```
++
++**The byte-identity check that matters** (FR-044) — an output file must equal what standard output
++would have produced for the same FILE:
++
++```bash
++python3 -m logredact web.log | cmp - clean/web.log && echo "byte-identical"
++```
++
++---
++
++## Scenario 7 — Missing parents, replacement, and bystanders (US3-3 … US3-5, FR-042, FR-043)
++
++```bash
++rm -rf deep
++python3 -m logredact --out-dir deep/a/b app.log      # -> wrote 1 files
++ls deep/a/b                                          # app.log — every missing parent created
++
++printf 'STALE CONTENT THAT IS MUCH LONGER\n' > clean/app.log
++printf 'keep me\n'                                   > clean/unrelated.txt
++python3 -m logredact --out-dir clean app.log         # -> wrote 1 files
++cat clean/app.log                                    # call [PHONE] now   (replaced, not appended)
++wc -c < clean/app.log                                # 21 — not 55
++cat clean/unrelated.txt                              # keep me — untouched
++```
++
++An existing folder is used as it is: it is never emptied, and files this run does not write are
++left alone.
++
++---
++
++## Scenario 8 — Empty input, both flags, and the default destination (US3-6 … US3-8, FR-047, FR-052)
++
++```bash
++python3 -m logredact --out-dir clean --count empty.log app.log
++```
++
++Expected stdout `wrote 2 files`; expected stderr `emails=0 ips=0 cards=0 phones=1`; the
++confirmation line comes before the summary when both are redirected together. An empty input gives
++an empty output file that still counts:
++
++```bash
++wc -c < clean/empty.log       # 0
++```
++
++Without `--out-dir`, nothing changes and no confirmation line is ever printed:
++
++```bash
++python3 -m logredact app.log | grep -c 'wrote'    # -> 0
++```
++
++---
++
++## Scenario 9 — Failing clearly, and leaving no truncated file (US4-1, US4-2, FR-048, FR-050a, SC-013a)
++
++```bash
++rm -rf out && python3 -m logredact --out-dir out app.log nope.log web.log --count
++echo "status=$?"
++```
++
++Expected: **nothing** on stdout — no `wrote N files`, no summary — a diagnostic on stderr naming
++the file as typed, and status 2:
++
++```text
++python -m logredact: nope.log: No such file or directory
++status=2
++```
++
++The folder must hold exactly one file, complete, and `web.log` must never have been opened:
++
++```bash
++ls out                                           # app.log  — and nothing else
++python3 -m logredact app.log | cmp - out/app.log && echo "earlier file complete"
++```
++
++---
++
++## Scenario 10 — The other three failure paths (US4-3 … US4-5, FR-049, FR-050, FR-051)
++
++```bash
++# DIR cannot be created — its parent is a regular file. No input is read.
++printf 'x\n' > blocker
++python3 -m logredact --out-dir blocker/sub app.log; echo "status=$?"
++# -> python -m logredact: blocker/sub: Not a directory        status=2
++
++# The output path exists as a directory.
++mkdir -p out2/app.log
++python3 -m logredact --out-dir out2 app.log --count; echo "status=$?"
++# -> python -m logredact: out2/app.log: Is a directory        status=2   (no summary)
++
++# --out-dir with no FILE: invalid usage. stdin is not read and the folder is not created.
++echo '+14155552671' | python3 -m logredact --out-dir never; echo "status=$?"
++# -> usage: python -m logredact [-h] [--count] [--out-dir DIR] [files ...]
++#    python -m logredact: error: --out-dir requires at least one FILE     status=2
++test ! -e never && echo "folder not created"
++
++# And the inherited usage path is untouched.
++python3 -m logredact --redact-all; echo "status=$?"     # usage naming --redact-all, status=2
++```
++
++Every one of these must print no stack trace and write nothing to stdout.
++
++---
++
++## Scenario 11 — The partial file is deleted (US4-8, US4-9, FR-050a)
++
++A write failure partway through a file, forced with `/dev/full`, with a pre-existing file of that
++name in place to confirm it is **not** restored:
++
++```bash
++rm -rf out3 && mkdir out3
++for i in $(seq 5000); do echo '+14155552671'; done > big.log
++printf 'PRE-EXISTING\n' > out3/big.log        # will be replaced the moment the sink opens
++ln -sf /dev/full out3/big.log                 # force the write to fail
++python3 -m logredact --out-dir out3 big.log --count; echo "status=$?"
++```
++
++Expected: a diagnostic naming the **output path** (not the input), no confirmation line, no
++summary, status 2 — and the name gone from the folder:
++
++```text
++python -m logredact: out3/big.log: No space left on device
++status=2
++```
++
++```bash
++ls out3                 # empty — no truncated file, and the previous contents are not restored
++```
++
++The read-failure counterpart, where the input opens cleanly and then fails:
++
++```bash
++rm -rf out4
++python3 -m logredact --out-dir out4 app.log /proc/self/mem; echo "status=$?"
++# -> python -m logredact: /proc/self/mem: Input/output error        status=2
++ls out4                 # app.log only — the sink opened for /proc/self/mem was deleted
++```
++
++---
++
++## Scenario 12 — Fidelity, early close, and performance (FR-044, FR-028, SC-017)
++
++Undecodable bytes round-trip into an output file, byte for byte:
++
++```bash
++printf 'bad \377 byte +14155552671\n' > raw.log
++rm -rf out5 && python3 -m logredact --out-dir out5 raw.log
++od -c out5/raw.log | head -2        # 377 present; '[PHONE]' in place of the number
++```
++
++The early-close path is unchanged — silent, exit 0:
++
++```bash
++python3 -m logredact big.log | head -5 ; echo "status=${PIPESTATUS[0]}"    # status=0, stderr empty
++```
++
++Performance, in both destinations (SC-017 allows 60 s; Phase 0 measured ≈8.5 s for each, against
++≈8.6 s for the pre-change tool):
++
++```bash
++python3 - <<'PY'
++with open('mil.log','w') as f:
++    for _ in range(1_000_000):
++        f.write('user jane@example.com from 10.0.0.7 ref +14155552671 card 4111111111111111\n')
++PY
++time python3 -m logredact mil.log > /dev/null
++rm -rf out6 && time python3 -m logredact --out-dir out6 mil.log --count
++```
++
++Memory must not grow with input size — nothing is accumulated and no file is buffered whole.
++
++---
++
++## Running the tests
++
++```bash
++cd <repo root>
++pytest                       # the whole suite, from the repository root
++```
++
++Useful subsets:
++
++```bash
++pytest tests/unit                      # recognition rules, Luhn, precedence, counting
++pytest tests/cli/test_out_dir.py       # User Story 3 — the output folder works
++pytest tests/cli/test_out_dir_failures.py   # User Story 4 — it fails correctly
++pytest -k phone -v
++```
++
++Phase 0 measured the exact cost of this feature to the existing suite (SC-015): **25 assertions**
++fail against the new behaviour, all of them on the summary shape — 15 three-key dict literals in
++`tests/unit/`, 10 three-key summary lines in `tests/cli/`. No test fails on redacted output. Those
++25 are updated to the four-key form; anything else failing is a regression, not an expected update.
++
++---
++
++## Acceptance checklist
++
++The feature is validated when all of these hold:
++
++- [ ] Scenarios 1–12 above produce the stated results.
++- [ ] Feature 001's nine scenarios still produce their stated results, with the summary text in its
++      four-key form.
++- [ ] `pytest` passes in full from the repository root.
++- [ ] Every requirement FR-030 … FR-054, including FR-031a, FR-032a, and FR-050a, has at least one
++      covering test (SC-016).
++- [ ] The four reported counts equal the number of placeholders of each type in the output, for
++      every test input (SC-010).
++- [ ] An input containing neither a phone number nor a `+`-prefixed digit run produces
++      byte-identical output to the pre-change tool (SC-015, FR-054).
++- [ ] No exit status other than 0 or 2 is ever produced (SC-014).
++- [ ] After any failed `--out-dir` run, every file left in the folder is a complete redaction of its
++      input (SC-013a).
++- [ ] No third-party import appears anywhere under `src/` (Constitution, Principle I).
+diff --git a/specs/002-redact-phones-out-dir/research.md b/specs/002-redact-phones-out-dir/research.md
+new file mode 100644
+index 0000000..7a77080
+--- /dev/null
++++ b/specs/002-redact-phones-out-dir/research.md
+@@ -0,0 +1,458 @@
++# Phase 0 Research: Phone Redaction and `--out-dir`
++
++**Feature**: `002-redact-phones-out-dir` | **Date**: 2026-11-14
++
++Decision IDs continue feature 001's series (R-001 … R-009 live in
++[`../001-redact-log-pii/research.md`](../001-redact-log-pii/research.md)).
++
++Every decision below was **verified by execution** on Python 3.13.17 before being written down:
++a prototype carrying the full design was built and run against every acceptance scenario and edge
++case in [spec.md](./spec.md), and against the existing test suite. Where a decision had a credible
++alternative, the alternative was built and run too, and the transcript is quoted.
++
++No NEEDS CLARIFICATION remains. The spec's four clarifications settled the open recognition
++questions; the user's instruction settled language, dependencies, interface, and test framework.
++
++---
++
++## R-010 — The phone pattern
++
++**Decision**: `_PHONE = r"\+[0-9]{8,15}(?![0-9])"`, added as a fourth named branch to the existing
++compiled alternation.
++
++Three details carry three requirements, and none is decorative:
++
++| Detail | Requirement |
++|--------|-------------|
++| `[0-9]`, **not** `\d` | FR-031 — "digit" means ASCII `0`-`9` only. In Python, `\d` on a `str` pattern matches every Unicode decimal digit |
++| `(?![0-9])` | FR-032 — a run followed by another digit is rejected whole, never truncated to its first 15 |
++| no lookbehind of any kind | FR-031a — there is no left-hand guard; whatever precedes the `+`, the candidate matches |
++
++**Rationale**: `{8,15}` plus a trailing negative lookahead is the only shape that rejects a
++16-digit run *entirely* rather than matching its first 15. Verified:
++
++```text
++'x +1234567 y'            -> 'x +1234567 y'              (7 digits: below the minimum)
++'+12345678'               -> '[PHONE]'                   (8 digits: the minimum)
++'+455673758689985'        -> '[PHONE]'                   (15 digits: the maximum)
++'x +1234567890123456 y'   -> 'x +1234567890123456 y'     (16 digits: rejected whole, not truncated)
++'+14155552671.'           -> '[PHONE].'                  (FR-034: punctuation not consumed)
++'(+14155552671)'          -> '([PHONE])'
++'bare + here'             -> 'bare + here'               (FR-033)
++'build v2+12345678 ok'    -> 'build v2[PHONE] ok'        (FR-031a)
++'x=99+12345678'           -> 'x=99[PHONE]'               (FR-031a)
++'+14155552671+442071838750' -> '[PHONE][PHONE]'          (adjacent candidates)
++'+١٤١٥٥٥٥٢٦٧١'            -> '+١٤١٥٥٥٥٢٦٧١'              (FR-031: non-ASCII digits)
++'+1415555٢٦٧١'            -> '+1415555٢٦٧١'              (7 ASCII digits, and FR-032 does not fire)
++```
++
++The mixed-script case is the subtle one and it works for the stated reason: the ASCII run is cut
++short by a non-ASCII character, so `{8,15}` fails on length rather than `(?![0-9])` firing — which
++is exactly the reading the spec's edge-case list demands.
++
++**Alternatives considered**:
++
++- `\+\d{8,15}(?!\d)` — matches Arabic-Indic and fullwidth digits, contradicting FR-031 directly.
++- `\+[0-9]{8,15}\b` — `\b` is wrong at a word boundary that is also a digit boundary; verified to
++  accept `+123456789` inside `+1234567890123456`, truncating a rejected run.
++- Bounding the run in the validator instead of the pattern (the approach the card rule uses):
++  needless here, because a phone candidate has no separators, so its digit count is known from the
++  match. The card rule needs a validator only because separators must be stripped first.
++
++---
++
++## R-011 — Branch placement is the precedence rule
++
++**Decision**: append the phone branch **last**:
++`(?P<email>…)|(?P<ip>…)|(?P<card>…)|(?P<phone>…)`.
++
++**Rationale**: feature 001 made `re.sub` over a single alternation carry FR-018 (leftmost wins)
++and FR-019 (branch order breaks a tie at the same start) by construction. FR-036 extends that
++order to `email → ip → card → phone`, so appending the branch *is* the implementation — no
++comparison code, no priority field. Verified:
++
++```text
++'+12345678@example.com'  -> '[EMAIL]'        counted as an email, not '[PHONE]@example.com'
++'jane+orders@example.com'-> '[EMAIL]'
++'a@b.io +442071838750'   -> '[EMAIL] [PHONE]'
++'+14155552671 10.0.0.7'  -> '[PHONE] [IP]'
++```
++
++In practice only the email branch can begin at the same offset as a phone candidate, because `+`
++is in the email local-part class while IPv4 and card candidates both begin with a digit — so
++"phone last" and "phone third" are indistinguishable in output. Last is still the right choice: it
++is what FR-036 says, and it leaves the inherited three-way order untouched.
++
++FR-035 needs no code at all. `re.sub` resumes scanning after the replaced span, so the digits
++inside a `[PHONE]` are never re-examined by the card or IPv4 branch and cannot be double-counted
++(the inherited FR-020 mechanism, already tested).
++
++---
++
++## R-012 — FR-032a belongs in the card validator, not in a lookbehind
++
++**Decision**: leave `_CARD` exactly as it is and add one guard to the card arm of `_replacement`:
++
++```python
++if match.start() > 0 and match.string[match.start() - 1] == "+":
++    return text        # FR-032a — a '+'-prefixed run is telephone-shaped, never a card
++```
++
++**This decision was changed by its experiment.** The obvious implementation — add `(?<!\+)` to the
++card pattern — was built and run side by side with the validator version:
++
++```text
++input                    today        (?<!\+) lookbehind   validator guard
++'+4111111111111111'      '+[CARD]'    '+4111111111111111'  '+4111111111111111'
++'+4111 1111 1111 1111'   '+[CARD]'    unchanged            unchanged
++'+1 4111111111111111'    unchanged    '+1 [CARD]'   ←NEW   unchanged
++'+1-4111111111111111'    unchanged    '+1-[CARD]'   ←NEW   unchanged
++```
++
++The lookbehind **creates card matches that today's tool does not produce**: blocking the candidate
++at the first digit lets the scanner restart inside the run and find a shorter, Luhn-valid tail.
++FR-054 states the two deliberate output changes are "exactly the phone replacements of FR-030 and
++the card **suppression** of FR-032a" — a suppression, never an addition — so the lookbehind variant
++is out. The validator guard rejects the whole maximal candidate and `re.sub` then resumes *after*
++it, so nothing inside is re-scanned, matching FR-016's inherited "never partially redact a
++candidate" treatment.
++
++It is also the cheaper change: the card arm already has two `return text` paths for a rejected
++candidate, so this is a third one, and the compiled pattern is untouched.
++
++**Alternatives considered**: a fifth alternation branch that swallows `\+[0-9]+` and returns it
++unchanged — would need to run after the phone branch, which the engine's first-match-wins order
++makes impossible without duplicating the `{8,15}` logic in two places.
++
++---
++
++## R-013 — The inherited `\d` stays Unicode-wide (a documented non-change)
++
++**Decision**: do **not** narrow `\d` to `[0-9]` in `_IP` or `_CARD`.
++
++**Finding**: FR-031 asserts that non-ASCII decimal digits are left unchanged "exactly as the
++existing IPv4 and payment-card rules are read". That assertion is false. `\d` matches every
++Unicode decimal digit, and `int()` accepts them, so the inherited card rule redacts a
++13-to-19-digit Arabic-Indic run that passes Luhn, today, before this feature.
++
++**Rationale for leaving it**: such an input contains no international-format phone number and no
++`+`-prefixed digit run, so FR-054 requires its output to be **byte-identical** to the existing
++tool's. Fixing the inherited patterns here would violate FR-054 and would smuggle a third
++behavioural change into a feature whose spec names exactly two. The new phone rule uses `[0-9]`
++and is correct in isolation.
++
++Recorded as spec defect D-2 in [plan.md](./plan.md). It deserves its own decision — a one-line
++spec amendment plus a one-character pattern change — not a silent correction inside this feature.
++
++---
++
++## R-014 — `--out-dir` as an argparse option, and the no-FILE usage error
++
++**Decision**: `parser.add_argument("--out-dir", dest="out_dir", metavar="DIR")`, still parsed with
++`parse_intermixed_args`. For FR-051, `parser.error("--out-dir requires at least one FILE")`.
++
++**Rationale**: the inherited `parse_intermixed_args` (R-001) already allows flags between
++filenames, and it extends to an option-with-value for free. Verified:
++
++```text
++['--out-dir','clean','a.log','b.log']        -> out_dir='clean'  files=['a.log','b.log']
++['a.log','--out-dir','clean','--count','b.log'] -> out_dir='clean'  files=['a.log','b.log']  count=True
++['a.log','b.log','--count','--out-dir','d']  -> out_dir='d'      files=['a.log','b.log']  count=True
++usage: python -m logredact [-h] [--count] [--out-dir DIR] [files ...]
++```
++
++The usage line updates itself, so FR-040's grammar change needs no hand-written `usage=` string.
++
++`parser.error` is the right instrument for FR-051 because it *is* the FR-029 path: argparse writes
++the usage line plus a message naming the problem to stderr and raises `SystemExit(2)`, which
++`__main__.py`'s `raise SystemExit(main())` propagates unchanged. Verified against the real
++requirement — stdout empty, DIR not created, stdin not read:
++
++```text
++$ python -m logredact --out-dir clean          (with '+12345678' on stdin)
++rc=2  stdout=b''
++stderr=b'usage: python -m logredact [-h] [--count] [--out-dir DIR] [files ...]\n'
++       b'python -m logredact: error: --out-dir requires at least one FILE\n'
++clean/ created: False
++```
++
++The check runs **before** `_configure_streams` and before `makedirs`, which is what keeps stdin
++unread and DIR uncreated.
++
++**Alternatives considered**: a hand-rolled `if` writing its own message and returning 2 — would
++duplicate argparse's usage-line formatting and risk drifting from the FR-029 wording; a mutually
++exclusive group — argparse cannot express "requires a positional".
++
++---
++
++## R-015 — Create DIR before opening any input
++
++**Decision**: `os.makedirs(args.out_dir, exist_ok=True)` as the first thing the `--out-dir` branch
++does, wrapped in `except OSError` → diagnostic naming DIR → return 2.
++
++**Rationale**: FR-045 requires it, and FR-049 requires the diagnostic to precede any reading.
++`exist_ok=True` gives FR-042 in one argument: a missing DIR and every missing parent are created, an
++existing DIR is used as it is, nothing is emptied. Verified, including the failure modes the spec
++names:
++
++```text
++makedirs('deep/a/b', exist_ok=True)      -> created, parents and all
++makedirs(<a regular file>, exist_ok=True)-> FileExistsError   strerror='File exists'
++makedirs(<file>/'sub', exist_ok=True)    -> NotADirectoryError strerror='Not a directory'
++```
++
++`OSError.strerror` supplies "what went wrong" for all of them, so the inherited `_report` helper —
++`python -m logredact: <path>: <reason>` — carries FR-049 with no new formatting:
++
++```text
++$ python -m logredact --out-dir blocker in.log      # 'blocker' is a regular file
++rc=2  stdout=b''  stderr=b'python -m logredact: blocker: File exists\n'
++$ python -m logredact --out-dir blocker/sub in.log
++rc=2  stdout=b''  stderr=b'python -m logredact: blocker/sub: Not a directory\n'
++```
++
++`exist_ok=True` is also why a pre-existing DIR is not a race: two concurrent runs both succeed.
++
++---
++
++## R-016 — Output names come from `os.path.basename`
++
++**Decision**: `out_path = os.path.join(args.out_dir, os.path.basename(name))`.
++
++**Rationale**: FR-041 says "the final path component of that FILE as given on the command line".
++That is `os.path.basename` by definition. Verified:
++
++```text
++'var/logs/app.log' -> 'app.log'      './a.log' -> 'a.log'       '/abs/x.log' -> 'x.log'
++'a/b/../c.log'     -> 'c.log'        '..'      -> '..'          'dir/'       -> ''
++```
++
++The last two are degenerate — `basename('dir/')` is the empty string, and `'..'` names the parent
++directory — but neither is reachable: both are directories, so the input open fails first under
++R-017 and the user gets a diagnostic naming what they typed rather than a confusing one naming DIR.
++Verified end to end; no special-casing is needed, which is the point of recording it.
++
++Name collisions need no code either: FR-043's `"w"` mode applies at every write, so a later FILE
++with the same basename replaces the earlier one's output, and `written` counts both
++(spec Assumptions, "N counts FILE arguments processed"). Verified:
++`--out-dir out a/x.log b/x.log` → `wrote 2 files`, `out/x.log` holding only `b/x.log`'s output.
++
++---
++
++## R-017 — Open the input before the sink
++
++**Decision**: for each FILE, open the input first; only then open the sink. The spec is ambiguous
++here, so the reasoning matters.
++
++**The ambiguity**: FR-048 says that when a FILE cannot be read, "the incomplete output file for the
++failing FILE MUST be removed as FR-050a requires", which presupposes a sink was already opened —
++i.e. sink-first. But FR-050a scopes itself to a failure "after an output file has been opened but
++before that file has been completely written", and User Story 4 scenario 9 scopes its
++previous-contents-are-gone rule to a run that "fails **partway through writing** it". Both
++orderings satisfy the letter of every acceptance scenario.
++
++**Rationale for input-first**: the orderings differ in exactly one case — a FILE that cannot be
++opened at all, the single most common failure (a typo). Verified, with a pre-existing
++`out/missing.log` in place:
++
++```text
++$ python -m logredact --out-dir out missing.log
++rc=2  stdout=b''  stderr=b'python -m logredact: missing.log: No such file or directory\n'
++out/ contains: ['missing.log']        content: b'PRE-EXISTING\n'   ← intact
++```
++
++Sink-first would have created, truncated, and then deleted that file, destroying unrelated data
++because of a typo. Input-first preserves it. The spec invokes "the safe direction when in doubt" as
++its own tie-breaker twice (FR-031a, FR-036), and the purpose FR-050a states for the deletion — "so
++the output folder is left holding only complete files" — is fully met either way.
++
++The non-destructive reading costs nothing in the cases the spec does specify, because a read
++failure *after* the sink opened still deletes the sink. Verified with `/proc/self/mem`, which opens
++cleanly and fails on read, and with a pre-existing file of its output name:
++
++```text
++$ python -m logredact --out-dir out first.log /proc/self/mem --count
++rc=2  stdout=b''  stderr=b'python -m logredact: /proc/self/mem: Input/output error\n'
++out/ contains: ['first.log']          first.log: b'[PHONE]\n'   ← earlier file complete
++out/mem: absent                       ← sink deleted; its pre-existing content is gone (FR-050a)
++```
++
++So FR-048's removal clause is honoured wherever there is something to remove, SC-013a's "no
++truncated file in the folder" holds, and a mistyped filename is no longer destructive.
++
++**Consequence, recorded deliberately**: whether a pre-existing `DIR/basename(FILE)` survives a
++failed run depends on *when* the input failed — it survives an open failure, it is gone on a
++mid-read failure. That jaggedness is the price of the non-destructive choice. The uniform
++alternative (sink-first: the name is always absent afterwards) is a one-line change if the product
++decision goes the other way.
++
++---
++
++## R-018 — Telling an input failure from an output failure
++
++**Decision**: a two-attribute exception, `_OutputError(path, error)`, raised by the three sink
++operations (`open`, `write`, `close`) and nothing else. The per-FILE handler is then unambiguous:
++
++```python
++except _OutputError as failure:   # FR-050 — name the output path
++    _report(failure.path, failure.error); return EXIT_FAILURE
++except OSError as error:          # FR-048 — name the FILE as given
++    _report(name, error); return EXIT_FAILURE
++```
++
++`_OutputError` inherits `Exception`, **not** `OSError`, so the second clause cannot swallow it.
++
++**Rationale**: FR-048 and FR-050 require different paths in the diagnostic, and once both files are
++open an `OSError` from the streaming loop could come from either side. `OSError.filename` does not
++disambiguate — it is set by `open()`, not by reads or writes on an established handle (verified:
++unset in both cases). Without the wrapper the tool names the wrong path, which Principle II
++forbids. Verified on both sides:
++
++```text
++write failure (out/in.log is a symlink to /dev/full):
++  rc=2  stderr=b'python -m logredact: out/in.log: No space left on device\n'   ← output path
++output path exists as a directory:
++  rc=2  stderr=b'python -m logredact: out/in.log: Is a directory\n'            ← output path
++read failure mid-stream (/proc/self/mem):
++  rc=2  stderr=b'python -m logredact: /proc/self/mem: Input/output error\n'    ← input name
++```
++
++The wrapper is applied to each line through a small closure returned by `_sink_writer`. CPython
++3.11+ has zero-cost exception handling, so the `try` costs nothing when nothing raises; the extra
++call is the only overhead, and it is unmeasurable at this scale (R-021).
++
++**Alternatives considered**: one `except OSError` naming the input — verified to misattribute the
++`/dev/full` failure above; a boolean flag set around each write — same line count, and it cannot
++cover the sink's `close()`; comparing `error.filename` — unset, as measured.
++
++---
++
++## R-019 — Discarding the half-written file
++
++**Decision**:
++
++```python
++def _discard(sink, path):
++    try:
++        sink.close()
++    except OSError:
++        pass                      # the file is being deleted; the real diagnostic is already queued
++    try:
++        os.remove(path)
++    except OSError as error:
++        _report(path, error)      # FR-050a — a failed deletion is reported too
++```
++
++called from a cleanup-and-re-raise wrapped around the streaming loop, so it fires on a read
++failure (FR-048), an output failure (FR-050), and nothing else.
++
++**Rationale**: FR-050a requires the incomplete file gone and the original diagnostic intact. The
++handle must be closed before `os.remove` for the deletion to be portable; a flush failure at that
++close is, on the common `ENOSPC` path, the very error already being reported, so re-raising it
++would both skip the deletion — leaving exactly the truncated file the requirement exists to
++prevent — and replace the primary diagnostic with a duplicate. The `pass` is narrow, on a file whose
++contents are being destroyed by design, and is logged as a justified deviation in plan.md's
++Complexity Tracking rather than hidden.
++
++A failed `os.remove` is reported as a *second* stderr line and the status stays 2, which is
++FR-050a's last sentence and the spec's "the tool does not retry or fall silent".
++
++**Alternatives considered**: write to a temporary name and `os.replace` on success — rejected by
++the spec itself (Assumptions: it would leave stray temporary files in DIR on a hard kill, and it
++adds names no requirement asks for); buffer the file and write it only on success — contradicts
++FR-044's streaming contract and SC-017's memory bound; keep a copy of the previous contents to roll
++back — the spec explicitly refuses this ("the run MUST NOT attempt to restore its previous
++contents").
++
++---
++
++## R-020 — The sink's text contract
++
++**Decision**: `open(path, "w", encoding="utf-8", errors="surrogateescape", newline="")` — the same
++four arguments as the inherited `sys.stdout.reconfigure`.
++
++**Rationale**: FR-044 requires each output file to carry exactly the text contract standard output
++carries. Reusing the arguments verbatim is the only way to guarantee that rather than approximate
++it: `"w"` gives FR-043's replacement, `utf-8` gives FR-005a, `surrogateescape` gives FR-005b's byte
++round-trip, `newline=""` disables all line-ending translation so CRLF and a missing final newline
++survive (FR-005). Verified end to end on an undecodable byte:
++
++```text
++in:  b'bad \xff byte +14155552671\n'
++out: b'bad \xff byte [PHONE]\n'        byte-identical outside the match
++```
++
++The quickstart checks the stronger property the spec actually cares about: the output file's bytes
++equal the bytes the same FILE produces on standard output.
++
++---
++
++## R-021 — Four counters, one source of key names, measured cost
++
++**Decision**: `new_counts()` gains `"phones": 0` and becomes the single place the key names are
++written. `cli.main` initialises `totals = new_counts()` instead of repeating the literal, and
++`_redact_stream` accumulates with `for key, value in counts.items(): totals[key] += value` instead
++of three hand-written lines. The summary becomes
++`"emails={emails} ips={ips} cards={cards} phones={phones}\n"`.
++
++**Rationale**: the key list appeared in three places before this feature (the factory, `main`'s
++literal, and the accumulation lines); adding a fourth type to three places invites exactly the
++drift FR-037's "always all four, always in this order" forbids. Collapsing to one is fewer moving
++parts, not more (Principle IV).
++
++**Measured cost** — the dict loop and the sink closure together, 1M lines / 88 MB:
++
++| Run | Time |
++|-----|------|
++| current tool → `/dev/null` | 8.6 s |
++| prototype → `/dev/null` | 8.5 s |
++| prototype → `--out-dir`, with `--count` | 8.7 s |
++
++Unchanged in character, far inside SC-017's 60 s, and memory stays bounded by the longest line
++because nothing is accumulated (the inherited R-008 property).
++
++**Measured impact on the existing suite** (SC-015). The prototype was run against the current
++`tests/` unchanged:
++
++```text
++25 failed, 128 passed, 1 skipped
++```
++
++and all 25 are the summary shape, by category:
++
++| Count | Assertion |
++|-------|-----------|
++| 15 | `c == {"emails": …, "ips": …, "cards": …}` — a 3-key dict literal in `tests/unit/` |
++| 10 | `stderr == b"emails=N ips=N cards=N\n"` — the 3-key summary line in `tests/cli/` |
++
++**Zero** failures on redacted stdout content. No test asserts that a `+`-prefixed run is redacted
++as a card, so SC-015's second allowance turns out to be unused. The four-key update to those 25
++assertions is therefore the complete, bounded cost of this feature to the existing suite.
++
++---
++
++## Verification transcript: the spec's scenarios
++
++Every acceptance scenario and every edge case listed in spec.md was run against the prototype. All
++produced the specified result. The ones that pin down a judgement call:
++
++| Spec reference | Input / command | Result |
++|----------------|-----------------|--------|
++| US1-1 … US1-9 | the nine phone scenarios | all as specified, incl. `+4111111111111111` unchanged |
++| US2-1 | `--count` on `a@b.io +442071838750` | stdout `[EMAIL] [PHONE]`, stderr `emails=1 ips=0 cards=0 phones=1` |
++| US2-2 | `--count` on inert input | `emails=0 ips=0 cards=0 phones=0` |
++| US3-1 | `--out-dir clean app.log web.log` | `clean/` created, both files correct, stdout `wrote 2 files`, rc 0 |
++| US3-2 | `--out-dir clean var/logs/app.log` | `clean/app.log` |
++| US3-3 | `--out-dir a/b/c …` | all parents created |
++| US3-4/5 | pre-existing `out/app.log` (26 B) + `out/unrelated.txt` | replaced with 9 B; unrelated file untouched |
++| US3-6 | `--out-dir out --count app.log` | `wrote 1 files` on stdout, four-key summary on stderr |
++| US3-8 | empty input file | 0-byte output file, counts towards N |
++| US4-1 | missing FILE, pre-existing output name | names the FILE, rc 2, no confirmation, no summary, pre-existing file intact (R-017) |
++| US4-2 | `good.log nope.log later.log --count` | `out/` holds only a complete `good.log`; `later.log` never opened; rc 2 |
++| US4-3 | DIR's parent is a regular file | names DIR with `Not a directory`, no input read, rc 2 |
++| US4-4 | output path is a directory | names the output path with `Is a directory`, rc 2 |
++| US4-5 | `--out-dir clean` with no FILE | usage diagnostic, stdout empty, `clean/` not created, rc 2 |
++| US4-7 | `--redact-all` | unchanged from today: usage naming the flag, rc 2 |
++| US4-8/9 | read fails after the sink opened | sink deleted, earlier file complete, rc 2 |
++| Edge: early close | `--out-dir` with stdout closed before `wrote N files` | silent, rc 0 — the inherited FR-028 path still holds |
++| Edge: early close | `big.log \| head -5` (no `--out-dir`) | first 5 lines, stderr empty, rc 0 |

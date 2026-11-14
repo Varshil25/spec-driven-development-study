@@ -25,7 +25,8 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R010 | 2026-11-12 | T-TARX-01 | sdd_secure | OK | 0 | no | ok | operated by Claude; no questions, 5 LISTED; implement stopped at the usage limit 11 Nov and was resumed 12 Nov with the fixed message; implement and total active time include the wait and are not usable; Claude Code cost $18.22 |
 | R010C | 2026-11-12 | T-TARX-01-CR | sdd_secure | OK | 0 | no | ok | change request on R010; operated by Claude; no questions, 4 LISTED; implement stopped at the usage limit and was resumed with the fixed message; implement and total active time include the wait and are not usable; Claude Code cost $21.85 |
 | R011 | 2026-11-13 | T-REDACT-01 | sdd_clarify | OK | 0 | no | ok | operated by Claude; 5 clarify questions: NOPREF x4, SAFETY x1 (none matched the sheet); plan stopped at the usage limit and was resumed with the fixed message; plan and total active time include the wait and are not usable; agent reports its email pattern is quadratic on long lines and scaled its own long-line test down; Claude Code cost $21.30 |
-| R011C | | T-REDACT-01-CR | sdd_clarify | | | | | change request on R011 |
+| R011C | 2026-11-14 | T-REDACT-01-CR | sdd_clarify | FAIL | 0 | no | excluded | change request on R011; operated by Claude; two copies of the run tool drove the same run from the end of clarify through plan (operator error), so verify reports a duplicated sequence number and doubled phase markers; kept in logs/runs/R011C, redone as R019C (section 9); Claude Code cost $27.67 |
+| R019C | | T-REDACT-01-CR | sdd_clarify | | | | | rerun of R011C (spare ID), on R011's finished build from a fresh clone |
 | R012 | | T-PASTE-01 | unstructured | | | | |  |
 | R012C | | T-PASTE-01-CR | unstructured | | | | | change request on R012 |
 | R013 | | T-BOOKMARKS-01 | sdd | | | | |  |
