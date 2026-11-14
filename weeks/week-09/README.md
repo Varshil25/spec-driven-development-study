@@ -7,7 +7,7 @@ Each build is run with [run_build.py](../../tools/study/run_build.py) in a fresh
 | Run | Project | Approach | Change request | Status |
 | --- | --- | --- | --- | --- |
 | R014 | T-ACCOUNTS-01 | unstructured | R014C | build done 11-14; change request done 11-14 |
-| R015 | T-TARX-01 | unstructured | R015C | to do |
+| R015 | T-TARX-01 | unstructured | R015C | build done 11-14; change request done 11-14 |
 | R016 | T-REDACT-01 | sdd | R016C | to do |
 | R017 | T-PASTE-01 | sdd_secure | R017C | to do |
 | R018 | T-BOOKMARKS-01 | sdd_clarify | R018C | to do |

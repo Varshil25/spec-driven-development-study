@@ -1,0 +1,662 @@
+diff --git a/README.md b/README.md
+index 6b7e846..90458a9 100644
+--- a/README.md
++++ b/README.md
+@@ -1,14 +1,18 @@
+ # tarx
+ 
+-A small command-line tool for listing and extracting tar archives, using only
+-the Python standard library (Python 3.11+).
++A small command-line tool for creating, listing and extracting tar archives,
++using only the Python standard library (Python 3.11+).
+ 
+ ## Usage
+ 
+ ```
+ $ export PYTHONPATH=src
+ 
++$ python -m tarx create photos.tar.gz photos
++created photos.tar.gz with 2 files
++
+ $ python -m tarx list photos.tar.gz
++photos
+ photos/a.jpg
+ photos/b.jpg
+ 
+@@ -26,23 +30,56 @@ extracted 2 files
+ - `extract ARCHIVE DEST [--overwrite]` extracts files and directories into
+   `DEST` (created if needed), keeping their relative paths and contents, then
+   prints `extracted N files` — the number of regular files written.
++- `create ARCHIVE PATH... [--overwrite]` writes a new archive holding each
++  `PATH` — a file or directory relative to the current directory, a directory
++  bringing everything inside it — then prints `created ARCHIVE with N files`,
++  the number of regular files added.
+ 
+ Plain `.tar` and gzip-compressed `.tar.gz` / `.tgz` archives both work
+-(`.tar.bz2` and `.tar.xz` are detected too, at no extra cost).
++(`.tar.bz2` and `.tar.xz` are detected too when reading, at no extra cost).
++`create` writes gzip when `ARCHIVE` ends in `.tar.gz` or `.tgz`, and a plain
++tar archive otherwise.
+ 
+ ## Exit status
+ 
+ | Code | Meaning |
+ | ---- | ------- |
+ | 0 | success |
+-| 1 | the destination could not be written (e.g. `DEST` exists as a file) |
+-| 2 | `ARCHIVE` does not exist, is unreadable, or is not a valid tar archive |
+-| 3 | extraction would overwrite an existing file and `--overwrite` was not given |
++| 1 | an I/O failure while reading the sources or writing the output |
++| 2 | `ARCHIVE` does not exist, is unreadable, or is not a valid tar archive; or a `PATH` given to `create` does not exist |
++| 3 | the command would overwrite something and `--overwrite` was not given |
+ 
+ Usage errors (unknown command, missing argument) exit 2 via `argparse`.
+ 
+ ## Behaviour worth knowing
+ 
++### Creating
++
++- **A failed `create` leaves no archive.** Every `PATH` is checked before any
++  writing starts, so a missing one fails with exit 2 and nothing on disk. The
++  archive is then built under a temporary name beside its destination and moved
++  into place only once complete, so an interrupted run leaves neither a
++  half-written archive nor a destroyed `--overwrite` target.
++- **Member names are the relative paths given**, normalised: `./photos/` and
++  `photos` both store `photos`, `photos/a.jpg`, … A directory also gets a member
++  of its own, so empty directories survive a `create`/`extract` round trip.
++  Entries are added in sorted order, so the same tree produces the same archive.
++- **Only relative paths inside the current directory are accepted.** An absolute
++  `PATH`, or one starting with `..`, is refused (exit 2): it has no relative name
++  to be stored under. Repeating a path (or naming a file already covered by a
++  directory) adds it once.
++- **The archive is never added to itself**, so `create photos/inside.tar photos`
++  works and contains only the photos.
++- **A `PATH` naming a symlink is followed**, since it was asked for by name;
++  symlinks found inside a directory are stored as symlinks, like `tar` does.
++  Neither counts towards the `N files` total, which counts regular files.
++  Sockets and other members tar cannot represent are skipped.
++- **An existing `ARCHIVE` is an error** (exit 3) unless `--overwrite` is given.
++  A directory in `ARCHIVE`'s place is always an error, even with `--overwrite`.
++  The parent directory of `ARCHIVE` must already exist.
++
++### Extracting
++
+ - **Nothing is written when extraction would clobber.** Conflicts are detected
+   in a pass over the whole archive before the first byte is written, so a
+   failing extraction leaves the destination untouched rather than half-filled.
+@@ -69,7 +106,7 @@ Usage errors (unknown command, missing argument) exit 2 via `argparse`.
+ ```
+ src/tarx/__main__.py   entry point for `python -m tarx`
+ src/tarx/cli.py        argument parsing, messages, exit statuses
+-src/tarx/core.py       archive reading and extraction (no printing, no exits)
++src/tarx/core.py       reading, extracting, creating (no printing, no exits)
+ tests/test_tarx.py     end-to-end tests driving the CLI as a subprocess
+ ```
+ 
+@@ -79,4 +116,4 @@ tests/test_tarx.py     end-to-end tests driving the CLI as a subprocess
+ PYTHONPATH=src python -m unittest discover -s tests
+ ```
+ 
+-24 tests, passing on Python 3.11, 3.12 and 3.13.
++48 tests, passing on Python 3.11, 3.12 and 3.13.
+diff --git a/src/tarx/__init__.py b/src/tarx/__init__.py
+index c2676a8..19ec3bd 100644
+--- a/src/tarx/__init__.py
++++ b/src/tarx/__init__.py
+@@ -1,4 +1,4 @@
+-"""tarx -- a small command-line tool for listing and extracting tar archives.
++"""tarx -- a small command-line tool for tar archives: list, extract, create.
+ 
+ Supports plain (``.tar``) and gzip-compressed (``.tar.gz`` / ``.tgz``) archives.
+ Run as ``python -m tarx COMMAND ...`` with ``src/`` on ``PYTHONPATH``.
+@@ -7,8 +7,10 @@ Run as ``python -m tarx COMMAND ...`` with ``src/`` on ``PYTHONPATH``.
+ from .core import (
+     ArchiveError,
+     OverwriteError,
++    SourceError,
+     TarxError,
+     UnsafePathError,
++    create_archive,
+     extract_archive,
+     list_members,
+ )
+@@ -16,10 +18,12 @@ from .core import (
+ __all__ = [
+     "ArchiveError",
+     "OverwriteError",
++    "SourceError",
+     "TarxError",
+     "UnsafePathError",
++    "create_archive",
+     "extract_archive",
+     "list_members",
+ ]
+ 
+-__version__ = "1.0.0"
++__version__ = "1.1.0"
+diff --git a/src/tarx/cli.py b/src/tarx/cli.py
+index 745ca29..31a35bb 100644
+--- a/src/tarx/cli.py
++++ b/src/tarx/cli.py
+@@ -2,9 +2,10 @@
+ 
+ Exit statuses:
+     0  success
+-    1  unexpected I/O failure while writing to the destination
+-    2  the archive is missing, unreadable, or not a valid tar archive
+-    3  extraction would overwrite an existing file and ``--overwrite`` was absent
++    1  unexpected I/O failure while reading or writing files
++    2  the archive is missing, unreadable, or not a valid tar archive;
++       or a PATH given to ``create`` does not exist
++    3  the command would overwrite something and ``--overwrite`` was absent
+ """
+ 
+ from __future__ import annotations
+@@ -14,7 +15,7 @@ import os
+ import sys
+ from typing import Optional, Sequence
+ 
+-from .core import TarxError, extract_archive, list_members
++from .core import TarxError, create_archive, extract_archive, list_members
+ 
+ PROG = "python -m tarx"
+ 
+@@ -22,7 +23,7 @@ PROG = "python -m tarx"
+ def build_parser() -> argparse.ArgumentParser:
+     parser = argparse.ArgumentParser(
+         prog=PROG,
+-        description="List and extract tar archives (.tar, .tar.gz, .tgz).",
++        description="Create, list and extract tar archives (.tar, .tar.gz, .tgz).",
+     )
+     subcommands = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
+ 
+@@ -52,6 +53,27 @@ def build_parser() -> argparse.ArgumentParser:
+     )
+     extract_cmd.set_defaults(handler=_cmd_extract)
+ 
++    create_cmd = subcommands.add_parser(
++        "create",
++        help="create ARCHIVE containing each PATH",
++        description="Create ARCHIVE containing each PATH, a file or directory "
++        "relative to the current directory, stored under that relative name. "
++        "The archive is gzip-compressed if ARCHIVE ends in .tar.gz or .tgz.",
++    )
++    create_cmd.add_argument("archive", metavar="ARCHIVE", help="tar archive to write")
++    create_cmd.add_argument(
++        "paths",
++        metavar="PATH",
++        nargs="+",
++        help="file or directory to add (a directory brings everything inside it)",
++    )
++    create_cmd.add_argument(
++        "--overwrite",
++        action="store_true",
++        help="replace ARCHIVE if it already exists instead of failing",
++    )
++    create_cmd.set_defaults(handler=_cmd_create)
++
+     return parser
+ 
+ 
+@@ -67,6 +89,12 @@ def _cmd_extract(args: argparse.Namespace) -> int:
+     return 0
+ 
+ 
++def _cmd_create(args: argparse.Namespace) -> int:
++    count = create_archive(args.archive, args.paths, overwrite=args.overwrite)
++    print(f"created {args.archive} with {count} files")
++    return 0
++
++
+ def main(argv: Optional[Sequence[str]] = None) -> int:
+     args = build_parser().parse_args(list(argv) if argv is not None else None)
+     try:
+diff --git a/src/tarx/core.py b/src/tarx/core.py
+index 018aabc..92f199b 100644
+--- a/src/tarx/core.py
++++ b/src/tarx/core.py
+@@ -1,4 +1,4 @@
+-"""Reading and extracting tar archives.
++"""Reading, creating and extracting tar archives.
+ 
+ Nothing in here touches ``sys.argv``, prints, or exits; the command-line layer in
+ :mod:`tarx.cli` turns the exceptions below into messages and exit statuses.
+@@ -6,17 +6,21 @@ Nothing in here touches ``sys.argv``, prints, or exits; the command-line layer i
+ 
+ from __future__ import annotations
+ 
++import contextlib
+ import os
+ import tarfile
++import tempfile
+ import zlib
+-from pathlib import Path, PurePosixPath
+-from typing import List, NamedTuple, Optional, Tuple
++from pathlib import Path, PurePath, PurePosixPath
++from typing import Iterable, List, NamedTuple, Optional, Tuple
+ 
+ __all__ = [
+     "ArchiveError",
+     "OverwriteError",
++    "SourceError",
+     "TarxError",
+     "UnsafePathError",
++    "create_archive",
+     "extract_archive",
+     "list_members",
+ ]
+@@ -40,8 +44,14 @@ class UnsafePathError(ArchiveError):
+     exit_code = 2
+ 
+ 
++class SourceError(TarxError):
++    """A path to be put into a new archive is missing or cannot be named."""
++
++    exit_code = 2
++
++
+ class OverwriteError(TarxError):
+-    """Extraction would clobber something that already exists on disk."""
++    """The operation would clobber something that already exists on disk."""
+ 
+     exit_code = 3
+ 
+@@ -241,3 +251,172 @@ def extract_archive(
+                 _write_file(tar, member, target)
+                 written += 1
+         return written
++
++
++# --- creating archives -----------------------------------------------------
++
++
++class _Source(NamedTuple):
++    """One thing to put into a new archive."""
++
++    path: Path  # what to read from disk
++    arcname: str  # the member name it gets inside the archive
++
++
++def _arcname_for(path: str) -> str:
++    """Turn a command-line PATH into the member name it should be stored under.
++
++    Names are relative to the current directory, so ``./photos`` and ``photos/``
++    both become ``photos``. Anything that would not be a relative name inside the
++    archive (an absolute path, or one leading outside the current directory) is
++    rejected rather than silently rewritten.
++    """
++    if not path:
++        raise SourceError("'': not a path")
++    normalized = os.path.normpath(path)
++    escapes = normalized == ".." or normalized.startswith(".." + os.sep)
++    if os.path.isabs(normalized) or escapes:
++        raise SourceError(f"{path}: not a path relative to the current directory")
++    return PurePath(normalized).as_posix()
++
++
++def _scandir_sorted(directory: Path) -> List[os.DirEntry]:
++    """List *directory* in a stable order, so archives come out deterministic."""
++    try:
++        with os.scandir(directory) as entries:
++            return sorted(entries, key=lambda entry: entry.name)
++    except OSError as exc:
++        raise TarxError(f"{directory}: {exc.strerror or exc}") from None
++
++
++def _collect(paths: Iterable[os.PathLike | str], archive_real: str) -> List[_Source]:
++    """Resolve the PATHs into the members of a new archive, in order.
++
++    Every path is checked here, before the archive is written, so that a missing
++    path leaves no file behind. Directories are walked depth-first; the archive
++    being written is never put inside itself. A symlink named directly on the
++    command line is followed (the user asked for that file or directory by name);
++    symlinks found inside a directory are stored as symlinks instead, which is
++    what ``tar`` does and keeps the walk from leaving the tree or looping.
++    """
++    sources: List[_Source] = []
++    seen: set[str] = set()
++
++    def add(path: Path, arcname: str) -> bool:
++        if arcname in seen or os.path.realpath(path) == archive_real:
++            return False
++        seen.add(arcname)
++        sources.append(_Source(path, arcname))
++        return True
++
++    def walk(directory: Path, arcname: str) -> None:
++        for entry in _scandir_sorted(directory):
++            child = Path(entry.path)
++            child_arcname = f"{arcname}/{entry.name}"
++            if not entry.is_symlink() and entry.is_dir():
++                if add(child, child_arcname):
++                    walk(child, child_arcname)
++            else:
++                add(child, child_arcname)
++
++    for raw in paths:
++        given = os.fspath(raw)
++        arcname = _arcname_for(given)
++        # os.path.exists() follows symlinks, so a dangling one counts as missing.
++        if not os.path.exists(given):
++            raise SourceError(f"{given}: no such file or directory")
++        source = Path(os.path.realpath(given) if os.path.islink(given) else given)
++        if source.is_dir():
++            if add(source, arcname):
++                walk(source, arcname)
++        else:
++            add(source, arcname)
++
++    return sources
++
++
++def _write_mode(path: str) -> str:
++    """``w:gz`` for ``.tar.gz``/``.tgz`` names, plain ``w`` for anything else."""
++    return "w:gz" if path.lower().endswith((".tar.gz", ".tgz")) else "w"
++
++
++def _add_member(tar: tarfile.TarFile, source: _Source) -> int:
++    """Add one source to *tar*. Returns 1 for a regular file, 0 for anything else."""
++    try:
++        info = tar.gettarinfo(str(source.path), arcname=source.arcname)
++    except OSError as exc:
++        raise TarxError(f"{source.path}: {exc.strerror or exc}") from None
++    if info is None:
++        # A socket or similar: tar has no member type for it, so skip it.
++        return 0
++    try:
++        if info.isreg():
++            with open(source.path, "rb") as stream:
++                tar.addfile(info, stream)
++            return 1
++        tar.addfile(info)
++        return 0
++    except OSError as exc:
++        raise TarxError(f"{source.path}: {exc.strerror or exc}") from None
++    except tarfile.TarError as exc:
++        raise TarxError(f"{source.path}: {exc}") from None
++
++
++def create_archive(
++    archive: os.PathLike | str,
++    paths: Iterable[os.PathLike | str],
++    overwrite: bool = False,
++) -> int:
++    """Create a tar archive at *archive* holding each of *paths*.
++
++    Each path is a file or directory relative to the current directory, and is
++    stored under that relative name; a directory brings everything inside it.
++    The archive is gzip-compressed when its name ends in ``.tar.gz`` or ``.tgz``.
++    An existing archive is only replaced when *overwrite* is true. Returns the
++    number of regular files added.
++    """
++    path = os.fspath(archive)
++    archive_path = Path(path)
++
++    if os.path.lexists(archive_path):
++        if os.path.isdir(archive_path) and not os.path.islink(archive_path):
++            raise OverwriteError(f"{path}: exists as a directory, refusing to replace it")
++        if not overwrite:
++            raise OverwriteError(f"{path}: already exists (use --overwrite to replace it)")
++
++    sources = _collect(paths, os.path.realpath(archive_path))
++
++    # Build the archive beside its final name and move it into place at the end:
++    # a failure part-way through then leaves no half-written archive, and an
++    # archive being replaced is only replaced once the new one is complete.
++    parent = archive_path.parent
++    try:
++        handle, temporary = tempfile.mkstemp(
++            dir=parent, prefix=f".{archive_path.name}.", suffix=".part"
++        )
++    except OSError as exc:
++        raise TarxError(f"{path}: {exc.strerror or exc}") from None
++
++    added = 0
++    try:
++        with open(handle, "wb") as raw:
++            with tarfile.open(fileobj=raw, mode=_write_mode(path)) as tar:
++                for source in sources:
++                    added += _add_member(tar, source)
++        os.replace(temporary, archive_path)
++    except OSError as exc:  # no space left, unwritable directory, ...
++        _discard(temporary)
++        raise TarxError(f"{path}: {exc.strerror or exc}") from None
++    except tarfile.TarError as exc:  # pragma: no cover - defensive
++        _discard(temporary)
++        raise TarxError(f"{path}: {exc}") from None
++    except BaseException:
++        _discard(temporary)
++        raise
++    return added
++
++
++def _discard(temporary: str) -> None:
++    """Remove a half-written archive, so a failed create leaves nothing behind."""
++    with contextlib.suppress(OSError):
++        os.unlink(temporary)
+diff --git a/tests/test_tarx.py b/tests/test_tarx.py
+index 01398ca..6d77d36 100644
+--- a/tests/test_tarx.py
++++ b/tests/test_tarx.py
+@@ -17,14 +17,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
+ SRC = REPO_ROOT / "src"
+ 
+ 
+-def run_tarx(*args: str) -> subprocess.CompletedProcess:
++def run_tarx(*args: str, cwd: Path | str = REPO_ROOT) -> subprocess.CompletedProcess:
+     env = dict(os.environ, PYTHONPATH=str(SRC))
+     return subprocess.run(
+         [sys.executable, "-m", "tarx", *args],
+         capture_output=True,
+         text=True,
+         env=env,
+-        cwd=REPO_ROOT,
++        cwd=cwd,
+     )
+ 
+ 
+@@ -290,6 +290,204 @@ class TestPathSafety(TarxTestCase):
+         self.assertEqual(listed.stdout.splitlines(), ["real.txt", "escape"])
+ 
+ 
++class TestCreate(TarxTestCase):
++    """`create` runs in a temporary directory, since PATHs are relative to it."""
++
++    def setUp(self) -> None:
++        super().setUp()
++        self.work = self.tmp / "work"
++        (self.work / "photos").mkdir(parents=True)
++        (self.work / "photos/a.jpg").write_bytes(b"aaa")
++        (self.work / "photos/b.jpg").write_bytes(b"bbb")
++        (self.work / "notes.txt").write_bytes(b"notes\n")
++
++    def create(self, *args: str) -> subprocess.CompletedProcess:
++        return run_tarx("create", *args, cwd=self.work)
++
++    def test_creates_gzip_archive_from_a_directory(self) -> None:
++        result = self.create("photos.tar.gz", "photos")
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "created photos.tar.gz with 2 files\n")
++        archive = self.work / "photos.tar.gz"
++        self.assertEqual(archive.read_bytes()[:2], b"\x1f\x8b")  # gzip magic
++
++    def test_tgz_is_also_gzip_compressed(self) -> None:
++        self.assertEqual(self.create("photos.tgz", "photos").returncode, 0)
++        self.assertEqual((self.work / "photos.tgz").read_bytes()[:2], b"\x1f\x8b")
++
++    def test_other_suffix_is_a_plain_tar(self) -> None:
++        self.assertEqual(self.create("photos.tar", "photos").returncode, 0)
++        archive = self.work / "photos.tar"
++        self.assertNotEqual(archive.read_bytes()[:2], b"\x1f\x8b")
++        with tarfile.open(archive, "r:") as tar:  # opens only if truly uncompressed
++            self.assertIn("photos/a.jpg", tar.getnames())
++
++    def test_members_are_named_by_relative_path(self) -> None:
++        self.assertEqual(self.create("photos.tar.gz", "photos").returncode, 0)
++        listed = run_tarx("list", "photos.tar.gz", cwd=self.work)
++        self.assertEqual(listed.returncode, 0, listed.stderr)
++        self.assertEqual(
++            listed.stdout.splitlines(), ["photos", "photos/a.jpg", "photos/b.jpg"]
++        )
++
++    def test_created_archive_round_trips_through_extract(self) -> None:
++        self.assertEqual(self.create("photos.tar.gz", "photos").returncode, 0)
++        result = run_tarx("extract", "photos.tar.gz", "out", cwd=self.work)
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "extracted 2 files\n")
++        self.assertEqual((self.work / "out/photos/a.jpg").read_bytes(), b"aaa")
++        self.assertEqual((self.work / "out/photos/b.jpg").read_bytes(), b"bbb")
++
++    def test_creates_archive_from_a_single_file(self) -> None:
++        result = self.create("notes.tar", "notes.txt")
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "created notes.tar with 1 files\n")
++        listed = run_tarx("list", "notes.tar", cwd=self.work)
++        self.assertEqual(listed.stdout.splitlines(), ["notes.txt"])
++
++    def test_accepts_several_paths(self) -> None:
++        result = self.create("mixed.tar", "notes.txt", "photos")
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "created mixed.tar with 3 files\n")
++        listed = run_tarx("list", "mixed.tar", cwd=self.work)
++        self.assertEqual(
++            listed.stdout.splitlines(),
++            ["notes.txt", "photos", "photos/a.jpg", "photos/b.jpg"],
++        )
++
++    def test_nested_directories_are_preserved(self) -> None:
++        deep = self.work / "tree/sub/deep"
++        deep.mkdir(parents=True)
++        (self.work / "tree/one.txt").write_bytes(b"1")
++        (deep / "three.bin").write_bytes(b"\x00\x01\x02")
++        (self.work / "tree/empty").mkdir()
++        result = self.create("tree.tar.gz", "tree")
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "created tree.tar.gz with 2 files\n")
++        self.assertEqual(
++            run_tarx("extract", "tree.tar.gz", "out", cwd=self.work).returncode, 0
++        )
++        self.assertEqual((self.work / "out/tree/one.txt").read_bytes(), b"1")
++        self.assertEqual(
++            (self.work / "out/tree/sub/deep/three.bin").read_bytes(), b"\x00\x01\x02"
++        )
++        self.assertTrue((self.work / "out/tree/empty").is_dir())  # empty dirs survive
++
++    def test_trailing_slash_and_dot_slash_name_the_same_members(self) -> None:
++        self.assertEqual(self.create("a.tar", "./photos/").returncode, 0)
++        listed = run_tarx("list", "a.tar", cwd=self.work)
++        self.assertEqual(
++            listed.stdout.splitlines(), ["photos", "photos/a.jpg", "photos/b.jpg"]
++        )
++
++    def test_executable_bit_survives_a_round_trip(self) -> None:
++        script = self.work / "run.sh"
++        script.write_bytes(b"#!/bin/sh\necho hi\n")
++        script.chmod(0o755)
++        self.assertEqual(self.create("s.tar", "run.sh").returncode, 0)
++        self.assertEqual(run_tarx("extract", "s.tar", "out", cwd=self.work).returncode, 0)
++        self.assertTrue(os.access(self.work / "out/run.sh", os.X_OK))
++
++    def test_existing_archive_exits_3_and_is_left_alone(self) -> None:
++        archive = self.work / "photos.tar.gz"
++        archive.write_bytes(b"original contents")
++        result = self.create("photos.tar.gz", "photos")
++        self.assertEqual(result.returncode, 3)
++        self.assertEqual(result.stdout, "")
++        self.assertTrue(result.stderr.strip())
++        self.assertEqual(archive.read_bytes(), b"original contents")
++
++    def test_overwrite_replaces_the_archive(self) -> None:
++        self.assertEqual(self.create("photos.tar.gz", "photos").returncode, 0)
++        result = self.create("photos.tar.gz", "notes.txt", "--overwrite")
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "created photos.tar.gz with 1 files\n")
++        listed = run_tarx("list", "photos.tar.gz", cwd=self.work)
++        self.assertEqual(listed.stdout.splitlines(), ["notes.txt"])
++
++    def test_archive_path_that_is_a_directory_exits_3(self) -> None:
++        (self.work / "adir").mkdir()
++        result = self.create("adir", "photos", "--overwrite")
++        self.assertEqual(result.returncode, 3)
++        self.assertTrue((self.work / "adir").is_dir())
++
++    def test_missing_path_exits_2_and_creates_no_archive(self) -> None:
++        result = self.create("other.tar", "missing-folder")
++        self.assertEqual(result.returncode, 2)
++        self.assertEqual(result.stdout, "")
++        self.assertIn("missing-folder", result.stderr)
++        self.assertFalse((self.work / "other.tar").exists())
++
++    def test_one_missing_path_among_good_ones_creates_no_archive(self) -> None:
++        result = self.create("some.tar", "photos", "nope.txt", "notes.txt")
++        self.assertEqual(result.returncode, 2)
++        self.assertIn("nope.txt", result.stderr)
++        self.assertFalse((self.work / "some.tar").exists())
++
++    def test_missing_path_with_overwrite_leaves_the_old_archive(self) -> None:
++        archive = self.work / "keep.tar"
++        archive.write_bytes(b"original contents")
++        result = self.create("keep.tar", "nope.txt", "--overwrite")
++        self.assertEqual(result.returncode, 2)
++        self.assertEqual(archive.read_bytes(), b"original contents")
++
++    def test_absolute_path_is_refused(self) -> None:
++        result = self.create("abs.tar", "/etc/hostname")
++        self.assertEqual(result.returncode, 2)
++        self.assertIn("/etc/hostname", result.stderr)
++        self.assertFalse((self.work / "abs.tar").exists())
++
++    def test_path_outside_the_current_directory_is_refused(self) -> None:
++        result = self.create("up.tar", "../work")
++        self.assertEqual(result.returncode, 2)
++        self.assertIn("../work", result.stderr)
++        self.assertFalse((self.work / "up.tar").exists())
++
++    def test_archive_written_inside_an_archived_directory_excludes_itself(self) -> None:
++        result = self.create("photos/inside.tar", "photos")
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "created photos/inside.tar with 2 files\n")
++        listed = run_tarx("list", "photos/inside.tar", cwd=self.work)
++        self.assertEqual(
++            listed.stdout.splitlines(), ["photos", "photos/a.jpg", "photos/b.jpg"]
++        )
++
++    def test_repeated_paths_are_added_once(self) -> None:
++        result = self.create("dup.tar", "photos", "photos/a.jpg", "photos")
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "created dup.tar with 2 files\n")
++
++    def test_empty_directory_creates_an_archive_with_no_files(self) -> None:
++        (self.work / "nothing").mkdir()
++        result = self.create("nothing.tar", "nothing")
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "created nothing.tar with 0 files\n")
++        self.assertEqual(
++            run_tarx("list", "nothing.tar", cwd=self.work).stdout.splitlines(),
++            ["nothing"],
++        )
++
++    def test_symlink_inside_a_directory_is_stored_as_a_symlink(self) -> None:
++        (self.work / "photos/link.jpg").symlink_to("a.jpg")
++        result = self.create("photos.tar", "photos")
++        self.assertEqual(result.returncode, 0, result.stderr)
++        # The symlink is a member, but it is not one of the regular files counted.
++        self.assertEqual(result.stdout, "created photos.tar with 2 files\n")
++        listed = run_tarx("list", "photos.tar", cwd=self.work)
++        self.assertIn("photos/link.jpg", listed.stdout.splitlines())
++
++    def test_no_temporary_files_are_left_behind(self) -> None:
++        self.assertEqual(self.create("photos.tar.gz", "photos").returncode, 0)
++        self.assertEqual(self.create("bad.tar", "nope").returncode, 2)
++        names = sorted(p.name for p in self.work.iterdir())
++        self.assertEqual(names, ["notes.txt", "photos", "photos.tar.gz"])
++
++    def test_missing_paths_requires_at_least_one_path(self) -> None:
++        result = self.create("only.tar")
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn("usage", result.stderr.lower())
++
++
+ class TestUsage(TarxTestCase):
+     def test_no_command_is_a_usage_error(self) -> None:
+         result = run_tarx()

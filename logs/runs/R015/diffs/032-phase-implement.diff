@@ -1,0 +1,783 @@
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..6b7e846
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,82 @@
++# tarx
++
++A small command-line tool for listing and extracting tar archives, using only
++the Python standard library (Python 3.11+).
++
++## Usage
++
++```
++$ export PYTHONPATH=src
++
++$ python -m tarx list photos.tar.gz
++photos/a.jpg
++photos/b.jpg
++
++$ python -m tarx extract photos.tar.gz out
++extracted 2 files
++
++$ python -m tarx extract photos.tar.gz out
++python -m tarx: error: out/photos/a.jpg: already exists (use --overwrite to replace it)
++
++$ python -m tarx extract photos.tar.gz out --overwrite
++extracted 2 files
++```
++
++- `list ARCHIVE` prints every member's name, one per line, in archive order.
++- `extract ARCHIVE DEST [--overwrite]` extracts files and directories into
++  `DEST` (created if needed), keeping their relative paths and contents, then
++  prints `extracted N files` — the number of regular files written.
++
++Plain `.tar` and gzip-compressed `.tar.gz` / `.tgz` archives both work
++(`.tar.bz2` and `.tar.xz` are detected too, at no extra cost).
++
++## Exit status
++
++| Code | Meaning |
++| ---- | ------- |
++| 0 | success |
++| 1 | the destination could not be written (e.g. `DEST` exists as a file) |
++| 2 | `ARCHIVE` does not exist, is unreadable, or is not a valid tar archive |
++| 3 | extraction would overwrite an existing file and `--overwrite` was not given |
++
++Usage errors (unknown command, missing argument) exit 2 via `argparse`.
++
++## Behaviour worth knowing
++
++- **Nothing is written when extraction would clobber.** Conflicts are detected
++  in a pass over the whole archive before the first byte is written, so a
++  failing extraction leaves the destination untouched rather than half-filled.
++- **With `--overwrite`**, existing regular files are replaced. A path that
++  exists as a *directory* where a file should go (or vice versa) is still an
++  error — removing a directory tree is too destructive to do implicitly.
++- **Members cannot escape `DEST`.** Absolute paths and paths containing `..`
++  are rejected (exit 2), and each target is re-checked against the real path of
++  `DEST` so that a pre-existing symlinked directory inside it cannot redirect a
++  write elsewhere. An existing symlink in the way of a file is removed rather
++  than written through.
++- **Symlink and special-file members are skipped** (they are listed, but not
++  extracted, and not counted): they are neither files nor directories, and
++  recreating a symlink is a path-escape hazard.
++- **Hard-link members are written as their own copy** of the linked member's
++  content, so no file in the archive goes missing. The extracted copies are
++  separate inodes rather than sharing one, which is the only difference from
++  GNU `tar` here.
++- File contents, relative paths, the executable bit and modification times are
++  preserved; ownership and the full permission mask are not.
++
++## Layout
++
++```
++src/tarx/__main__.py   entry point for `python -m tarx`
++src/tarx/cli.py        argument parsing, messages, exit statuses
++src/tarx/core.py       archive reading and extraction (no printing, no exits)
++tests/test_tarx.py     end-to-end tests driving the CLI as a subprocess
++```
++
++## Tests
++
++```
++PYTHONPATH=src python -m unittest discover -s tests
++```
++
++24 tests, passing on Python 3.11, 3.12 and 3.13.
+diff --git a/src/tarx/__init__.py b/src/tarx/__init__.py
+new file mode 100644
+index 0000000..c2676a8
+--- /dev/null
++++ b/src/tarx/__init__.py
+@@ -0,0 +1,25 @@
++"""tarx -- a small command-line tool for listing and extracting tar archives.
++
++Supports plain (``.tar``) and gzip-compressed (``.tar.gz`` / ``.tgz``) archives.
++Run as ``python -m tarx COMMAND ...`` with ``src/`` on ``PYTHONPATH``.
++"""
++
++from .core import (
++    ArchiveError,
++    OverwriteError,
++    TarxError,
++    UnsafePathError,
++    extract_archive,
++    list_members,
++)
++
++__all__ = [
++    "ArchiveError",
++    "OverwriteError",
++    "TarxError",
++    "UnsafePathError",
++    "extract_archive",
++    "list_members",
++]
++
++__version__ = "1.0.0"
+diff --git a/src/tarx/__main__.py b/src/tarx/__main__.py
+new file mode 100644
+index 0000000..4e1594b
+--- /dev/null
++++ b/src/tarx/__main__.py
+@@ -0,0 +1,8 @@
++"""Entry point so the package can be run as ``python -m tarx``."""
++
++import sys
++
++from .cli import main
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/tarx/cli.py b/src/tarx/cli.py
+new file mode 100644
+index 0000000..745ca29
+--- /dev/null
++++ b/src/tarx/cli.py
+@@ -0,0 +1,83 @@
++"""Command-line interface for :mod:`tarx`.
++
++Exit statuses:
++    0  success
++    1  unexpected I/O failure while writing to the destination
++    2  the archive is missing, unreadable, or not a valid tar archive
++    3  extraction would overwrite an existing file and ``--overwrite`` was absent
++"""
++
++from __future__ import annotations
++
++import argparse
++import os
++import sys
++from typing import Optional, Sequence
++
++from .core import TarxError, extract_archive, list_members
++
++PROG = "python -m tarx"
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        prog=PROG,
++        description="List and extract tar archives (.tar, .tar.gz, .tgz).",
++    )
++    subcommands = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
++
++    list_cmd = subcommands.add_parser(
++        "list",
++        help="print the name of every member of ARCHIVE, one per line",
++        description="Print the name of every member of ARCHIVE, one per line, "
++        "in the order they appear in the archive.",
++    )
++    list_cmd.add_argument("archive", metavar="ARCHIVE", help="tar archive to read")
++    list_cmd.set_defaults(handler=_cmd_list)
++
++    extract_cmd = subcommands.add_parser(
++        "extract",
++        help="extract the files and directories of ARCHIVE into DEST",
++        description="Extract the files and directories of ARCHIVE into DEST, "
++        "keeping their relative paths and file contents.",
++    )
++    extract_cmd.add_argument("archive", metavar="ARCHIVE", help="tar archive to read")
++    extract_cmd.add_argument(
++        "dest", metavar="DEST", help="directory to extract into (created if needed)"
++    )
++    extract_cmd.add_argument(
++        "--overwrite",
++        action="store_true",
++        help="replace existing files instead of failing",
++    )
++    extract_cmd.set_defaults(handler=_cmd_extract)
++
++    return parser
++
++
++def _cmd_list(args: argparse.Namespace) -> int:
++    for name in list_members(args.archive):
++        print(name)
++    return 0
++
++
++def _cmd_extract(args: argparse.Namespace) -> int:
++    count = extract_archive(args.archive, args.dest, overwrite=args.overwrite)
++    print(f"extracted {count} files")
++    return 0
++
++
++def main(argv: Optional[Sequence[str]] = None) -> int:
++    args = build_parser().parse_args(list(argv) if argv is not None else None)
++    try:
++        return args.handler(args)
++    except TarxError as err:
++        print(f"{PROG}: error: {err}", file=sys.stderr)
++        return err.exit_code
++    except KeyboardInterrupt:  # pragma: no cover - interactive only
++        print(f"{PROG}: interrupted", file=sys.stderr)
++        return 130
++    except BrokenPipeError:  # pragma: no cover - e.g. `... list big.tar | head`
++        # Keep the interpreter from reporting the broken pipe again on shutdown.
++        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
++        return 0
+diff --git a/src/tarx/core.py b/src/tarx/core.py
+new file mode 100644
+index 0000000..018aabc
+--- /dev/null
++++ b/src/tarx/core.py
+@@ -0,0 +1,243 @@
++"""Reading and extracting tar archives.
++
++Nothing in here touches ``sys.argv``, prints, or exits; the command-line layer in
++:mod:`tarx.cli` turns the exceptions below into messages and exit statuses.
++"""
++
++from __future__ import annotations
++
++import os
++import tarfile
++import zlib
++from pathlib import Path, PurePosixPath
++from typing import List, NamedTuple, Optional, Tuple
++
++__all__ = [
++    "ArchiveError",
++    "OverwriteError",
++    "TarxError",
++    "UnsafePathError",
++    "extract_archive",
++    "list_members",
++]
++
++
++class TarxError(Exception):
++    """Base class for expected failures, carrying the process exit status."""
++
++    exit_code = 1
++
++
++class ArchiveError(TarxError):
++    """The archive is missing, unreadable, or not a valid tar archive."""
++
++    exit_code = 2
++
++
++class UnsafePathError(ArchiveError):
++    """A member would be written outside the destination directory."""
++
++    exit_code = 2
++
++
++class OverwriteError(TarxError):
++    """Extraction would clobber something that already exists on disk."""
++
++    exit_code = 3
++
++
++# Raised by tarfile/gzip/zlib when a stream turns out to be truncated or corrupt
++# part-way through reading it, rather than at open() time.
++_READ_ERRORS = (tarfile.TarError, EOFError, zlib.error, OSError)
++
++
++def _open_archive(archive: os.PathLike | str) -> tarfile.TarFile:
++    """Open *archive* for reading, auto-detecting plain vs. gzip compression."""
++    path = os.fspath(archive)
++    try:
++        # "r:*" transparently handles .tar, .tar.gz and .tgz (and bz2/xz for free).
++        return tarfile.open(path, mode="r:*")
++    except FileNotFoundError:
++        raise ArchiveError(f"{path}: no such file or directory") from None
++    except IsADirectoryError:
++        raise ArchiveError(f"{path}: is a directory, not a tar archive") from None
++    except (tarfile.ReadError, tarfile.CompressionError, zlib.error, EOFError):
++        raise ArchiveError(f"{path}: not a valid tar archive") from None
++    except OSError as exc:
++        reason = exc.strerror or str(exc)
++        raise ArchiveError(f"{path}: {reason}") from None
++
++
++def _members(tar: tarfile.TarFile, path: str) -> List[tarfile.TarInfo]:
++    """Return every member, in the order it appears in the archive."""
++    try:
++        return tar.getmembers()
++    except _READ_ERRORS:
++        raise ArchiveError(f"{path}: not a valid tar archive") from None
++
++
++def list_members(archive: os.PathLike | str) -> List[str]:
++    """Return the names of the archive's members, in archive order."""
++    path = os.fspath(archive)
++    with _open_archive(path) as tar:
++        return [member.name for member in _members(tar, path)]
++
++
++def _relative_parts(name: str) -> Optional[Tuple[str, ...]]:
++    """Split a member name into safe relative path components.
++
++    Returns ``None`` when the name refers to the destination directory itself
++    (``""``, ``"."``, ``"./"``), and raises :class:`UnsafePathError` for absolute
++    paths or anything containing a ``..`` component.
++    """
++    pure = PurePosixPath(name)
++    if pure.is_absolute():
++        raise UnsafePathError(f"{name}: refusing to extract an absolute path")
++    parts = tuple(part for part in pure.parts if part not in ("", "."))
++    if any(part == ".." for part in parts):
++        raise UnsafePathError(f"{name}: refusing to extract a path containing '..'")
++    return parts or None
++
++
++class _PlannedMember(NamedTuple):
++    member: tarfile.TarInfo
++    target: Path
++    is_dir: bool
++
++
++def _plan(members: List[tarfile.TarInfo], dest: Path) -> List[_PlannedMember]:
++    """Map the archive's files and directories onto paths under *dest*.
++
++    Regular files and directories are extracted. A hard-link member is a second
++    name for a regular file stored elsewhere in the same archive, so it is
++    written out as its own copy of that content rather than dropped. Symlinks
++    and special files (devices, fifos) are skipped: they are not files or
++    directories, and recreating a symlink is a path-escape hazard.
++    """
++    planned: List[_PlannedMember] = []
++    for member in members:
++        is_dir = member.isdir()
++        if not (is_dir or member.isfile() or member.islnk()):
++            continue
++        parts = _relative_parts(member.name)
++        if parts is None:
++            # A "./" entry: the destination directory itself, nothing to create.
++            continue
++        planned.append(_PlannedMember(member, dest.joinpath(*parts), is_dir))
++    return planned
++
++
++def _assert_inside(target: Path, dest_real: str) -> None:
++    """Fail unless *target* really lands inside *dest_real*.
++
++    The ``..`` check in :func:`_relative_parts` is not enough on its own: a
++    symlinked directory that already exists under the destination could
++    otherwise redirect a write outside of it.
++    """
++    parent_real = os.path.realpath(target.parent)
++    if parent_real != dest_real and not parent_real.startswith(dest_real + os.sep):
++        raise UnsafePathError(
++            f"{target}: refusing to write outside the destination directory"
++        )
++
++
++def _check_conflicts(
++    planned: List[_PlannedMember], dest: Path, dest_real: str, overwrite: bool
++) -> None:
++    """Reject clobbering before anything is written, so failures leave no mess."""
++    if os.path.lexists(dest) and not os.path.isdir(dest):
++        raise TarxError(f"{dest}: exists and is not a directory")
++
++    for member, target, is_dir in planned:
++        _assert_inside(target, dest_real)
++        if not os.path.lexists(target):
++            continue
++        if is_dir:
++            # Reusing a real directory is fine; anything else in its place is not.
++            if os.path.islink(target) or not os.path.isdir(target):
++                raise OverwriteError(
++                    f"{target}: exists and is not a directory"
++                )
++        elif os.path.isdir(target) and not os.path.islink(target):
++            raise OverwriteError(
++                f"{target}: exists as a directory, refusing to replace it with a file"
++            )
++        elif not overwrite:
++            raise OverwriteError(
++                f"{target}: already exists (use --overwrite to replace it)"
++            )
++
++
++def _make_dir(target: Path) -> None:
++    try:
++        target.mkdir(parents=True, exist_ok=True)
++    except (FileExistsError, NotADirectoryError):
++        raise OverwriteError(f"{target}: exists and is not a directory") from None
++    except OSError as exc:
++        raise TarxError(f"{target}: {exc.strerror or exc}") from None
++
++
++def _write_file(tar: tarfile.TarFile, member: tarfile.TarInfo, target: Path) -> None:
++    _make_dir(target.parent)
++    # Remove an existing symlink first: writing "through" it would escape dest.
++    if os.path.islink(target):
++        os.unlink(target)
++    try:
++        # For a hard-link member this resolves to the linked member's content.
++        source = tar.extractfile(member)
++    except KeyError:
++        raise ArchiveError(
++            f"{member.name}: link target {member.linkname!r} is not in the archive"
++        ) from None
++    except _READ_ERRORS:
++        raise ArchiveError(f"{member.name}: cannot read member from archive") from None
++    if source is None:  # pragma: no cover - only for non-regular members
++        return
++    try:
++        with source, open(target, "wb") as out:
++            while True:
++                try:
++                    chunk = source.read(1 << 16)
++                except _READ_ERRORS:
++                    # A truncated or corrupt archive, not a problem with the disk.
++                    raise ArchiveError(
++                        f"{member.name}: cannot read member from archive"
++                    ) from None
++                if not chunk:
++                    break
++                out.write(chunk)
++    except OSError as exc:
++        raise TarxError(f"{target}: {exc.strerror or exc}") from None
++
++    if member.mode & 0o111:  # keep the executable bit, if the archive had one
++        os.chmod(target, os.stat(target).st_mode | 0o111)
++    os.utime(target, (member.mtime, member.mtime))
++
++
++def extract_archive(
++    archive: os.PathLike | str, dest: os.PathLike | str, overwrite: bool = False
++) -> int:
++    """Extract files and directories from *archive* into *dest*.
++
++    Relative paths and file contents are preserved. Existing files are only
++    replaced when *overwrite* is true. Returns the number of regular files
++    written.
++    """
++    path = os.fspath(archive)
++    dest_path = Path(dest)
++    dest_real = os.path.realpath(dest_path)
++
++    with _open_archive(path) as tar:
++        planned = _plan(_members(tar, path), dest_path)
++        _check_conflicts(planned, dest_path, dest_real, overwrite)
++
++        _make_dir(dest_path)
++        written = 0
++        for member, target, is_dir in planned:
++            _assert_inside(target, dest_real)
++            if is_dir:
++                _make_dir(target)
++            else:
++                _write_file(tar, member, target)
++                written += 1
++        return written
+diff --git a/tests/test_tarx.py b/tests/test_tarx.py
+new file mode 100644
+index 0000000..01398ca
+--- /dev/null
++++ b/tests/test_tarx.py
+@@ -0,0 +1,306 @@
++"""End-to-end tests for the tarx command line tool.
++
++Run with:  PYTHONPATH=src python -m unittest discover -s tests
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++import sys
++import tarfile
++import tempfile
++import unittest
++from pathlib import Path
++
++REPO_ROOT = Path(__file__).resolve().parent.parent
++SRC = REPO_ROOT / "src"
++
++
++def run_tarx(*args: str) -> subprocess.CompletedProcess:
++    env = dict(os.environ, PYTHONPATH=str(SRC))
++    return subprocess.run(
++        [sys.executable, "-m", "tarx", *args],
++        capture_output=True,
++        text=True,
++        env=env,
++        cwd=REPO_ROOT,
++    )
++
++
++def make_archive(path: Path, entries: dict[str, bytes | None], mode: str = "w") -> Path:
++    """Create a tar archive. A ``None`` value means "directory entry"."""
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with tarfile.open(path, mode) as tar:
++        for name, content in entries.items():
++            info = tarfile.TarInfo(name)
++            if content is None:
++                info.type = tarfile.DIRTYPE
++                info.mode = 0o755
++                tar.addfile(info)
++            else:
++                info.size = len(content)
++                info.mode = 0o644
++                import io
++
++                tar.addfile(info, io.BytesIO(content))
++    return path
++
++
++class TarxTestCase(unittest.TestCase):
++    def setUp(self) -> None:
++        self._tmp = tempfile.TemporaryDirectory()
++        self.tmp = Path(self._tmp.name)
++        self.addCleanup(self._tmp.cleanup)
++
++    def photos(self, name: str = "photos.tar.gz", mode: str = "w:gz") -> Path:
++        return make_archive(
++            self.tmp / name,
++            {"photos/a.jpg": b"aaa", "photos/b.jpg": b"bbb"},
++            mode=mode,
++        )
++
++
++class TestList(TarxTestCase):
++    def test_lists_members_in_archive_order(self) -> None:
++        archive = make_archive(
++            self.tmp / "ordered.tar",
++            {"z.txt": b"z", "a.txt": b"a", "m/": None, "m/n.txt": b"n"},
++        )
++        result = run_tarx("list", str(archive))
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(
++            result.stdout.splitlines(), ["z.txt", "a.txt", "m", "m/n.txt"]
++        )
++
++    def test_lists_gzip_archive(self) -> None:
++        result = run_tarx("list", str(self.photos()))
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "photos/a.jpg\nphotos/b.jpg\n")
++
++    def test_lists_tgz_archive(self) -> None:
++        result = run_tarx("list", str(self.photos("photos.tgz")))
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "photos/a.jpg\nphotos/b.jpg\n")
++
++    def test_missing_archive_exits_2(self) -> None:
++        result = run_tarx("list", str(self.tmp / "nope.tar"))
++        self.assertEqual(result.returncode, 2)
++        self.assertEqual(result.stdout, "")
++        self.assertTrue(result.stderr.strip())
++
++    def test_invalid_archive_exits_2(self) -> None:
++        bogus = self.tmp / "bogus.tar"
++        bogus.write_bytes(b"this is not a tar archive at all")
++        result = run_tarx("list", str(bogus))
++        self.assertEqual(result.returncode, 2)
++        self.assertTrue(result.stderr.strip())
++
++    def test_corrupt_gzip_exits_2(self) -> None:
++        archive = self.photos()
++        data = bytearray(archive.read_bytes())
++        del data[len(data) // 2 :]  # truncate mid-stream
++        broken = self.tmp / "broken.tar.gz"
++        broken.write_bytes(bytes(data))
++        result = run_tarx("list", str(broken))
++        self.assertEqual(result.returncode, 2)
++        self.assertTrue(result.stderr.strip())
++
++
++class TestExtract(TarxTestCase):
++    def test_extracts_files_and_reports_count(self) -> None:
++        archive = self.photos()
++        out = self.tmp / "out"
++        result = run_tarx("extract", str(archive), str(out))
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "extracted 2 files\n")
++        self.assertEqual((out / "photos/a.jpg").read_bytes(), b"aaa")
++        self.assertEqual((out / "photos/b.jpg").read_bytes(), b"bbb")
++
++    def test_extracts_plain_tar_with_nested_dirs(self) -> None:
++        archive = make_archive(
++            self.tmp / "tree.tar",
++            {
++                "top/": None,
++                "top/one.txt": b"1",
++                "top/sub/": None,
++                "top/sub/two.txt": b"22",
++                "top/sub/deep/three.bin": b"\x00\x01\x02",
++            },
++        )
++        out = self.tmp / "tree-out"
++        result = run_tarx("extract", str(archive), str(out))
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "extracted 3 files\n")
++        self.assertTrue((out / "top/sub").is_dir())
++        self.assertEqual((out / "top/sub/two.txt").read_bytes(), b"22")
++        self.assertEqual((out / "top/sub/deep/three.bin").read_bytes(), b"\x00\x01\x02")
++
++    def test_empty_archive_extracts_nothing(self) -> None:
++        archive = make_archive(self.tmp / "empty.tar", {})
++        out = self.tmp / "empty-out"
++        result = run_tarx("extract", str(archive), str(out))
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "extracted 0 files\n")
++        self.assertTrue(out.is_dir())
++
++    def test_second_extract_without_overwrite_exits_3(self) -> None:
++        archive = self.photos()
++        out = self.tmp / "out"
++        self.assertEqual(run_tarx("extract", str(archive), str(out)).returncode, 0)
++        result = run_tarx("extract", str(archive), str(out))
++        self.assertEqual(result.returncode, 3)
++        self.assertEqual(result.stdout, "")
++        self.assertTrue(result.stderr.strip())
++
++    def test_overwrite_replaces_existing_files(self) -> None:
++        archive = self.photos()
++        out = self.tmp / "out"
++        (out / "photos").mkdir(parents=True)
++        (out / "photos/a.jpg").write_bytes(b"stale contents")
++        result = run_tarx("extract", str(archive), str(out), "--overwrite")
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "extracted 2 files\n")
++        self.assertEqual((out / "photos/a.jpg").read_bytes(), b"aaa")
++
++    def test_conflict_leaves_no_partial_extraction(self) -> None:
++        archive = make_archive(
++            self.tmp / "many.tar",
++            {"a.txt": b"a", "b.txt": b"b", "c.txt": b"c"},
++        )
++        out = self.tmp / "out"
++        out.mkdir()
++        (out / "c.txt").write_bytes(b"mine")  # conflict on the *last* member
++        result = run_tarx("extract", str(archive), str(out))
++        self.assertEqual(result.returncode, 3)
++        self.assertFalse((out / "a.txt").exists())
++        self.assertFalse((out / "b.txt").exists())
++        self.assertEqual((out / "c.txt").read_bytes(), b"mine")
++
++    def test_existing_directory_is_reused_without_overwrite(self) -> None:
++        archive = self.photos()
++        out = self.tmp / "out"
++        (out / "photos").mkdir(parents=True)  # directory exists, files do not
++        result = run_tarx("extract", str(archive), str(out))
++        self.assertEqual(result.returncode, 0, result.stderr)
++
++    def test_missing_archive_exits_2(self) -> None:
++        result = run_tarx("extract", str(self.tmp / "nope.tar.gz"), str(self.tmp / "o"))
++        self.assertEqual(result.returncode, 2)
++        self.assertFalse((self.tmp / "o").exists())
++
++    def test_invalid_archive_exits_2(self) -> None:
++        bogus = self.tmp / "bogus.tgz"
++        bogus.write_bytes(b"\x1f\x8b not really gzip")
++        result = run_tarx("extract", str(bogus), str(self.tmp / "o"))
++        self.assertEqual(result.returncode, 2)
++        self.assertTrue(result.stderr.strip())
++
++    def test_executable_bit_is_preserved(self) -> None:
++        archive = self.tmp / "script.tar"
++        with tarfile.open(archive, "w") as tar:
++            import io
++
++            info = tarfile.TarInfo("run.sh")
++            payload = b"#!/bin/sh\necho hi\n"
++            info.size = len(payload)
++            info.mode = 0o755
++            tar.addfile(info, io.BytesIO(payload))
++        out = self.tmp / "out"
++        self.assertEqual(run_tarx("extract", str(archive), str(out)).returncode, 0)
++        self.assertTrue(os.access(out / "run.sh", os.X_OK))
++
++
++class TestPathSafety(TarxTestCase):
++    def test_absolute_member_is_refused(self) -> None:
++        archive = make_archive(self.tmp / "abs.tar", {"/etc/evil": b"x"})
++        result = run_tarx("extract", str(archive), str(self.tmp / "out"))
++        self.assertEqual(result.returncode, 2)
++        self.assertFalse(Path("/etc/evil").exists())
++
++    def test_parent_traversal_member_is_refused(self) -> None:
++        archive = make_archive(self.tmp / "trav.tar", {"../escaped.txt": b"x"})
++        result = run_tarx("extract", str(archive), str(self.tmp / "out"))
++        self.assertEqual(result.returncode, 2)
++        self.assertFalse((self.tmp / "escaped.txt").exists())
++
++    def test_symlinked_directory_cannot_redirect_a_write(self) -> None:
++        outside = self.tmp / "outside"
++        outside.mkdir()
++        out = self.tmp / "out"
++        out.mkdir()
++        (out / "link").symlink_to(outside)
++        archive = make_archive(self.tmp / "link.tar", {"link/planted.txt": b"x"})
++        result = run_tarx("extract", str(archive), str(out))
++        self.assertEqual(result.returncode, 2)
++        self.assertFalse((outside / "planted.txt").exists())
++
++    def test_hard_link_member_is_written_as_a_copy(self) -> None:
++        archive = self.tmp / "hard.tar"
++        with tarfile.open(archive, "w") as tar:
++            import io
++
++            payload = b"shared contents"
++            info = tarfile.TarInfo("orig.txt")
++            info.size = len(payload)
++            tar.addfile(info, io.BytesIO(payload))
++            link = tarfile.TarInfo("second.txt")
++            link.type = tarfile.LNKTYPE
++            link.linkname = "orig.txt"
++            tar.addfile(link)
++        out = self.tmp / "out"
++        result = run_tarx("extract", str(archive), str(out))
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "extracted 2 files\n")
++        self.assertEqual((out / "orig.txt").read_bytes(), b"shared contents")
++        self.assertEqual((out / "second.txt").read_bytes(), b"shared contents")
++
++    def test_dangling_hard_link_member_exits_2(self) -> None:
++        archive = self.tmp / "dangling.tar"
++        with tarfile.open(archive, "w") as tar:
++            link = tarfile.TarInfo("second.txt")
++            link.type = tarfile.LNKTYPE
++            link.linkname = "missing.txt"
++            tar.addfile(link)
++        result = run_tarx("extract", str(archive), str(self.tmp / "out"))
++        self.assertEqual(result.returncode, 2)
++        self.assertTrue(result.stderr.strip())
++
++    def test_symlink_members_are_skipped(self) -> None:
++        archive = self.tmp / "links.tar"
++        with tarfile.open(archive, "w") as tar:
++            import io
++
++            payload = b"real"
++            info = tarfile.TarInfo("real.txt")
++            info.size = len(payload)
++            tar.addfile(info, io.BytesIO(payload))
++            link = tarfile.TarInfo("escape")
++            link.type = tarfile.SYMTYPE
++            link.linkname = "/etc/passwd"
++            tar.addfile(link)
++        out = self.tmp / "out"
++        result = run_tarx("extract", str(archive), str(out))
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, "extracted 1 files\n")
++        self.assertEqual((out / "real.txt").read_bytes(), b"real")
++        self.assertFalse((out / "escape").exists())
++        # ...but they are still listed, since they are members of the archive.
++        listed = run_tarx("list", str(archive))
++        self.assertEqual(listed.stdout.splitlines(), ["real.txt", "escape"])
++
++
++class TestUsage(TarxTestCase):
++    def test_no_command_is_a_usage_error(self) -> None:
++        result = run_tarx()
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn("usage", result.stderr.lower())
++
++    def test_unknown_command_is_a_usage_error(self) -> None:
++        result = run_tarx("frobnicate", "x.tar")
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn("usage", result.stderr.lower())
++
++
++if __name__ == "__main__":
++    unittest.main()
