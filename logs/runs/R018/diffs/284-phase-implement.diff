@@ -1,0 +1,2212 @@
+diff --git a/.gitignore b/.gitignore
+index 75c6182..1fe89f7 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,3 +1,20 @@
+ __pycache__/
+ *.pyc
+ .pytest_cache/
++
++# Python environments and build output
++.venv/
++venv/
++build/
++dist/
++*.egg-info/
++
++# Local bookmark stores created by running the tool from the repository root
++bookmarks.db
++
++# Editor and OS noise
++.vscode/
++.idea/
++*.swp
++.DS_Store
++Thumbs.db
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..ea78527
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,17 @@
++# Bookmark Manager CLI — project configuration.
++#
++# Deliberately minimal (constitution Principle IV): there is no build backend and no
++# packaging metadata, because the tool is run as `python -m bookmarks` with `src/` on
++# PYTHONPATH (FR-026) and is never installed. The only two things declared here are the
++# supported Python floor and the test-runner configuration.
++
++[project]
++# The minimum supported Python version, declared exactly once for the whole project
++# (constitution, Additional Constraints). No name/version/dependencies: nothing builds
++# or installs this tree, and the runtime has no third-party dependency at all (FR-025).
++requires-python = ">=3.11"
++
++[tool.pytest.ini_options]
++# Resolves `import bookmarks` from src/ with no install step (research R-009).
++pythonpath = ["src"]
++testpaths = ["tests"]
+diff --git a/specs/001-bookmark-manager-cli/tasks.md b/specs/001-bookmark-manager-cli/tasks.md
+index 3df216d..261499b 100644
+--- a/specs/001-bookmark-manager-cli/tasks.md
++++ b/specs/001-bookmark-manager-cli/tasks.md
+@@ -39,9 +39,9 @@ R-010).
+ 
+ **Purpose**: Project skeleton and test-runner configuration
+ 
+-- [ ] T001 Create the package and test skeleton: directories `src/bookmarks/` and `tests/`, plus an empty `src/bookmarks/__init__.py` as the package marker (no code in it — research R-010)
+-- [ ] T002 Create `pyproject.toml` at the repository root declaring `requires-python = ">=3.11"` (the floor, declared exactly once per the constitution's Additional Constraints) and `[tool.pytest.ini_options]` with `pythonpath = ["src"]` and `testpaths = ["tests"]` (research R-009). Add no build backend, no packaging metadata and no third-party dependency
+-- [ ] T003 Verify the configuration resolves by running `pytest --collect-only` from the repository root against the still-empty `tests/` directory: it must exit without import errors, proving `pythonpath = ["src"]` is in effect before any test is written
++- [X] T001 Create the package and test skeleton: directories `src/bookmarks/` and `tests/`, plus an empty `src/bookmarks/__init__.py` as the package marker (no code in it — research R-010)
++- [X] T002 Create `pyproject.toml` at the repository root declaring `requires-python = ">=3.11"` (the floor, declared exactly once per the constitution's Additional Constraints) and `[tool.pytest.ini_options]` with `pythonpath = ["src"]` and `testpaths = ["tests"]` (research R-009). Add no build backend, no packaging metadata and no third-party dependency
++- [X] T003 Verify the configuration resolves by running `pytest --collect-only` from the repository root against the still-empty `tests/` directory: it must exit without import errors, proving `pythonpath = ["src"]` is in effect before any test is written
+ 
+ ---
+ 
+@@ -52,14 +52,14 @@ needs all three
+ 
+ **⚠️ CRITICAL**: No user story work can begin until this phase is complete
+ 
+-- [ ] T004 Define `BookmarkError(Exception)` in `src/bookmarks/store.py` carrying `message` and `status` fields, per research R-008: one exception type, raised at the point of detection, with the exit status as data rather than three near-empty subclasses
+-- [ ] T005 Add the schema to `src/bookmarks/store.py` as the two `CREATE TABLE IF NOT EXISTS` statements quoted verbatim from data-model.md: `bookmarks (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, title TEXT NOT NULL DEFAULT '')` and `tags (bookmark_id INTEGER NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE, tag TEXT NOT NULL, PRIMARY KEY (bookmark_id, tag))`. `AUTOINCREMENT` is load-bearing for FR-006 (never-reused identifiers) and the composite primary key enforces FR-010's at-most-once rule in storage — neither may be dropped. Add no index on `tags(tag)` and no `UNIQUE` on `bookmarks.url` (data-model.md, research R-006)
+-- [ ] T006 Implement `open_store(path)` in `src/bookmarks/store.py` as the exact three-step sequence of research R-002 (FR-002, FR-003, FR-003a): percent-encode the path before building the SQLite URI so a `?` or `#` in it is not read as URI syntax; if the file is absent open `file:<path>?mode=rwc` and run the schema; if it exists open `file:<path>?mode=rw` (never `rwc`) and immediately run `SELECT name FROM sqlite_master WHERE type='table'` — `sqlite3.DatabaseError` → `BookmarkError(status=1)` "not a bookmark database"; a non-empty table set containing neither `bookmarks` nor `tags` → `BookmarkError(status=1)` "another program's database"; an empty table set → initialise the schema and continue; our tables → use as-is. Map `sqlite3.OperationalError` from connect or first query (missing parent directory, permission denied) to `BookmarkError(status=1)`. Run `PRAGMA foreign_keys = ON` on every connection, since SQLite leaves foreign keys off by default and the `ON DELETE CASCADE` would otherwise do nothing. Every diagnostic names the path **and** the reason (Principle II). Create no file and no directory on any failing branch, and never overwrite, truncate, re-initialise or repair an existing file
+-- [ ] T007 [P] Implement `build_parser()` in `src/bookmarks/cli.py`: `ArgumentParser(prog="python -m bookmarks")` — `prog` must be set explicitly because argparse's default under `-m` is the literal `__main__.py`, which would misname the tool in every diagnostic (research R-003) — the global option `--db PATH` defaulting to `bookmarks.db` in the current working directory and declared **before** the command (FR-002, CLI contract), and `add_subparsers(dest="command", required=True)`. Register no subcommands yet; each user story adds its own. Do **not** override `ArgumentParser.error`: its default already writes a specific diagnostic to stderr and exits 2, which is exactly what FR-024 demands (research R-003)
+-- [ ] T008 Implement `main(argv)` in `src/bookmarks/cli.py`: reconfigure the streams once at the top with `sys.stdout.reconfigure(encoding="utf-8", newline="")` and `sys.stderr.reconfigure(encoding="utf-8")` (FR-023a, FR-019a, research R-007); parse argv; dispatch to the command handler; and wrap the dispatch in exactly **one** `except BookmarkError` handler that writes `f"bookmarks: {message}"` to stderr and returns `status`. Results are written to stdout only after the work succeeds, so a failing command emits no partial output (FR-023). Do not catch `sqlite3.Error` broadly — unexpected database faults must propagate and crash rather than be folded into one of the four documented statuses (research R-008)
+-- [ ] T009 Create `src/bookmarks/__main__.py` containing only `sys.exit(main(sys.argv[1:]))` plus its import, so `python -m bookmarks` is the real entry point with `src/` on `PYTHONPATH` (FR-001, FR-026)
+-- [ ] T010 [P] Create `tests/conftest.py` with three fixtures used by every test file: a scratch-store fixture giving a fresh `tmp_path`-based `--db` path per test; a `run_cli` helper invoking the real CLI as a subprocess — `subprocess.run([sys.executable, "-m", "bookmarks", ...], env={**os.environ, "PYTHONPATH": "src"}, capture_output=True)` — returning status, stdout and stderr, because an in-process call cannot observe a real process exit status (research R-009); and a bulk seeder that inserts N bookmarks through `store.py` directly rather than through N subprocess calls
+-- [ ] T011 Write the store-lifecycle tests in `tests/test_store.py`, exercising `store.open_store` directly (no subcommand needed yet) and naming the requirement each test covers: default path is `bookmarks.db` in the working directory and `--db` overrides it (FR-002); an absent path with an existing parent is created with its schema (FR-003); an existing store is opened and appended to, never reset (FR-003); a path whose parent directory is missing raises status 1 and creates **no** directory and **no** file (FR-003a); a plain text file raises status 1 and is byte-for-byte unchanged afterwards, asserted by comparing SHA-256 before and after (FR-003a, SC-009); a valid SQLite database holding another program's tables raises status 1 and is left untouched (FR-003a, SC-009); and a permission-denied case (`chmod 000`) that **skips itself** under `os.geteuid() == 0` with an explicit skip reason, because root bypasses the mode bits and the test would otherwise pass without proving anything (research R-002 test-environment caveat)
++- [X] T004 Define `BookmarkError(Exception)` in `src/bookmarks/store.py` carrying `message` and `status` fields, per research R-008: one exception type, raised at the point of detection, with the exit status as data rather than three near-empty subclasses
++- [X] T005 Add the schema to `src/bookmarks/store.py` as the two `CREATE TABLE IF NOT EXISTS` statements quoted verbatim from data-model.md: `bookmarks (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, title TEXT NOT NULL DEFAULT '')` and `tags (bookmark_id INTEGER NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE, tag TEXT NOT NULL, PRIMARY KEY (bookmark_id, tag))`. `AUTOINCREMENT` is load-bearing for FR-006 (never-reused identifiers) and the composite primary key enforces FR-010's at-most-once rule in storage — neither may be dropped. Add no index on `tags(tag)` and no `UNIQUE` on `bookmarks.url` (data-model.md, research R-006)
++- [X] T006 Implement `open_store(path)` in `src/bookmarks/store.py` as the exact three-step sequence of research R-002 (FR-002, FR-003, FR-003a): percent-encode the path before building the SQLite URI so a `?` or `#` in it is not read as URI syntax; if the file is absent open `file:<path>?mode=rwc` and run the schema; if it exists open `file:<path>?mode=rw` (never `rwc`) and immediately run `SELECT name FROM sqlite_master WHERE type='table'` — `sqlite3.DatabaseError` → `BookmarkError(status=1)` "not a bookmark database"; a non-empty table set containing neither `bookmarks` nor `tags` → `BookmarkError(status=1)` "another program's database"; an empty table set → initialise the schema and continue; our tables → use as-is. Map `sqlite3.OperationalError` from connect or first query (missing parent directory, permission denied) to `BookmarkError(status=1)`. Run `PRAGMA foreign_keys = ON` on every connection, since SQLite leaves foreign keys off by default and the `ON DELETE CASCADE` would otherwise do nothing. Every diagnostic names the path **and** the reason (Principle II). Create no file and no directory on any failing branch, and never overwrite, truncate, re-initialise or repair an existing file
++- [X] T007 [P] Implement `build_parser()` in `src/bookmarks/cli.py`: `ArgumentParser(prog="python -m bookmarks")` — `prog` must be set explicitly because argparse's default under `-m` is the literal `__main__.py`, which would misname the tool in every diagnostic (research R-003) — the global option `--db PATH` defaulting to `bookmarks.db` in the current working directory and declared **before** the command (FR-002, CLI contract), and `add_subparsers(dest="command", required=True)`. Register no subcommands yet; each user story adds its own. Do **not** override `ArgumentParser.error`: its default already writes a specific diagnostic to stderr and exits 2, which is exactly what FR-024 demands (research R-003)
++- [X] T008 Implement `main(argv)` in `src/bookmarks/cli.py`: reconfigure the streams once at the top with `sys.stdout.reconfigure(encoding="utf-8", newline="")` and `sys.stderr.reconfigure(encoding="utf-8")` (FR-023a, FR-019a, research R-007); parse argv; dispatch to the command handler; and wrap the dispatch in exactly **one** `except BookmarkError` handler that writes `f"bookmarks: {message}"` to stderr and returns `status`. Results are written to stdout only after the work succeeds, so a failing command emits no partial output (FR-023). Do not catch `sqlite3.Error` broadly — unexpected database faults must propagate and crash rather than be folded into one of the four documented statuses (research R-008)
++- [X] T009 Create `src/bookmarks/__main__.py` containing only `sys.exit(main(sys.argv[1:]))` plus its import, so `python -m bookmarks` is the real entry point with `src/` on `PYTHONPATH` (FR-001, FR-026)
++- [X] T010 [P] Create `tests/conftest.py` with three fixtures used by every test file: a scratch-store fixture giving a fresh `tmp_path`-based `--db` path per test; a `run_cli` helper invoking the real CLI as a subprocess — `subprocess.run([sys.executable, "-m", "bookmarks", ...], env={**os.environ, "PYTHONPATH": "src"}, capture_output=True)` — returning status, stdout and stderr, because an in-process call cannot observe a real process exit status (research R-009); and a bulk seeder that inserts N bookmarks through `store.py` directly rather than through N subprocess calls
++- [X] T011 Write the store-lifecycle tests in `tests/test_store.py`, exercising `store.open_store` directly (no subcommand needed yet) and naming the requirement each test covers: default path is `bookmarks.db` in the working directory and `--db` overrides it (FR-002); an absent path with an existing parent is created with its schema (FR-003); an existing store is opened and appended to, never reset (FR-003); a path whose parent directory is missing raises status 1 and creates **no** directory and **no** file (FR-003a); a plain text file raises status 1 and is byte-for-byte unchanged afterwards, asserted by comparing SHA-256 before and after (FR-003a, SC-009); a valid SQLite database holding another program's tables raises status 1 and is left untouched (FR-003a, SC-009); and a permission-denied case (`chmod 000`) that **skips itself** under `os.geteuid() == 0` with an explicit skip reason, because root bypasses the mode bits and the test would otherwise pass without proving anything (research R-002 test-environment caveat)
+ 
+ **Checkpoint**: `PYTHONPATH=src python -m bookmarks --help` exits 0, bare `python -m bookmarks`
+ exits 2, and `tests/test_store.py` passes. User story work can now begin.
+@@ -80,19 +80,19 @@ ascending identifier order. Also add a bookmark whose URL fails the scheme check
+ 
+ > **Write these tests FIRST and confirm they FAIL before implementing T014–T020.**
+ 
+-- [ ] T012 [P] [US1] Write `tests/test_add.py` covering FR-005 … FR-010 through `run_cli`, each test naming its requirement: `add URL` prints the identifier **and nothing else** on stdout (FR-005); identifiers start at 1 in a fresh store and increase (FR-006); a URL not beginning with the literal `http://` or `https://` writes a diagnostic to stderr naming the rejected URL **and** the accepted schemes, stores nothing, writes nothing to stdout, and exits 2 — parametrised over at least five malformed inputs: `ftp://example.com`, bare `example.com`, the empty string, `"see https://x"` (scheme not at the start), and `HTTP://example.com` (FR-007, SC-004); `--title TITLE` sets the title and omitting it yields the empty string, never `NULL` and never a placeholder (FR-008); `--tags` is comma-separated and omitting it yields no tags (FR-009); and the full normalisation table from data-model.md asserted case by case — `python,cli` → `cli,python`, `python,,docs` → `docs,python`, `""` → none, `"  python  ,  docs "` → `docs,python`, `Python,python,PYTHON` → `python`, `Python,Docs` → `docs,python` (FR-010)
+-- [ ] T013 [P] [US1] Write the unfiltered-listing tests in `tests/test_list_search.py` covering FR-011, FR-014, FR-015 and FR-004: `list` prints every bookmark in ascending identifier order (FR-011); each line is **exactly four tab-separated fields** — identifier, URL, title, tags joined by `,` in alphabetical order — with an empty title and an empty tags field printed as empty text so a bookmark with no title and no tags ends in two consecutive tabs and the line still carries three tabs (FR-014); an empty store prints nothing on stdout and exits 0 (FR-015); and bookmarks added by earlier, separate processes are returned unchanged by a later one (FR-004). Include a title containing a tab and a title containing a newline, asserting they are stored and returned **unchanged** — the TSV view is deliberately unescaped and therefore ambiguous for such values (CLI contract, spec Assumptions)
++- [X] T012 [P] [US1] Write `tests/test_add.py` covering FR-005 … FR-010 through `run_cli`, each test naming its requirement: `add URL` prints the identifier **and nothing else** on stdout (FR-005); identifiers start at 1 in a fresh store and increase (FR-006); a URL not beginning with the literal `http://` or `https://` writes a diagnostic to stderr naming the rejected URL **and** the accepted schemes, stores nothing, writes nothing to stdout, and exits 2 — parametrised over at least five malformed inputs: `ftp://example.com`, bare `example.com`, the empty string, `"see https://x"` (scheme not at the start), and `HTTP://example.com` (FR-007, SC-004); `--title TITLE` sets the title and omitting it yields the empty string, never `NULL` and never a placeholder (FR-008); `--tags` is comma-separated and omitting it yields no tags (FR-009); and the full normalisation table from data-model.md asserted case by case — `python,cli` → `cli,python`, `python,,docs` → `docs,python`, `""` → none, `"  python  ,  docs "` → `docs,python`, `Python,python,PYTHON` → `python`, `Python,Docs` → `docs,python` (FR-010)
++- [X] T013 [P] [US1] Write the unfiltered-listing tests in `tests/test_list_search.py` covering FR-011, FR-014, FR-015 and FR-004: `list` prints every bookmark in ascending identifier order (FR-011); each line is **exactly four tab-separated fields** — identifier, URL, title, tags joined by `,` in alphabetical order — with an empty title and an empty tags field printed as empty text so a bookmark with no title and no tags ends in two consecutive tabs and the line still carries three tabs (FR-014); an empty store prints nothing on stdout and exits 0 (FR-015); and bookmarks added by earlier, separate processes are returned unchanged by a later one (FR-004). Include a title containing a tab and a title containing a newline, asserting they are stored and returned **unchanged** — the TSV view is deliberately unescaped and therefore ambiguous for such values (CLI contract, spec Assumptions)
+ 
+ ### Implementation for User Story 1
+ 
+-- [ ] T014 [US1] Implement `normalise_tags(raw)` in `src/bookmarks/store.py` performing the five steps in exactly the order data-model.md specifies: split on `,`, strip surrounding whitespace from each entry, drop entries that are empty after stripping, lower-case each remaining entry, then collapse duplicates. No stemming, no synonyms, no Unicode form folding beyond `str.lower()`. This one function must later normalise the `--tag` filter value too, which is what guarantees the two sides can never disagree (FR-010, FR-012)
+-- [ ] T015 [US1] Implement the URL scheme check in `src/bookmarks/store.py` as a literal prefix test for `http://` or `https://` — no parsing, no host validation, no reachability check (spec Assumptions) — raising `BookmarkError(status=2)` whose message names the rejected URL and the accepted schemes. The check must run **before** any insert so a rejected URL leaves the store exactly as it was (FR-007)
+-- [ ] T016 [US1] Implement `add_bookmark(connection, url, title, tags)` in `src/bookmarks/store.py`: run the scheme check, insert into `bookmarks` with `title` defaulting to `''`, insert one row per normalised tag into `tags`, commit, and return the new identifier from `AUTOINCREMENT` (FR-005, FR-006, FR-008, FR-009, FR-010). Do not de-duplicate on `url` — the same address may be saved more than once, each time receiving its own identifier (spec Edge Cases)
+-- [ ] T017 [US1] Implement `list_bookmarks(connection)` in `src/bookmarks/store.py` returning every bookmark in ascending `id` order, each with its tags sorted by Python's default string ordering (ordinary alphabetical order, since stored tags are always lower case) (FR-011, FR-014)
+-- [ ] T018 [US1] Implement the TSV renderer in `src/bookmarks/cli.py`: one line per bookmark, exactly four tab-separated fields in the order identifier, URL, title, comma-joined alphabetical tags, emitted raw with **no escaping** (FR-014, CLI contract). This renderer is shared with `search` in US2 — write it once
+-- [ ] T019 [US1] Register the `add` subparser and its handler in `src/bookmarks/cli.py`: positional `url`, optional `--title` defaulting to `""`, optional `--tags`. The handler opens the store, calls `add_bookmark`, and prints the identifier followed by a newline to stdout and nothing else (FR-005, FR-008, FR-009)
+-- [ ] T020 [US1] Register the `list` subparser and its handler in `src/bookmarks/cli.py` with no options yet (US2 adds `--tag`): open the store, call `list_bookmarks`, render through T018's renderer to stdout, and exit 0 even when there is nothing to print (FR-011, FR-014, FR-015)
+-- [ ] T021 [US1] Extend `tests/test_store.py` with the subprocess-level store-failure assertions now that `add` and `list` exist: `--db` pointing into a missing parent directory, at a plain text file, and at another program's SQLite database each exits **1** with the diagnostic on stderr and **nothing on stdout**, for both a read command (`list`) and a write command (`add`), with the target file's SHA-256 unchanged afterwards (FR-003a, SC-009). Include the documented consequence that a read-only store file fails with status 1 even for `list`, because all commands open the store read-write (research R-002, CLI contract)
++- [X] T014 [US1] Implement `normalise_tags(raw)` in `src/bookmarks/store.py` performing the five steps in exactly the order data-model.md specifies: split on `,`, strip surrounding whitespace from each entry, drop entries that are empty after stripping, lower-case each remaining entry, then collapse duplicates. No stemming, no synonyms, no Unicode form folding beyond `str.lower()`. This one function must later normalise the `--tag` filter value too, which is what guarantees the two sides can never disagree (FR-010, FR-012)
++- [X] T015 [US1] Implement the URL scheme check in `src/bookmarks/store.py` as a literal prefix test for `http://` or `https://` — no parsing, no host validation, no reachability check (spec Assumptions) — raising `BookmarkError(status=2)` whose message names the rejected URL and the accepted schemes. The check must run **before** any insert so a rejected URL leaves the store exactly as it was (FR-007)
++- [X] T016 [US1] Implement `add_bookmark(connection, url, title, tags)` in `src/bookmarks/store.py`: run the scheme check, insert into `bookmarks` with `title` defaulting to `''`, insert one row per normalised tag into `tags`, commit, and return the new identifier from `AUTOINCREMENT` (FR-005, FR-006, FR-008, FR-009, FR-010). Do not de-duplicate on `url` — the same address may be saved more than once, each time receiving its own identifier (spec Edge Cases)
++- [X] T017 [US1] Implement `list_bookmarks(connection)` in `src/bookmarks/store.py` returning every bookmark in ascending `id` order, each with its tags sorted by Python's default string ordering (ordinary alphabetical order, since stored tags are always lower case) (FR-011, FR-014)
++- [X] T018 [US1] Implement the TSV renderer in `src/bookmarks/cli.py`: one line per bookmark, exactly four tab-separated fields in the order identifier, URL, title, comma-joined alphabetical tags, emitted raw with **no escaping** (FR-014, CLI contract). This renderer is shared with `search` in US2 — write it once
++- [X] T019 [US1] Register the `add` subparser and its handler in `src/bookmarks/cli.py`: positional `url`, optional `--title` defaulting to `""`, optional `--tags`. The handler opens the store, calls `add_bookmark`, and prints the identifier followed by a newline to stdout and nothing else (FR-005, FR-008, FR-009)
++- [X] T020 [US1] Register the `list` subparser and its handler in `src/bookmarks/cli.py` with no options yet (US2 adds `--tag`): open the store, call `list_bookmarks`, render through T018's renderer to stdout, and exit 0 even when there is nothing to print (FR-011, FR-014, FR-015)
++- [X] T021 [US1] Extend `tests/test_store.py` with the subprocess-level store-failure assertions now that `add` and `list` exist: `--db` pointing into a missing parent directory, at a plain text file, and at another program's SQLite database each exits **1** with the diagnostic on stderr and **nothing on stdout**, for both a read command (`list`) and a write command (`add`), with the target file's SHA-256 unchanged afterwards (FR-003a, SC-009). Include the documented consequence that a read-only store file fails with status 1 even for `list`, because all commands open the store read-write (research R-002, CLI contract)
+ 
+ **Checkpoint**: User Story 1 is fully functional and independently testable — quickstart scenarios
+ 1, 2, 7 and 8 pass, and this is the MVP.
+@@ -112,11 +112,11 @@ come back. Depends on bookmarks existing (US1) but nothing depends on it.
+ 
+ > **Write these tests FIRST and confirm they FAIL before implementing T023–T026.**
+ 
+-- [ ] T022 [US2] Extend `tests/test_list_search.py` with the filtering and search tests covering FR-012 and FR-013 (same file as T013, so sequential): `list --tag TAG` prints only bookmarks carrying a tag equal to TAG disregarding capitalisation, in ascending identifier order and in the same four-field layout as an unfiltered listing (FR-012); `--tag Python`, `--tag python` and `--tag " PYTHON "` select the same bookmarks, since TAG is trimmed and lower-cased before comparison (FR-012); `--tag py` returns **nothing** for a bookmark tagged `python`, proving the comparison is against whole tags and never a substring (FR-012, spec Edge Cases); a filter naming a tag no bookmark carries prints nothing and exits 0 (FR-015); a bookmark added with `--tags "Python,Docs"` is returned by both `--tag python` and `--tag PYTHON` with its tags field reading `docs,python` (US2 acceptance scenario 6); `search TEXT` matches title **and** URL case-insensitively, including a bookmark whose URL contains the text but whose title does not (FR-013); `search` with text appearing nowhere prints nothing and exits 0 (FR-015); empty `search ""` matches every bookmark (spec Edge Cases); and `search` text is matched **literally** with no wildcards, so `100%` searches for `100%` and `a_b` for `a_b` (CLI contract, research R-005)
+-- [ ] T023 [US2] Add the tag filter to `list_bookmarks(connection, tag=None)` in `src/bookmarks/store.py` as plain SQL `=` equality against the filter value passed through `normalise_tags` from T014 — whole-tag matching then comes free from `=` (FR-012, research R-005)
+-- [ ] T024 [US2] Implement `search_bookmarks(connection, text)` in `src/bookmarks/store.py` filtering candidate rows **in Python**, keeping those where `text.lower()` is a substring of `title.lower()` or of `url.lower()`, in ascending `id` order. Do **not** use SQL `LIKE` or `lower()`: both are ASCII-only by default, which would silently fail to fold case for a non-ASCII title, and `LIKE` would treat `%` and `_` in the user's text as wildcards (FR-013, research R-005)
+-- [ ] T025 [US2] Add the optional `--tag TAG` option to the `list` subparser in `src/bookmarks/cli.py` and pass it through to `list_bookmarks` (FR-012)
+-- [ ] T026 [US2] Register the `search` subparser and its handler in `src/bookmarks/cli.py`: required positional `TEXT`, handler calls `search_bookmarks` and renders through the shared TSV renderer from T018, exiting 0 on no match (FR-013, FR-014, FR-015)
++- [X] T022 [US2] Extend `tests/test_list_search.py` with the filtering and search tests covering FR-012 and FR-013 (same file as T013, so sequential): `list --tag TAG` prints only bookmarks carrying a tag equal to TAG disregarding capitalisation, in ascending identifier order and in the same four-field layout as an unfiltered listing (FR-012); `--tag Python`, `--tag python` and `--tag " PYTHON "` select the same bookmarks, since TAG is trimmed and lower-cased before comparison (FR-012); `--tag py` returns **nothing** for a bookmark tagged `python`, proving the comparison is against whole tags and never a substring (FR-012, spec Edge Cases); a filter naming a tag no bookmark carries prints nothing and exits 0 (FR-015); a bookmark added with `--tags "Python,Docs"` is returned by both `--tag python` and `--tag PYTHON` with its tags field reading `docs,python` (US2 acceptance scenario 6); `search TEXT` matches title **and** URL case-insensitively, including a bookmark whose URL contains the text but whose title does not (FR-013); `search` with text appearing nowhere prints nothing and exits 0 (FR-015); empty `search ""` matches every bookmark (spec Edge Cases); and `search` text is matched **literally** with no wildcards, so `100%` searches for `100%` and `a_b` for `a_b` (CLI contract, research R-005)
++- [X] T023 [US2] Add the tag filter to `list_bookmarks(connection, tag=None)` in `src/bookmarks/store.py` as plain SQL `=` equality against the filter value passed through `normalise_tags` from T014 — whole-tag matching then comes free from `=` (FR-012, research R-005)
++- [X] T024 [US2] Implement `search_bookmarks(connection, text)` in `src/bookmarks/store.py` filtering candidate rows **in Python**, keeping those where `text.lower()` is a substring of `title.lower()` or of `url.lower()`, in ascending `id` order. Do **not** use SQL `LIKE` or `lower()`: both are ASCII-only by default, which would silently fail to fold case for a non-ASCII title, and `LIKE` would treat `%` and `_` in the user's text as wildcards (FR-013, research R-005)
++- [X] T025 [US2] Add the optional `--tag TAG` option to the `list` subparser in `src/bookmarks/cli.py` and pass it through to `list_bookmarks` (FR-012)
++- [X] T026 [US2] Register the `search` subparser and its handler in `src/bookmarks/cli.py`: required positional `TEXT`, handler calls `search_bookmarks` and renders through the shared TSV renderer from T018, exiting 0 on no match (FR-013, FR-014, FR-015)
+ 
+ **Checkpoint**: User Stories 1 and 2 both work independently — quickstart scenario 3 passes.
+ 
+@@ -136,9 +136,9 @@ delete a non-numeric one (exit 2).
+ 
+ > **Write these tests FIRST and confirm they FAIL before implementing T028–T029.**
+ 
+-- [ ] T027 [P] [US3] Write `tests/test_delete.py` covering FR-016, FR-017 and FR-006: `delete ID` exits 0 and the bookmark, together with its tags, appears in no later `list`, `search` or `export` (FR-016, verifying the `ON DELETE CASCADE` actually fired — the tag rows must be gone, which is only true if `PRAGMA foreign_keys = ON` is set); deleting an identifier no bookmark holds writes a diagnostic **naming that identifier** to stderr, leaves the store unchanged, and exits **3** (FR-017); deleting an already-deleted identifier also exits 3 (US3 scenario 3); after deleting the highest identifier, the next `add` receives an identifier **greater than every identifier previously issued** — delete bookmark 2 of 2 and the next add must print `3`, not `2`, which is the single most likely thing to regress (FR-006, US3 scenario 4); and `delete abc` exits **2**, never 3, because a non-numeric identifier is a usage mistake while 3 means well-formed but absent (FR-024, data-model.md)
+-- [ ] T028 [US3] Implement `delete_bookmark(connection, id)` in `src/bookmarks/store.py`: issue the `DELETE`, and when the affected row count is 0 raise `BookmarkError(status=3)` with a message naming the identifier; otherwise commit, letting `ON DELETE CASCADE` remove the tag rows in one declaration rather than a second `DELETE` that could drift (FR-016, FR-017, research R-006)
+-- [ ] T029 [US3] Register the `delete` subparser and its handler in `src/bookmarks/cli.py`: positional `id` declared with `type=int` so argparse itself produces the precise diagnostic and status 2 for a non-numeric value, keeping status 3 strictly reserved for the well-formed-but-absent case (research R-003). The handler prints nothing to stdout on success and exits 0 (CLI contract)
++- [X] T027 [P] [US3] Write `tests/test_delete.py` covering FR-016, FR-017 and FR-006: `delete ID` exits 0 and the bookmark, together with its tags, appears in no later `list`, `search` or `export` (FR-016, verifying the `ON DELETE CASCADE` actually fired — the tag rows must be gone, which is only true if `PRAGMA foreign_keys = ON` is set); deleting an identifier no bookmark holds writes a diagnostic **naming that identifier** to stderr, leaves the store unchanged, and exits **3** (FR-017); deleting an already-deleted identifier also exits 3 (US3 scenario 3); after deleting the highest identifier, the next `add` receives an identifier **greater than every identifier previously issued** — delete bookmark 2 of 2 and the next add must print `3`, not `2`, which is the single most likely thing to regress (FR-006, US3 scenario 4); and `delete abc` exits **2**, never 3, because a non-numeric identifier is a usage mistake while 3 means well-formed but absent (FR-024, data-model.md)
++- [X] T028 [US3] Implement `delete_bookmark(connection, id)` in `src/bookmarks/store.py`: issue the `DELETE`, and when the affected row count is 0 raise `BookmarkError(status=3)` with a message naming the identifier; otherwise commit, letting `ON DELETE CASCADE` remove the tag rows in one declaration rather than a second `DELETE` that could drift (FR-016, FR-017, research R-006)
++- [X] T029 [US3] Register the `delete` subparser and its handler in `src/bookmarks/cli.py`: positional `id` declared with `type=int` so argparse itself produces the precise diagnostic and status 2 for a non-numeric value, keeping status 3 strictly reserved for the well-formed-but-absent case (research R-003). The handler prints nothing to stdout on success and exits 0 (CLI contract)
+ 
+ **Checkpoint**: User Stories 1–3 all work independently — quickstart scenario 4 passes.
+ 
+@@ -158,10 +158,10 @@ went in.
+ 
+ > **Write these tests FIRST and confirm they FAIL before implementing T031–T033.**
+ 
+-- [ ] T030 [P] [US4] Write `tests/test_export.py` covering FR-018 … FR-021 and SC-006: CSV output begins with exactly the header line `id,url,title,tags` followed by one row per bookmark in ascending identifier order, the tags column holding that bookmark's tags joined by `,` in alphabetical order (FR-018); fields containing a comma, a double quote or a line break are quoted with embedded quotes doubled (FR-019); every line, header included, ends with a single `\n` and **never** `\r\n` — assert on the raw bytes, with a line break inside a quoted field preserved as given (FR-019a); JSON is a single array of objects in ascending identifier order with `id` as a **number** not a string, plus `url`, `title` and `tags` as an array of strings in alphabetical order (FR-020); JSON is indented two spaces per nesting level, one key per line, ends with exactly one trailing newline, and writes non-ASCII characters literally rather than as `\uXXXX` escapes (FR-020a); an empty store prints the header line alone in CSV and `[]` plus a newline in JSON, both exiting 0 (FR-021, FR-020a); `--format xml` exits **2** with a diagnostic on stderr (FR-024); and the round-trip assertion that `csv.reader` and `json.load` recover every seeded value unchanged — including the embedded newline, the embedded quote and the non-ASCII title — because eyeballing quoted CSV is how round-trip bugs survive (SC-006)
+-- [ ] T031 [US4] Implement the CSV renderer in `src/bookmarks/cli.py` using `csv.writer(sys.stdout, lineterminator="\n")` — the explicit terminator overrides the module's RFC-4180 `\r\n` default (FR-019a) and works together with the `newline=""` set on stdout in T008, which is what keeps a line break inside a quoted field intact. Write the header `id,url,title,tags` then one row per bookmark from `list_bookmarks`. Do not hand-roll quoting: the module's quoting is correct and round-trip tested (FR-018, FR-019, research R-007)
+-- [ ] T032 [US4] Implement the JSON renderer in `src/bookmarks/cli.py` as `json.dumps(rows, indent=2, ensure_ascii=False)` followed by one explicit `"\n"` write, which makes the "exactly one trailing newline" guarantee visible in a single line. `id` must be emitted as a number and `tags` as an alphabetically sorted array (FR-020, FR-020a, research R-007)
+-- [ ] T033 [US4] Register the `export` subparser and its handler in `src/bookmarks/cli.py`: `--format` with `required=True` and `choices=["csv", "json"]`, so an unsupported value produces argparse's own diagnostic and exit 2 with no hand-written validation (FR-024, research R-003). The handler reads rows through the existing `list_bookmarks` — no new store function is needed — and dispatches to the T031 or T032 renderer (FR-018, FR-020)
++- [X] T030 [P] [US4] Write `tests/test_export.py` covering FR-018 … FR-021 and SC-006: CSV output begins with exactly the header line `id,url,title,tags` followed by one row per bookmark in ascending identifier order, the tags column holding that bookmark's tags joined by `,` in alphabetical order (FR-018); fields containing a comma, a double quote or a line break are quoted with embedded quotes doubled (FR-019); every line, header included, ends with a single `\n` and **never** `\r\n` — assert on the raw bytes, with a line break inside a quoted field preserved as given (FR-019a); JSON is a single array of objects in ascending identifier order with `id` as a **number** not a string, plus `url`, `title` and `tags` as an array of strings in alphabetical order (FR-020); JSON is indented two spaces per nesting level, one key per line, ends with exactly one trailing newline, and writes non-ASCII characters literally rather than as `\uXXXX` escapes (FR-020a); an empty store prints the header line alone in CSV and `[]` plus a newline in JSON, both exiting 0 (FR-021, FR-020a); `--format xml` exits **2** with a diagnostic on stderr (FR-024); and the round-trip assertion that `csv.reader` and `json.load` recover every seeded value unchanged — including the embedded newline, the embedded quote and the non-ASCII title — because eyeballing quoted CSV is how round-trip bugs survive (SC-006)
++- [X] T031 [US4] Implement the CSV renderer in `src/bookmarks/cli.py` using `csv.writer(sys.stdout, lineterminator="\n")` — the explicit terminator overrides the module's RFC-4180 `\r\n` default (FR-019a) and works together with the `newline=""` set on stdout in T008, which is what keeps a line break inside a quoted field intact. Write the header `id,url,title,tags` then one row per bookmark from `list_bookmarks`. Do not hand-roll quoting: the module's quoting is correct and round-trip tested (FR-018, FR-019, research R-007)
++- [X] T032 [US4] Implement the JSON renderer in `src/bookmarks/cli.py` as `json.dumps(rows, indent=2, ensure_ascii=False)` followed by one explicit `"\n"` write, which makes the "exactly one trailing newline" guarantee visible in a single line. `id` must be emitted as a number and `tags` as an alphabetically sorted array (FR-020, FR-020a, research R-007)
++- [X] T033 [US4] Register the `export` subparser and its handler in `src/bookmarks/cli.py`: `--format` with `required=True` and `choices=["csv", "json"]`, so an unsupported value produces argparse's own diagnostic and exit 2 with no hand-written validation (FR-024, research R-003). The handler reads rows through the existing `list_bookmarks` — no new store function is needed — and dispatches to the T031 or T032 renderer (FR-018, FR-020)
+ 
+ **Checkpoint**: All four user stories are independently functional — quickstart scenarios 5 and 6
+ pass.
+@@ -173,13 +173,13 @@ pass.
+ **Purpose**: The contract-wide guarantees, the performance budget, and the constitution's quality
+ gates
+ 
+-- [ ] T034 [P] Write `tests/test_cli_contract.py` covering the cross-cutting contract: the tool is invocable as `python -m bookmarks [--db PATH] COMMAND ...` and supports all five commands (FR-001, FR-026); every command that completes its work exits 0 (FR-022); results go to stdout and diagnostics to stderr, and a failing command writes **nothing** to stdout — assert stdout is empty for a rejected URL, an unusable store and a missing identifier (FR-023); non-ASCII titles, tags and URLs are emitted correctly under `LC_ALL=C LANG=C` for `list`, `search` and `export --format json` with no `UnicodeEncodeError`, which is the test that fails loudly if stream reconfiguration was skipped (FR-023a, quickstart scenario 10); and the exit-status map is complete — bare invocation, unknown command, missing required argument, non-numeric `delete` identifier and unsupported `--format` all exit **2** with a diagnostic naming what was missing or invalid, while `--help` on the tool and on each command prints usage to stdout and exits **0** (FR-024, quickstart scenario 9)
+-- [ ] T035 [P] Write `tests/test_performance.py` covering SC-002 and SC-007 on a 1,000-bookmark store seeded through the `conftest.py` bulk seeder (direct `store.py` calls — 1,000 subprocess launches would cost minutes and the seeding route is not what is under test, research R-009): `list`, `search`, `export` and `delete` each return in under one second measured via subprocess (SC-007), and `list` returns all 1,000 with URLs, titles and tags identical to what was stored (SC-002)
+-- [ ] T036 Audit traceability across `tests/` against spec.md: confirm each of FR-001 … FR-027 is named by at least one test in its test name or a comment, and add the missing requirement identifier to any test that lacks one. A requirement with no test counts as unimplemented regardless of the code (FR-027, SC-008, Principle III; quality gate 1)
+-- [ ] T037 [P] Run the dependency check on `src/bookmarks/`: `grep -rE "^import|^from" src/bookmarks/` must show only `argparse`, `sqlite3`, `csv`, `json`, `sys` and `pathlib`. Any third-party import, or any import of `pytest`, is a Principle I violation (FR-025, quality gate 3)
+-- [ ] T038 Run every quickstart.md scenario 1–10 by hand from a scratch directory with `PYTHONPATH=src` and confirm each observed result matches its **Expected** paragraph, including the `sha256sum -c` check in scenario 7 and the `od -c | grep -c '\\r'` check returning 0 in scenario 5
+-- [ ] T039 Simplicity review of `src/bookmarks/cli.py` and `src/bookmarks/store.py`: confirm the package is still the four flat modules of research R-010, that no `formats.py`, tag-dictionary table, `tags(tag)` index, custom `ArgumentParser.error`, class hierarchy or extension point without a caller has crept in, and that no code exists that no requirement demands (Principle IV, quality gate 5)
+-- [ ] T040 Run the full suite — `pytest` from the repository root — and confirm it is green with no skips other than the documented `geteuid() == 0` permission skip from T011 (SC-008, quality gate 2)
++- [X] T034 [P] Write `tests/test_cli_contract.py` covering the cross-cutting contract: the tool is invocable as `python -m bookmarks [--db PATH] COMMAND ...` and supports all five commands (FR-001, FR-026); every command that completes its work exits 0 (FR-022); results go to stdout and diagnostics to stderr, and a failing command writes **nothing** to stdout — assert stdout is empty for a rejected URL, an unusable store and a missing identifier (FR-023); non-ASCII titles, tags and URLs are emitted correctly under `LC_ALL=C LANG=C` for `list`, `search` and `export --format json` with no `UnicodeEncodeError`, which is the test that fails loudly if stream reconfiguration was skipped (FR-023a, quickstart scenario 10); and the exit-status map is complete — bare invocation, unknown command, missing required argument, non-numeric `delete` identifier and unsupported `--format` all exit **2** with a diagnostic naming what was missing or invalid, while `--help` on the tool and on each command prints usage to stdout and exits **0** (FR-024, quickstart scenario 9)
++- [X] T035 [P] Write `tests/test_performance.py` covering SC-002 and SC-007 on a 1,000-bookmark store seeded through the `conftest.py` bulk seeder (direct `store.py` calls — 1,000 subprocess launches would cost minutes and the seeding route is not what is under test, research R-009): `list`, `search`, `export` and `delete` each return in under one second measured via subprocess (SC-007), and `list` returns all 1,000 with URLs, titles and tags identical to what was stored (SC-002)
++- [X] T036 Audit traceability across `tests/` against spec.md: confirm each of FR-001 … FR-027 is named by at least one test in its test name or a comment, and add the missing requirement identifier to any test that lacks one. A requirement with no test counts as unimplemented regardless of the code (FR-027, SC-008, Principle III; quality gate 1)
++- [X] T037 [P] Run the dependency check on `src/bookmarks/`: `grep -rE "^import|^from" src/bookmarks/` must show only `argparse`, `sqlite3`, `csv`, `json`, `sys` and `pathlib`. Any third-party import, or any import of `pytest`, is a Principle I violation (FR-025, quality gate 3)
++- [X] T038 Run every quickstart.md scenario 1–10 by hand from a scratch directory with `PYTHONPATH=src` and confirm each observed result matches its **Expected** paragraph, including the `sha256sum -c` check in scenario 7 and the `od -c | grep -c '\\r'` check returning 0 in scenario 5
++- [X] T039 Simplicity review of `src/bookmarks/cli.py` and `src/bookmarks/store.py`: confirm the package is still the four flat modules of research R-010, that no `formats.py`, tag-dictionary table, `tags(tag)` index, custom `ArgumentParser.error`, class hierarchy or extension point without a caller has crept in, and that no code exists that no requirement demands (Principle IV, quality gate 5)
++- [X] T040 Run the full suite — `pytest` from the repository root — and confirm it is green with no skips other than the documented `geteuid() == 0` permission skip from T011 (SC-008, quality gate 2)
+ 
+ ---
+ 
+diff --git a/src/bookmarks/__init__.py b/src/bookmarks/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/src/bookmarks/__main__.py b/src/bookmarks/__main__.py
+new file mode 100644
+index 0000000..d0cf72f
+--- /dev/null
++++ b/src/bookmarks/__main__.py
+@@ -0,0 +1,7 @@
++"""`python -m bookmarks` entry point with `src/` on PYTHONPATH (FR-001, FR-026)."""
++
++import sys
++
++from .cli import main
++
++sys.exit(main(sys.argv[1:]))
+diff --git a/src/bookmarks/cli.py b/src/bookmarks/cli.py
+new file mode 100644
+index 0000000..7f00d7e
+--- /dev/null
++++ b/src/bookmarks/cli.py
+@@ -0,0 +1,192 @@
++"""Command grammar, stream setup, dispatch, output rendering and the single error
++handler for the bookmark manager.
++
++Standard library only (FR-025, constitution Principle I).
++"""
++
++import argparse
++import csv
++import json
++import sys
++
++from . import store
++
++
++def render_tsv(rows):
++    """The `list`/`search` record format: exactly four tab-separated fields per line, in
++    the order identifier, URL, title, comma-joined alphabetical tags, emitted raw with no
++    escaping (FR-014, CLI contract).
++
++    Shared by both commands, so the two views cannot drift apart.
++    """
++    for row in rows:
++        print(f"{row['id']}\t{row['url']}\t{row['title']}\t{','.join(row['tags'])}")
++
++
++def render_csv(rows):
++    """The CSV export: the header line, then one row per bookmark (FR-018, FR-019).
++
++    ``lineterminator="\\n"`` overrides the module's RFC-4180 default of ``\\r\\n``
++    (FR-019a) and works with the ``newline=""`` set on stdout in :func:`main`, which is
++    what keeps a line break inside a quoted field intact. The module's own quoting is
++    correct and round-trip tested — hand-rolling it is a known source of data-corrupting
++    bugs (research R-007).
++    """
++    writer = csv.writer(sys.stdout, lineterminator="\n")
++    writer.writerow(["id", "url", "title", "tags"])
++    for row in rows:
++        writer.writerow([row["id"], row["url"], row["title"], ",".join(row["tags"])])
++
++
++def render_json(rows):
++    """The JSON export: one array, two-space indented, literal non-ASCII, exactly one
++    trailing newline (FR-020, FR-020a, research R-007)."""
++    sys.stdout.write(json.dumps(rows, indent=2, ensure_ascii=False))
++    sys.stdout.write("\n")
++
++
++RENDERERS = {"csv": render_csv, "json": render_json}
++
++
++def handle_add(args):
++    """`add URL [--title TITLE] [--tags TAGS]` (FR-005, FR-008, FR-009)."""
++    connection = store.open_store(args.db)
++    try:
++        bookmark_id = store.add_bookmark(connection, args.url, args.title, args.tags)
++    finally:
++        connection.close()
++    print(bookmark_id)
++    return 0
++
++
++def handle_list(args):
++    """`list [--tag TAG]` (FR-011, FR-012, FR-014, FR-015)."""
++    connection = store.open_store(args.db)
++    try:
++        rows = store.list_bookmarks(connection, args.tag)
++    finally:
++        connection.close()
++    render_tsv(rows)
++    return 0
++
++
++def handle_export(args):
++    """`export --format {csv,json}` (FR-018, FR-020).
++
++    Reads through the existing ``list_bookmarks`` — no new store function is needed.
++    """
++    connection = store.open_store(args.db)
++    try:
++        rows = store.list_bookmarks(connection)
++    finally:
++        connection.close()
++    RENDERERS[args.format](rows)
++    return 0
++
++
++def handle_delete(args):
++    """`delete ID` — nothing on stdout, status 0 on success (FR-016, CLI contract)."""
++    connection = store.open_store(args.db)
++    try:
++        store.delete_bookmark(connection, args.id)
++    finally:
++        connection.close()
++    return 0
++
++
++def handle_search(args):
++    """`search TEXT` (FR-013, FR-014, FR-015)."""
++    connection = store.open_store(args.db)
++    try:
++        rows = store.search_bookmarks(connection, args.text)
++    finally:
++        connection.close()
++    render_tsv(rows)
++    return 0
++
++
++def build_parser():
++    """The command grammar.
++
++    ``prog`` must be set explicitly: argparse's default under ``python -m bookmarks`` is
++    the literal string ``__main__.py``, which would misname the tool in every diagnostic
++    (research R-003).
++
++    ``ArgumentParser.error`` is deliberately **not** overridden. Its default already
++    writes a specific diagnostic to stderr and exits 2, which is exactly what FR-024
++    demands for an unknown command, a missing required argument, a non-numeric ``delete``
++    identifier and an unsupported ``--format`` (research R-003).
++    """
++    parser = argparse.ArgumentParser(
++        prog="python -m bookmarks",
++        description="Save, find, remove and export bookmarks in a single SQLite file.",
++    )
++    parser.add_argument(
++        "--db",
++        metavar="PATH",
++        default="bookmarks.db",
++        help="the SQLite store file (default: bookmarks.db in the current directory)",
++    )
++    subcommands = parser.add_subparsers(dest="command", required=True)
++
++    add = subcommands.add_parser("add", help="store a bookmark and print its identifier")
++    add.add_argument("url", help="must begin with http:// or https://")
++    add.add_argument("--title", default="", help="display title (default: empty)")
++    add.add_argument("--tags", help="comma-separated tag list, e.g. python,cli")
++    add.set_defaults(handler=handle_add)
++
++    listing = subcommands.add_parser(
++        "list", help="print bookmarks in ascending identifier order"
++    )
++    listing.add_argument(
++        "--tag",
++        metavar="TAG",
++        help="keep only bookmarks carrying this whole tag (capitalisation disregarded)",
++    )
++    listing.set_defaults(handler=handle_list)
++
++    search = subcommands.add_parser(
++        "search", help="print bookmarks whose title or URL contains TEXT"
++    )
++    search.add_argument("text", metavar="TEXT", help="substring to look for, ignoring case")
++    search.set_defaults(handler=handle_search)
++
++    delete = subcommands.add_parser(
++        "delete", help="remove the bookmark with this identifier, together with its tags"
++    )
++    # type=int makes argparse itself produce the precise diagnostic and status 2 for a
++    # non-numeric value, keeping status 3 strictly for the well-formed-but-absent case
++    # (research R-003).
++    delete.add_argument("id", metavar="ID", type=int, help="identifier of the bookmark")
++    delete.set_defaults(handler=handle_delete)
++
++    export = subcommands.add_parser("export", help="print the whole collection")
++    # required=True plus choices gives argparse's own diagnostic and exit 2 for an
++    # unsupported or missing value, with no hand-written validation (research R-003).
++    export.add_argument(
++        "--format", required=True, choices=sorted(RENDERERS), help="output format"
++    )
++    export.set_defaults(handler=handle_export)
++
++    return parser
++
++
++def main(argv):
++    """Entry point. Returns the process exit status (FR-024)."""
++    # UTF-8 on both streams regardless of locale (FR-023a), and no newline translation on
++    # stdout, which is what keeps a line break inside a quoted CSV field intact and every
++    # line LF-terminated (FR-019a, research R-007). Done once, here.
++    sys.stdout.reconfigure(encoding="utf-8", newline="")
++    sys.stderr.reconfigure(encoding="utf-8")
++
++    args = build_parser().parse_args(argv)
++
++    # Exactly one handler. Results reach stdout only after the work succeeds, so a failing
++    # command emits no partial output (FR-023). sqlite3.Error is deliberately not caught
++    # broadly: an unexpected database fault must crash loudly rather than be folded into
++    # one of the four documented statuses (research R-008).
++    try:
++        return args.handler(args)
++    except store.BookmarkError as exc:
++        print(f"bookmarks: {exc.message}", file=sys.stderr)
++        return exc.status
+diff --git a/src/bookmarks/store.py b/src/bookmarks/store.py
+new file mode 100644
+index 0000000..cf2d931
+--- /dev/null
++++ b/src/bookmarks/store.py
+@@ -0,0 +1,250 @@
++"""Storage rules for the bookmark manager: opening and validating the SQLite store,
++the schema, tag normalisation, the URL scheme check, and the queries.
++
++Standard library only (FR-025, constitution Principle I).
++"""
++
++import sqlite3
++from pathlib import Path
++
++
++class BookmarkError(Exception):
++    """A failure the contract describes, carrying the exit status it maps to.
++
++    One exception type with the status as data, rather than one class per status
++    (research R-008). ``message`` names what was invalid and what was expected, as
++    constitution Principle II requires; ``status`` is the process exit status from the
++    map in FR-024 (1 unusable store, 2 user mistake, 3 identifier does not exist).
++    """
++
++    def __init__(self, message, status):
++        super().__init__(message)
++        self.message = message
++        self.status = status
++
++
++# Quoted verbatim from data-model.md. AUTOINCREMENT is load-bearing for FR-006
++# (identifiers are never reused) and PRIMARY KEY (bookmark_id, tag) enforces FR-010's
++# at-most-once rule in storage. No index on tags(tag) and no UNIQUE on bookmarks.url
++# (data-model.md, research R-006).
++SCHEMA = (
++    """
++    CREATE TABLE IF NOT EXISTS bookmarks (
++        id    INTEGER PRIMARY KEY AUTOINCREMENT,
++        url   TEXT NOT NULL,
++        title TEXT NOT NULL DEFAULT ''
++    )
++    """,
++    """
++    CREATE TABLE IF NOT EXISTS tags (
++        bookmark_id INTEGER NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE,
++        tag         TEXT    NOT NULL,
++        PRIMARY KEY (bookmark_id, tag)
++    )
++    """,
++)
++
++OUR_TABLES = frozenset({"bookmarks", "tags"})
++
++
++def _initialise(connection):
++    for statement in SCHEMA:
++        connection.execute(statement)
++    connection.commit()
++
++
++def open_store(path):
++    """Open the store at ``path``, creating it only when it is absent (FR-002, FR-003).
++
++    An existing path that is not a usable bookmark store raises ``BookmarkError`` with
++    status 1 and is left byte-for-byte unchanged — never overwritten, truncated,
++    re-initialised or repaired — and no file or directory is created on any failing
++    branch (FR-003a, SC-009). The sequence is research R-002: open with ``mode=rw`` so
++    SQLite cannot create a file, and defer the verdict to a read-only query, so the
++    failure path never writes.
++    """
++    target = Path(path)
++    existed = target.exists()
++    # resolve().as_uri() percent-encodes the path, so a '?' or '#' in it is not read as
++    # SQLite URI syntax (research R-002).
++    uri = target.resolve().as_uri() + ("?mode=rw" if existed else "?mode=rwc")
++
++    try:
++        connection = sqlite3.connect(uri, uri=True)
++    except sqlite3.OperationalError as exc:
++        # Missing parent directory, or the file system denies access. No file and no
++        # directory has been created (FR-003a).
++        raise BookmarkError(f"cannot open store {path}: {exc}", 1) from exc
++
++    # SQLite leaves foreign keys off by default, so ON DELETE CASCADE would otherwise do
++    # nothing (data-model.md). Harmless before validation: it touches no page of the file.
++    connection.execute("PRAGMA foreign_keys = ON")
++
++    if not existed:
++        _initialise(connection)
++        return connection
++
++    try:
++        tables = {row[0] for row in connection.execute(
++            "SELECT name FROM sqlite_master WHERE type='table'"
++        )}
++    except sqlite3.OperationalError as exc:
++        connection.close()
++        raise BookmarkError(f"cannot read store {path}: {exc}", 1) from exc
++    except sqlite3.DatabaseError as exc:
++        connection.close()
++        raise BookmarkError(f"{path} is not a bookmark database: {exc}", 1) from exc
++
++    if tables & OUR_TABLES:
++        return connection
++    if tables:
++        connection.close()
++        raise BookmarkError(
++            f"{path} is a SQLite database belonging to another program "
++            f"(it holds {', '.join(sorted(tables))} but neither bookmarks nor tags); "
++            f"refusing to use it as a bookmark store",
++            1,
++        )
++    # A valid but empty database: give it our schema and carry on (FR-003).
++    _initialise(connection)
++    return connection
++
++
++ACCEPTED_SCHEMES = ("http://", "https://")
++
++
++def normalise_tags(raw):
++    """Turn a ``--tags``/``--tag`` value into the sorted set of tags it names (FR-010).
++
++    The five steps of data-model.md, in that order: split on ``,``, strip surrounding
++    whitespace, drop entries empty after stripping, lower-case, collapse duplicates. No
++    stemming, no synonyms, no Unicode form folding beyond ``str.lower()``.
++
++    The same function normalises the ``--tag`` filter value (FR-012), which is what
++    guarantees the two sides can never disagree.
++    """
++    if not raw:
++        return []
++    return sorted({entry.strip().lower() for entry in raw.split(",") if entry.strip()})
++
++
++def check_url(url):
++    """Reject a URL not beginning with the literal ``http://`` or ``https://`` (FR-007).
++
++    A literal prefix test: no parsing, no host validation, no reachability check (spec
++    Assumptions). Raises before any insert, so a rejected URL leaves the store exactly as
++    it was.
++    """
++    if not url.startswith(ACCEPTED_SCHEMES):
++        raise BookmarkError(
++            f"refusing to store {url!r}: a URL must begin with "
++            f"{ACCEPTED_SCHEMES[0]!r} or {ACCEPTED_SCHEMES[1]!r}",
++            2,
++        )
++
++
++def add_bookmark(connection, url, title, tags):
++    """Store a bookmark and return its new identifier (FR-005, FR-006, FR-008 … FR-010).
++
++    ``title`` is the empty string when the user omitted ``--title``, which the schema's
++    ``NOT NULL DEFAULT ''`` then keeps as a storage invariant (FR-008). ``tags`` is the raw
++    ``--tags`` value or ``None``.
++
++    No de-duplication on ``url``: the same address may be saved more than once, each time
++    receiving its own identifier (spec Edge Cases).
++    """
++    check_url(url)
++    cursor = connection.execute(
++        "INSERT INTO bookmarks (url, title) VALUES (?, ?)", (url, title)
++    )
++    bookmark_id = cursor.lastrowid
++    normalised = normalise_tags(tags)
++    if normalised:
++        connection.executemany(
++            "INSERT INTO tags (bookmark_id, tag) VALUES (?, ?)",
++            [(bookmark_id, tag) for tag in normalised],
++        )
++    connection.commit()
++    return bookmark_id
++
++
++_ROWS_QUERY = """
++    SELECT b.id, b.url, b.title, t.tag
++    FROM bookmarks b LEFT JOIN tags t ON t.bookmark_id = b.id
++    {where}
++    ORDER BY b.id
++"""
++
++
++def _collect(cursor):
++    """Group the joined rows into one record per bookmark, tags sorted (FR-014)."""
++    records = {}
++    for bookmark_id, url, title, tag in cursor:
++        record = records.get(bookmark_id)
++        if record is None:
++            record = records[bookmark_id] = {
++                "id": bookmark_id,
++                "url": url,
++                "title": title,
++                "tags": [],
++            }
++        if tag is not None:
++            record["tags"].append(tag)
++    for record in records.values():
++        # Python's default string ordering; stored tags are always lower case, so this is
++        # ordinary alphabetical order (data-model.md).
++        record["tags"].sort()
++    return list(records.values())
++
++
++def list_bookmarks(connection, tag=None):
++    """Every bookmark in ascending identifier order (FR-011, FR-014).
++
++    With ``tag``, only bookmarks carrying that whole tag (FR-012). The filter value goes
++    through :func:`normalise_tags` — the same function that normalised the stored tags, so
++    the two sides cannot disagree — and the comparison is SQL ``=``, from which whole-tag
++    matching comes free: ``py`` cannot match ``python`` (research R-005).
++    """
++    if tag is None:
++        return _collect(connection.execute(_ROWS_QUERY.format(where="")))
++
++    normalised = normalise_tags(tag)
++    if len(normalised) != 1:
++        # No bookmark can carry an empty tag, or one whose text holds a comma.
++        return []
++    return _collect(
++        connection.execute(
++            _ROWS_QUERY.format(
++                where="WHERE b.id IN (SELECT bookmark_id FROM tags WHERE tag = ?)"
++            ),
++            (normalised[0],),
++        )
++    )
++
++
++def delete_bookmark(connection, bookmark_id):
++    """Remove the bookmark with that identifier, together with its tags (FR-016).
++
++    The tag rows go with it through ``ON DELETE CASCADE`` — one declaration rather than a
++    second ``DELETE`` that could drift (research R-006). An identifier no bookmark holds is
++    status 3, and nothing is committed, so the store is unchanged (FR-017).
++    """
++    cursor = connection.execute("DELETE FROM bookmarks WHERE id = ?", (bookmark_id,))
++    if cursor.rowcount == 0:
++        raise BookmarkError(f"no bookmark has identifier {bookmark_id}", 3)
++    connection.commit()
++
++
++def search_bookmarks(connection, text):
++    """Bookmarks whose title or URL contains ``text``, ignoring case (FR-013).
++
++    Filtered in Python, not with SQL ``LIKE``/``lower()``: both are ASCII-only by default,
++    which would silently fail to fold case for a non-ASCII title, and ``LIKE`` would treat
++    ``%`` and ``_`` in the user's text as wildcards (research R-005).
++    """
++    needle = text.lower()
++    return [
++        row
++        for row in list_bookmarks(connection)
++        if needle in row["title"].lower() or needle in row["url"].lower()
++    ]
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000..727d682
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,86 @@
++"""Shared fixtures: a scratch store path, a subprocess CLI runner, and a bulk seeder.
++
++The CLI is exercised as a real subprocess because an in-process call cannot observe a
++real process exit status, which FR-022 and FR-024 are stated in terms of (research
++R-009). The bulk seeder goes through ``store.py`` directly: 1,000 subprocess launches
++would cost minutes and the seeding route is not what is under test.
++"""
++
++import os
++import subprocess
++import sys
++from pathlib import Path
++
++import pytest
++
++from bookmarks import store
++
++REPO_ROOT = Path(__file__).resolve().parent.parent
++SRC = REPO_ROOT / "src"
++
++
++@pytest.fixture
++def db(tmp_path):
++    """A fresh, not-yet-created store path for one test (used as ``--db``)."""
++    return tmp_path / "bookmarks.db"
++
++
++@pytest.fixture
++def run_cli():
++    """Invoke the real CLI as a subprocess; returns the CompletedProcess.
++
++    ``result.returncode`` is the real exit status, and stdout/stderr are captured
++    separately so the FR-023 stream split can be asserted.
++    """
++
++    def run(*args, cwd=None, env=None, text=True):
++        environment = {**os.environ, "PYTHONPATH": str(SRC)}
++        if env:
++            environment.update(env)
++        return subprocess.run(
++            [sys.executable, "-m", "bookmarks", *[str(a) for a in args]],
++            cwd=str(cwd) if cwd else None,
++            env=environment,
++            capture_output=True,
++            text=text,
++            encoding="utf-8" if text else None,
++        )
++
++    return run
++
++
++@pytest.fixture
++def seed():
++    """Insert bookmarks straight through ``store.py``, returning the identifiers."""
++
++    def _seed(path, bookmarks):
++        connection = store.open_store(path)
++        try:
++            return [
++                store.add_bookmark(connection, url, title, tags)
++                for url, title, tags in bookmarks
++            ]
++        finally:
++            connection.close()
++
++    return _seed
++
++
++@pytest.fixture
++def seed_many(seed):
++    """Seed ``count`` generated bookmarks for the performance budget (SC-002, SC-007)."""
++
++    def _seed_many(path, count):
++        return seed(
++            path,
++            [
++                (
++                    f"https://example.com/page/{index}",
++                    f"Page {index}",
++                    f"tag{index % 10},common",
++                )
++                for index in range(count)
++            ],
++        )
++
++    return _seed_many
+diff --git a/tests/test_add.py b/tests/test_add.py
+new file mode 100644
+index 0000000..d9bb4d2
+--- /dev/null
++++ b/tests/test_add.py
+@@ -0,0 +1,201 @@
++"""`add`: FR-005, FR-006, FR-007, FR-008, FR-009, FR-010 (and SC-004)."""
++
++import sqlite3
++
++import pytest
++
++
++def stored_rows(db):
++    connection = sqlite3.connect(str(db))
++    try:
++        return connection.execute("SELECT id, url, title FROM bookmarks ORDER BY id").fetchall()
++    finally:
++        connection.close()
++
++
++def stored_tags(db, bookmark_id):
++    connection = sqlite3.connect(str(db))
++    try:
++        return [
++            row[0]
++            for row in connection.execute(
++                "SELECT tag FROM tags WHERE bookmark_id = ? ORDER BY tag", (bookmark_id,)
++            )
++        ]
++    finally:
++        connection.close()
++
++
++def tags_field(run_cli, db):
++    """The tags column of the single bookmark in the store, via `list` (FR-014)."""
++    result = run_cli("--db", db, "list")
++    assert result.returncode == 0
++    lines = result.stdout.splitlines()
++    assert len(lines) == 1
++    return lines[0].split("\t")[3]
++
++
++# --------------------------------------------------------------------------- FR-005
++
++
++def test_fr005_add_prints_the_identifier_and_nothing_else(run_cli, db):
++    """FR-005: stdout is the new identifier and nothing else."""
++    result = run_cli("--db", db, "add", "https://docs.python.org")
++    assert result.returncode == 0
++    assert result.stdout == "1\n"
++    assert result.stderr == ""
++
++
++def test_sc001_first_bookmark_is_saved_and_listed_in_two_commands_with_no_setup(
++    run_cli, tmp_path
++):
++    """SC-001: a first-time user saves and sees a bookmark with two commands and no
++    configuration step — the store does not exist until the first `add` creates it."""
++    assert not (tmp_path / "bookmarks.db").exists()
++
++    added = run_cli("add", "https://docs.python.org", "--title", "Python docs", cwd=tmp_path)
++    listed = run_cli("list", cwd=tmp_path)
++
++    assert (added.returncode, added.stdout) == (0, "1\n")
++    assert listed.returncode == 0
++    assert listed.stdout == "1\thttps://docs.python.org\tPython docs\t\n"
++
++
++# --------------------------------------------------------------------------- FR-006
++
++
++def test_fr006_identifiers_start_at_one_and_increase(run_cli, db):
++    """FR-006: the first identifier in a fresh store is 1, and they increase."""
++    first = run_cli("--db", db, "add", "https://a.example.com")
++    second = run_cli("--db", db, "add", "https://b.example.com")
++    third = run_cli("--db", db, "add", "https://c.example.com")
++    assert [first.stdout, second.stdout, third.stdout] == ["1\n", "2\n", "3\n"]
++
++
++def test_fr006_the_same_url_may_be_saved_twice_with_its_own_identifier(run_cli, db):
++    """Spec Edge Cases: duplicate URLs are allowed, each getting its own identifier."""
++    first = run_cli("--db", db, "add", "https://example.com")
++    second = run_cli("--db", db, "add", "https://example.com")
++    assert (first.stdout, second.stdout) == ("1\n", "2\n")
++    assert len(stored_rows(db)) == 2
++
++
++# --------------------------------------------------------------- FR-007 (and SC-004)
++
++
++@pytest.mark.parametrize(
++    "bad_url",
++    [
++        "ftp://example.com",
++        "example.com",
++        "",
++        "see https://x",
++        "HTTP://example.com",
++    ],
++)
++def test_fr007_sc004_malformed_url_is_refused_with_status_2_and_stores_nothing(
++    run_cli, db, bad_url
++):
++    """FR-007, SC-004: not beginning with the literal http:// or https:// exits 2, with a
++    diagnostic on stderr naming the rejected URL and the accepted schemes, nothing on
++    stdout, and nothing stored."""
++    result = run_cli("--db", db, "add", bad_url)
++    assert result.returncode == 2
++    assert result.stdout == ""
++    if bad_url:
++        assert bad_url in result.stderr
++    assert "http://" in result.stderr and "https://" in result.stderr
++    # Nothing was stored: the scheme check runs before any insert.
++    listed = run_cli("--db", db, "list")
++    assert listed.stdout == ""
++    assert listed.returncode == 0
++
++
++@pytest.mark.parametrize("good_url", ["http://example.com", "https://example.com"])
++def test_fr007_both_accepted_schemes_are_stored(run_cli, db, good_url):
++    """FR-007: http:// and https:// are the accepted prefixes."""
++    result = run_cli("--db", db, "add", good_url)
++    assert result.returncode == 0
++    assert stored_rows(db)[0][1] == good_url
++
++
++def test_fr007_url_is_stored_verbatim(run_cli, db):
++    """FR-007: the URL is stored exactly as supplied — no parsing, no normalisation."""
++    url = "https://Example.COM/Path?q=1&r=2#frag"
++    run_cli("--db", db, "add", url)
++    assert stored_rows(db)[0][1] == url
++
++
++# --------------------------------------------------------------------------- FR-008
++
++
++def test_fr008_title_option_sets_the_title(run_cli, db):
++    """FR-008: --title TITLE sets the bookmark's title."""
++    run_cli("--db", db, "add", "https://docs.python.org", "--title", "Python docs")
++    assert stored_rows(db)[0][2] == "Python docs"
++
++
++def test_fr008_omitted_title_is_the_empty_string_never_null_or_a_placeholder(run_cli, db):
++    """FR-008: an omitted title is the empty string — never NULL, never a placeholder."""
++    run_cli("--db", db, "add", "https://example.com")
++    connection = sqlite3.connect(str(db))
++    try:
++        title, is_null = connection.execute(
++            "SELECT title, title IS NULL FROM bookmarks WHERE id = 1"
++        ).fetchone()
++    finally:
++        connection.close()
++    assert title == ""
++    assert is_null == 0
++
++
++# --------------------------------------------------------------------------- FR-009
++
++
++def test_fr009_tags_option_is_comma_separated(run_cli, db):
++    """FR-009: --tags interprets its value as a comma-separated list."""
++    run_cli("--db", db, "add", "https://example.com", "--tags", "python,cli")
++    assert stored_tags(db, 1) == ["cli", "python"]
++
++
++def test_fr009_omitted_tags_means_no_tags(run_cli, db):
++    """FR-009: omitting --tags leaves the bookmark with no tags."""
++    run_cli("--db", db, "add", "https://example.com")
++    assert stored_tags(db, 1) == []
++    assert tags_field(run_cli, db) == ""
++
++
++# --------------------------------------------------------------------------- FR-010
++
++
++@pytest.mark.parametrize(
++    ("raw", "expected"),
++    [
++        ("python,cli", ["cli", "python"]),
++        ("python,,docs", ["docs", "python"]),
++        ("", []),
++        ("  python  ,  docs ", ["docs", "python"]),
++        ("Python,python,PYTHON", ["python"]),
++        ("Python,Docs", ["docs", "python"]),
++    ],
++)
++def test_fr010_tag_normalisation_table_from_the_data_model(run_cli, db, raw, expected):
++    """FR-010: trim, drop empties, lower-case, then store each distinct tag at most once."""
++    result = run_cli("--db", db, "add", "https://example.com", "--tags", raw)
++    assert result.returncode == 0
++    assert stored_tags(db, 1) == expected
++    assert tags_field(run_cli, db) == ",".join(expected)
++
++
++def test_fr010_each_distinct_tag_is_stored_at_most_once_per_bookmark(run_cli, db):
++    """FR-010: duplicates collapse, so the store holds one row per distinct tag."""
++    run_cli("--db", db, "add", "https://example.com", "--tags", "a, A ,a,,b")
++    assert stored_tags(db, 1) == ["a", "b"]
++
++
++def test_fr010_a_tag_text_may_be_shared_by_several_bookmarks(run_cli, db):
++    """FR-010/data-model: at-most-once is per bookmark, not global."""
++    run_cli("--db", db, "add", "https://a.example.com", "--tags", "shared")
++    run_cli("--db", db, "add", "https://b.example.com", "--tags", "shared")
++    assert stored_tags(db, 1) == ["shared"]
++    assert stored_tags(db, 2) == ["shared"]
+diff --git a/tests/test_cli_contract.py b/tests/test_cli_contract.py
+new file mode 100644
+index 0000000..4280683
+--- /dev/null
++++ b/tests/test_cli_contract.py
+@@ -0,0 +1,338 @@
++"""The cross-cutting contract: FR-001, FR-022, FR-023, FR-023a, FR-024, FR-025, FR-026
++and FR-027 (with SC-008).
++
++Everything here is asserted through a real subprocess, because an in-process call cannot
++observe a real process exit status or the stdout/stderr split (research R-009).
++"""
++
++import ast
++import re
++import subprocess
++import sqlite3
++import sys
++from pathlib import Path
++
++import pytest
++
++REPO_ROOT = Path(__file__).resolve().parent.parent
++PACKAGE = REPO_ROOT / "src" / "bookmarks"
++TESTS = REPO_ROOT / "tests"
++SPEC = REPO_ROOT / "specs" / "001-bookmark-manager-cli" / "spec.md"
++
++COMMANDS = ("add", "list", "search", "delete", "export")
++
++# The complete runtime import surface allowed by FR-025 and research R-001/R-010.
++ALLOWED_IMPORTS = {"argparse", "sqlite3", "csv", "json", "sys", "pathlib"}
++
++
++# ------------------------------------------------------------------- FR-001, FR-026
++
++
++def test_fr001_fr026_tool_is_invocable_as_python_m_bookmarks(run_cli):
++    """FR-001, FR-026: runnable as `python -m bookmarks` with src/ on PYTHONPATH."""
++    result = run_cli("--help")
++    assert result.returncode == 0
++    assert "python -m bookmarks" in result.stdout
++
++
++def test_fr026_package_lives_in_bookmarks_under_src():
++    """FR-026: the code lives in a package named bookmarks under src/."""
++    assert (PACKAGE / "__init__.py").exists()
++    assert (PACKAGE / "__main__.py").exists()
++
++
++@pytest.mark.parametrize("command", COMMANDS)
++def test_fr001_all_five_commands_are_supported(run_cli, command):
++    """FR-001: add, list, search, delete and export are all present."""
++    result = run_cli(command, "--help")
++    assert result.returncode == 0
++    assert command in result.stdout
++
++
++def test_fr001_db_option_is_global_and_precedes_the_command(run_cli, db):
++    """FR-001, CLI contract: --db PATH is a global option, declared before the command."""
++    assert run_cli("--db", db, "add", "https://example.com").returncode == 0
++    assert db.exists()
++
++
++# --------------------------------------------------------------------------- FR-022
++
++
++def test_fr022_every_command_that_completes_its_work_exits_zero(run_cli, db):
++    """FR-022: status 0 for all five commands, including ones that match nothing."""
++    assert run_cli("--db", db, "add", "https://a.example.com", "--tags", "t").returncode == 0
++    assert run_cli("--db", db, "list").returncode == 0
++    assert run_cli("--db", db, "list", "--tag", "t").returncode == 0
++    assert run_cli("--db", db, "list", "--tag", "absent").returncode == 0
++    assert run_cli("--db", db, "search", "a").returncode == 0
++    assert run_cli("--db", db, "search", "zzz").returncode == 0
++    assert run_cli("--db", db, "export", "--format", "csv").returncode == 0
++    assert run_cli("--db", db, "export", "--format", "json").returncode == 0
++    assert run_cli("--db", db, "delete", 1).returncode == 0
++
++
++# --------------------------------------------------------------------------- FR-023
++
++
++def test_fr023_results_go_to_stdout_and_nothing_to_stderr_on_success(run_cli, db):
++    """FR-023: results on stdout; a successful command writes no diagnostic."""
++    run_cli("--db", db, "add", "https://example.com", "--title", "T")
++    result = run_cli("--db", db, "list")
++    assert result.stdout.startswith("1\thttps://example.com\tT")
++    assert result.stderr == ""
++
++
++def test_fr023_rejected_url_writes_nothing_to_stdout(run_cli, db):
++    """FR-023: a failing command writes no partial results to stdout."""
++    result = run_cli("--db", db, "add", "ftp://example.com")
++    assert result.stdout == ""
++    assert result.stderr != ""
++
++
++def test_fr023_unusable_store_writes_nothing_to_stdout(run_cli, tmp_path):
++    """FR-023: the store-failure path writes only a diagnostic, and only to stderr."""
++    plain = tmp_path / "plain.txt"
++    plain.write_text("not a database\n", encoding="utf-8")
++    result = run_cli("--db", plain, "list")
++    assert result.stdout == ""
++    assert str(plain) in result.stderr
++
++
++def test_fr023_missing_identifier_writes_nothing_to_stdout(run_cli, db):
++    """FR-023: nothing on stdout when `delete` names an identifier that does not exist."""
++    result = run_cli("--db", db, "delete", 7)
++    assert result.stdout == ""
++    assert "7" in result.stderr
++
++
++# -------------------------------------------------------------------------- FR-023a
++
++NON_ASCII = ("https://café.example.com", "Café — ünïcode", "café,naïve")
++C_LOCALE = {"LC_ALL": "C", "LANG": "C"}
++
++
++@pytest.fixture
++def non_ascii_store(run_cli, db):
++    assert run_cli(
++        "--db", db, "add", NON_ASCII[0], "--title", NON_ASCII[1], "--tags", NON_ASCII[2]
++    ).returncode == 0
++    return db
++
++
++@pytest.mark.parametrize(
++    "command", [("list",), ("search", "café"), ("export", "--format", "json")]
++)
++def test_fr023a_non_ascii_is_emitted_correctly_under_a_c_locale(
++    run_cli, non_ascii_store, command
++):
++    """FR-023a, quickstart scenario 10: no UnicodeEncodeError and correct characters."""
++    result = run_cli("--db", non_ascii_store, *command, env=C_LOCALE)
++    assert result.returncode == 0
++    assert "UnicodeEncodeError" not in result.stderr
++    assert "Café — ünïcode" in result.stdout
++    assert "café" in result.stdout
++
++
++@pytest.mark.parametrize(
++    "command", [("list",), ("search", "café"), ("export", "--format", "json")]
++)
++def test_fr023a_stdout_is_utf8_even_when_the_environment_asks_for_ascii(
++    run_cli, non_ascii_store, command
++):
++    """FR-023a: the stream reconfiguration is load-bearing. The control below shows a
++    plain write fails under the same environment, so this is not a free pass."""
++    control = subprocess.run(
++        [sys.executable, "-c", "print('caf\\u00e9')"],
++        env={"PYTHONIOENCODING": "ascii", "PATH": "/usr/bin:/bin"},
++        capture_output=True,
++        text=True,
++    )
++    assert control.returncode != 0
++    assert "UnicodeEncodeError" in control.stderr
++
++    result = run_cli(
++        "--db", non_ascii_store, *command, env={"PYTHONIOENCODING": "ascii"}
++    )
++    assert result.returncode == 0
++    assert "Café — ünïcode" in result.stdout
++
++
++def test_fr023a_stderr_is_utf8_for_a_diagnostic_naming_a_non_ascii_path(run_cli, tmp_path):
++    """FR-023a: stderr is reconfigured too, so a diagnostic naming a non-ASCII path is
++    emitted rather than raising inside the error handler."""
++    plain = tmp_path / "café.txt"
++    plain.write_text("not a database\n", encoding="utf-8")
++    result = run_cli("--db", plain, "list", env={"PYTHONIOENCODING": "ascii"})
++    assert result.returncode == 1
++    assert result.stdout == ""
++    assert "café.txt" in result.stderr
++
++
++# --------------------------------------------------------------------------- FR-024
++
++
++def test_fr024_bare_invocation_exits_2(run_cli):
++    """FR-024: no command at all is a usage mistake."""
++    result = run_cli()
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert "command" in result.stderr
++
++
++def test_fr024_unknown_command_exits_2(run_cli):
++    """FR-024: an unknown command names what was invalid and what was expected."""
++    result = run_cli("bogus")
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert "bogus" in result.stderr
++
++
++@pytest.mark.parametrize(
++    ("args", "expected_in_stderr"),
++    [
++        (("add",), "url"),
++        (("search",), "TEXT"),
++        (("delete",), "ID"),
++        (("export",), "--format"),
++    ],
++)
++def test_fr024_missing_required_argument_exits_2(run_cli, args, expected_in_stderr):
++    """FR-024: a missing required argument names the argument."""
++    result = run_cli(*args)
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert expected_in_stderr in result.stderr
++
++
++def test_fr024_non_numeric_delete_identifier_exits_2(run_cli, db):
++    """FR-024: a non-numeric identifier is status 2, never the reserved status 3."""
++    result = run_cli("--db", db, "delete", "abc")
++    assert result.returncode == 2
++    assert "abc" in result.stderr
++
++
++def test_fr024_unsupported_export_format_exits_2(run_cli, db):
++    """FR-024: an unsupported --format value names the accepted ones."""
++    result = run_cli("--db", db, "export", "--format", "xml")
++    assert result.returncode == 2
++    assert "xml" in result.stderr
++    assert "csv" in result.stderr and "json" in result.stderr
++
++
++@pytest.mark.parametrize("args", [("--help",), *[(c, "--help") for c in COMMANDS]])
++def test_fr024_help_prints_usage_to_stdout_and_exits_zero(run_cli, args):
++    """FR-024, quickstart scenario 9: --help is not an error."""
++    result = run_cli(*args)
++    assert result.returncode == 0
++    assert "usage:" in result.stdout
++    assert result.stderr == ""
++
++
++def test_fr024_the_status_map_is_complete(run_cli, tmp_path, db):
++    """FR-024: 0 success, 1 unusable store, 2 user mistake, 3 identifier absent — and no
++    command produces a status outside that map."""
++    plain = tmp_path / "plain.txt"
++    plain.write_text("not a database\n", encoding="utf-8")
++
++    assert run_cli("--db", db, "add", "https://a.example.com").returncode == 0
++    assert run_cli("--db", plain, "list").returncode == 1
++    assert run_cli("--db", db, "add", "ftp://a.example.com").returncode == 2
++    assert run_cli("--db", db, "delete", 99).returncode == 3
++
++
++# --------------------------------------------------------------------------- FR-025
++
++
++def _imported_top_level_modules(path):
++    """Top-level module names imported absolutely by one module (relative imports of our
++    own package carry no module name and are not third-party by construction)."""
++    names = set()
++    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
++        if isinstance(node, ast.Import):
++            names.update(alias.name.split(".")[0] for alias in node.names)
++        elif isinstance(node, ast.ImportFrom) and not node.level:
++            names.add(node.module.split(".")[0])
++    return names
++
++
++def test_fr025_runtime_code_imports_only_the_standard_library():
++    """FR-025, constitution Principle I: no third-party runtime import anywhere, and the
++    import surface is exactly the six modules the design allows."""
++    imported = set()
++    modules = sorted(PACKAGE.glob("*.py"))
++    assert modules, "no runtime modules found"
++    for module in modules:
++        imported |= _imported_top_level_modules(module)
++
++    assert imported <= ALLOWED_IMPORTS, f"unexpected imports: {imported - ALLOWED_IMPORTS}"
++    assert imported <= sys.stdlib_module_names
++    assert "pytest" not in imported
++
++
++def test_fr025_runtime_runs_on_a_bare_interpreter_with_no_installed_package(run_cli, db):
++    """FR-025: nothing to install — the tool runs with src/ on PYTHONPATH alone."""
++    result = subprocess.run(
++        [sys.executable, "-m", "bookmarks", "--db", str(db), "list"],
++        # A minimal environment: no site-packages path tricks, no inherited variables.
++        env={"PYTHONPATH": str(REPO_ROOT / "src"), "PATH": "/usr/bin:/bin"},
++        capture_output=True,
++        text=True,
++    )
++    assert result.returncode == 0
++
++
++def test_fr025_declared_python_floor_is_3_11():
++    """FR-025 and the constitution's Additional Constraints: the floor is declared once."""
++    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
++    assert pyproject.count("requires-python") == 1
++    assert 'requires-python = ">=3.11"' in pyproject
++    assert sys.version_info >= (3, 11)
++
++
++# ----------------------------------------------------------------- FR-027 (SC-008)
++
++
++def normalise(identifier):
++    """`FR-003a`, `fr_003a` and the `fr003a` of a test function name all mean FR-003a."""
++    return "FR-" + identifier[2:].lstrip("-_").lower()
++
++
++def test_fr027_sc008_every_functional_requirement_is_named_by_at_least_one_test():
++    """FR-027, SC-008, constitution Principle III: every FR in the spec is named by at
++    least one test, in its name or a comment. A requirement with no test counts as
++    unimplemented regardless of the code."""
++    spec = SPEC.read_text(encoding="utf-8")
++    requirements = sorted(set(re.findall(r"\bFR-\d{3}[a-z]?\b", spec)))
++    assert len(requirements) >= 27, requirements
++
++    covered = set()
++    for test_file in sorted(TESTS.glob("test_*.py")):
++        text = test_file.read_text(encoding="utf-8")
++        covered |= {
++            normalise(requirement)
++            for requirement in re.findall(r"\b[Ff][Rr][-_]?\d{3}[a-z]?\b", text)
++        }
++
++    missing = [requirement for requirement in requirements if requirement not in covered]
++    assert not missing, f"requirements with no test naming them: {missing}"
++
++
++def test_fr027_the_store_schema_matches_the_data_model(db):
++    """FR-027/data-model.md: AUTOINCREMENT and the composite primary key are load-bearing
++    for FR-006 and FR-010, so assert they are actually in the shipped schema."""
++    from bookmarks import store
++
++    store.open_store(db).close()
++    connection = sqlite3.connect(str(db))
++    try:
++        schema = {
++            name: sql
++            for name, sql in connection.execute(
++                "SELECT name, sql FROM sqlite_master WHERE type='table'"
++            )
++        }
++    finally:
++        connection.close()
++    assert "AUTOINCREMENT" in schema["bookmarks"]
++    assert "ON DELETE CASCADE" in schema["tags"]
++    assert "PRIMARY KEY (bookmark_id, tag)" in schema["tags"]
+diff --git a/tests/test_delete.py b/tests/test_delete.py
+new file mode 100644
+index 0000000..15e2453
+--- /dev/null
++++ b/tests/test_delete.py
+@@ -0,0 +1,120 @@
++"""`delete`: FR-016, FR-017, and identifier non-reuse (FR-006)."""
++
++import hashlib
++import sqlite3
++from pathlib import Path
++
++
++def tag_rows(db):
++    connection = sqlite3.connect(str(db))
++    try:
++        return connection.execute("SELECT bookmark_id, tag FROM tags").fetchall()
++    finally:
++        connection.close()
++
++
++# --------------------------------------------------------------------------- FR-016
++
++
++def test_fr016_deleted_bookmark_appears_in_no_later_listing_search_or_export(run_cli, db):
++    """FR-016: the bookmark is gone from every later view."""
++    run_cli("--db", db, "add", "https://keep.example.com", "--title", "Keep")
++    run_cli("--db", db, "add", "https://drop.example.com", "--title", "Drop")
++
++    result = run_cli("--db", db, "delete", 2)
++    assert result.returncode == 0
++    assert result.stdout == ""
++
++    assert "drop.example.com" not in run_cli("--db", db, "list").stdout
++    assert run_cli("--db", db, "search", "Drop").stdout == ""
++    assert "drop.example.com" not in run_cli("--db", db, "export", "--format", "csv").stdout
++    assert "drop.example.com" not in run_cli("--db", db, "export", "--format", "json").stdout
++    assert "keep.example.com" in run_cli("--db", db, "list").stdout
++
++
++def test_fr016_deleting_a_bookmark_removes_its_tags_by_cascade(run_cli, db):
++    """FR-016: the tag rows go with the bookmark, which is only true if
++    PRAGMA foreign_keys = ON is set on the connection (research R-006)."""
++    run_cli("--db", db, "add", "https://a.example.com", "--tags", "python,docs")
++    run_cli("--db", db, "add", "https://b.example.com", "--tags", "news")
++    assert sorted(tag_rows(db)) == [(1, "docs"), (1, "python"), (2, "news")]
++
++    assert run_cli("--db", db, "delete", 1).returncode == 0
++    assert tag_rows(db) == [(2, "news")]
++
++
++# --------------------------------------------------------------------------- FR-017
++
++
++def test_fr017_sc005_deleting_an_identifier_no_bookmark_holds_exits_3(run_cli, db):
++    """FR-017, SC-005: a diagnostic naming the identifier on stderr, status 3, and the
++    stored collection left byte-for-byte unchanged."""
++    run_cli("--db", db, "add", "https://a.example.com")
++    before = hashlib.sha256(Path(db).read_bytes()).hexdigest()
++
++    result = run_cli("--db", db, "delete", 99)
++
++    assert result.returncode == 3
++    assert result.stdout == ""
++    assert "99" in result.stderr
++    assert hashlib.sha256(Path(db).read_bytes()).hexdigest() == before
++    assert "a.example.com" in run_cli("--db", db, "list").stdout
++
++
++def test_fr017_us3_scenario3_deleting_an_already_deleted_identifier_exits_3(run_cli, db):
++    """US3 scenario 3: the second delete of the same identifier also exits 3."""
++    run_cli("--db", db, "add", "https://a.example.com")
++    assert run_cli("--db", db, "delete", 1).returncode == 0
++
++    result = run_cli("--db", db, "delete", 1)
++    assert result.returncode == 3
++    assert "1" in result.stderr
++
++
++def test_fr017_delete_on_an_empty_store_exits_3(run_cli, db):
++    """FR-017: well-formed but absent, even when nothing was ever stored."""
++    result = run_cli("--db", db, "delete", 1)
++    assert result.returncode == 3
++    assert result.stdout == ""
++    assert result.stderr != ""
++
++
++# --------------------------------------------------------------------------- FR-006
++
++
++def test_fr006_us3_scenario4_identifiers_are_never_reissued_after_deletion(run_cli, db):
++    """FR-006, US3 scenario 4: delete bookmark 2 of 2 and the next add must print 3,
++    not 2 — the single most likely thing to regress (research R-004)."""
++    assert run_cli("--db", db, "add", "https://a.example.com").stdout == "1\n"
++    assert run_cli("--db", db, "add", "https://b.example.com").stdout == "2\n"
++    assert run_cli("--db", db, "delete", 2).returncode == 0
++
++    assert run_cli("--db", db, "add", "https://c.example.com").stdout == "3\n"
++
++
++def test_fr006_identifier_stays_retired_after_deleting_every_bookmark(run_cli, db):
++    """FR-006: an identifier that has been issued is never issued again, even when the
++    store is emptied."""
++    run_cli("--db", db, "add", "https://a.example.com")
++    run_cli("--db", db, "add", "https://b.example.com")
++    run_cli("--db", db, "delete", 1)
++    run_cli("--db", db, "delete", 2)
++    assert run_cli("--db", db, "list").stdout == ""
++
++    assert run_cli("--db", db, "add", "https://c.example.com").stdout == "3\n"
++
++
++# -------------------------------------------------------------- FR-024 (2, never 3)
++
++
++def test_fr024_non_numeric_identifier_exits_2_never_3(run_cli, db):
++    """FR-024, data-model.md: `delete abc` is a usage mistake (2); status 3 is reserved
++    exclusively for a well-formed identifier that no bookmark holds."""
++    run_cli("--db", db, "add", "https://a.example.com")
++
++    result = run_cli("--db", db, "delete", "abc")
++
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert "abc" in result.stderr
++    assert "a.example.com" in run_cli("--db", db, "list").stdout
+diff --git a/tests/test_export.py b/tests/test_export.py
+new file mode 100644
+index 0000000..533fdf8
+--- /dev/null
++++ b/tests/test_export.py
+@@ -0,0 +1,214 @@
++"""`export`: FR-018, FR-019, FR-019a, FR-020, FR-020a, FR-021 and SC-006."""
++
++import csv
++import io
++import json
++
++import pytest
++
++# Values that stress quoting: a comma, a quotation mark, an embedded newline, non-ASCII
++# characters, multiple tags and an empty title (SC-006).
++AWKWARD = [
++    ("https://docs.python.org", "Python docs", "python,docs"),
++    ("https://example.com", 'He said "hi", then\nleft', ""),
++    ("https://café.example.com", "Café — ünïcode", "café,naïve"),
++]
++
++
++@pytest.fixture
++def awkward_store(run_cli, db):
++    for url, title, tags in AWKWARD:
++        args = ["--db", db, "add", url, "--title", title]
++        if tags:
++            args += ["--tags", tags]
++        assert run_cli(*args).returncode == 0
++    return db
++
++
++def csv_text(run_cli, db):
++    result = run_cli("--db", db, "export", "--format", "csv")
++    assert result.returncode == 0
++    assert result.stderr == ""
++    return result.stdout
++
++
++def json_text(run_cli, db):
++    result = run_cli("--db", db, "export", "--format", "json")
++    assert result.returncode == 0
++    assert result.stderr == ""
++    return result.stdout
++
++
++# --------------------------------------------------------------------------- FR-018
++
++
++def test_fr018_csv_starts_with_the_header_then_one_row_per_bookmark_by_id(run_cli, db):
++    """FR-018: the header line `id,url,title,tags`, then ascending identifier order."""
++    run_cli("--db", db, "add", "https://a.example.com", "--title", "A", "--tags", "x")
++    run_cli("--db", db, "add", "https://b.example.com", "--title", "B")
++
++    rows = list(csv.reader(io.StringIO(csv_text(run_cli, db))))
++    assert rows[0] == ["id", "url", "title", "tags"]
++    assert rows[1] == ["1", "https://a.example.com", "A", "x"]
++    assert rows[2] == ["2", "https://b.example.com", "B", ""]
++    assert len(rows) == 3
++
++
++def test_fr018_sc003_csv_tags_column_is_comma_joined_in_alphabetical_order(run_cli, db):
++    """FR-018, SC-003: the tags column holds the tags joined by `,`, alphabetically."""
++    run_cli("--db", db, "add", "https://a.example.com", "--tags", "zeta,Alpha,mid")
++    rows = list(csv.reader(io.StringIO(csv_text(run_cli, db))))
++    assert rows[1][3] == "alpha,mid,zeta"
++
++
++# --------------------------------------------------------------- FR-019 (and SC-006)
++
++
++def test_fr019_fields_with_commas_quotes_and_line_breaks_are_quoted(run_cli, awkward_store):
++    """FR-019: quoting with embedded quotes doubled, as a standard reader expects."""
++    text = csv_text(run_cli, awkward_store)
++    # The tags column of bookmark 1 contains a comma, so it is quoted.
++    assert '"docs,python"' in text
++    # The title of bookmark 2 contains a quote, a comma and a newline: quoted, quotes doubled.
++    assert '"He said ""hi"", then\nleft"' in text
++
++
++# -------------------------------------------------------------------------- FR-019a
++
++
++def test_fr019a_every_csv_line_ends_with_a_single_lf_and_never_crlf(run_cli, awkward_store):
++    """FR-019a: asserted on the raw bytes, header included."""
++    result = run_cli("--db", awkward_store, "export", "--format", "csv", text=False)
++    assert result.returncode == 0
++    raw = result.stdout
++    assert b"\r" not in raw
++    assert raw.startswith(b"id,url,title,tags\n")
++    assert raw.endswith(b"\n")
++
++
++def test_fr019a_line_break_inside_a_quoted_field_is_preserved_as_given(run_cli, awkward_store):
++    """FR-019a: the break inside the quoted title is part of the value, not a row end."""
++    rows = list(csv.reader(io.StringIO(csv_text(run_cli, awkward_store))))
++    assert rows[2][2] == 'He said "hi", then\nleft'
++    assert len(rows) == 1 + len(AWKWARD)
++
++
++# --------------------------------------------------------------------------- FR-020
++
++
++def test_fr020_json_is_an_array_of_objects_in_ascending_identifier_order(run_cli, db):
++    """FR-020: id as a number, plus url, title and tags as an alphabetical array."""
++    run_cli("--db", db, "add", "https://a.example.com", "--title", "A", "--tags", "zeta,alpha")
++    run_cli("--db", db, "add", "https://b.example.com")
++
++    payload = json.loads(json_text(run_cli, db))
++    assert payload == [
++        {"id": 1, "url": "https://a.example.com", "title": "A", "tags": ["alpha", "zeta"]},
++        {"id": 2, "url": "https://b.example.com", "title": "", "tags": []},
++    ]
++    assert isinstance(payload[0]["id"], int) and not isinstance(payload[0]["id"], bool)
++    assert isinstance(payload[0]["tags"], list)
++
++
++# -------------------------------------------------------------------------- FR-020a
++
++
++def test_fr020a_json_is_two_space_indented_one_key_per_line(run_cli, db):
++    """FR-020a: two spaces per nesting level, one key per line."""
++    run_cli("--db", db, "add", "https://a.example.com", "--title", "A", "--tags", "x")
++    text = json_text(run_cli, db)
++    assert text.splitlines()[:4] == [
++        "[",
++        "  {",
++        '    "id": 1,',
++        '    "url": "https://a.example.com",',
++    ]
++
++
++def test_fr020a_json_ends_with_exactly_one_trailing_newline(run_cli, awkward_store):
++    """FR-020a: a single trailing newline, not none and not two."""
++    text = json_text(run_cli, awkward_store)
++    assert text.endswith("]\n")
++    assert not text.endswith("]\n\n")
++
++
++def test_fr020a_non_ascii_is_written_literally_not_as_escapes(run_cli, awkward_store):
++    """FR-020a: literal UTF-8, never \\uXXXX escapes."""
++    text = json_text(run_cli, awkward_store)
++    assert "Café — ünïcode" in text
++    assert "\\u" not in text
++
++
++# --------------------------------------------------------------------------- FR-021
++
++
++def test_fr021_empty_store_csv_prints_the_header_alone(run_cli, db):
++    """FR-021: the header line alone, exit 0."""
++    result = run_cli("--db", db, "export", "--format", "csv")
++    assert result.returncode == 0
++    assert result.stdout == "id,url,title,tags\n"
++
++
++def test_fr021_empty_store_json_prints_an_empty_array_and_a_newline(run_cli, db):
++    """FR-021, FR-020a: `[]` followed by a newline, exit 0."""
++    result = run_cli("--db", db, "export", "--format", "json")
++    assert result.returncode == 0
++    assert result.stdout == "[]\n"
++
++
++# --------------------------------------------------------------------------- FR-024
++
++
++def test_fr024_unsupported_format_exits_2_with_a_diagnostic(run_cli, db):
++    """FR-024: `--format xml` is a usage mistake — stderr, nothing on stdout, status 2."""
++    result = run_cli("--db", db, "export", "--format", "xml")
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert "xml" in result.stderr
++
++
++def test_fr024_missing_format_exits_2(run_cli, db):
++    """FR-024: --format is required."""
++    result = run_cli("--db", db, "export")
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert "--format" in result.stderr
++
++
++# --------------------------------------------------------------------------- SC-006
++
++
++def test_sc006_csv_round_trips_every_seeded_value_unchanged(run_cli, awkward_store):
++    """SC-006: csv.reader recovers every field exactly, including the embedded newline,
++    the embedded quote and the non-ASCII title."""
++    rows = list(csv.reader(io.StringIO(csv_text(run_cli, awkward_store))))
++    assert rows[1:] == [
++        ["1", "https://docs.python.org", "Python docs", "docs,python"],
++        ["2", "https://example.com", 'He said "hi", then\nleft', ""],
++        ["3", "https://café.example.com", "Café — ünïcode", "café,naïve"],
++    ]
++
++
++def test_sc006_json_round_trips_every_seeded_value_unchanged(run_cli, awkward_store):
++    """SC-006: json.load recovers every field exactly."""
++    payload = json.loads(json_text(run_cli, awkward_store))
++    assert payload == [
++        {
++            "id": 1,
++            "url": "https://docs.python.org",
++            "title": "Python docs",
++            "tags": ["docs", "python"],
++        },
++        {
++            "id": 2,
++            "url": "https://example.com",
++            "title": 'He said "hi", then\nleft',
++            "tags": [],
++        },
++        {
++            "id": 3,
++            "url": "https://café.example.com",
++            "title": "Café — ünïcode",
++            "tags": ["café", "naïve"],
++        },
++    ]
+diff --git a/tests/test_list_search.py b/tests/test_list_search.py
+new file mode 100644
+index 0000000..3419193
+--- /dev/null
++++ b/tests/test_list_search.py
+@@ -0,0 +1,241 @@
++"""`list` and `search`: FR-004, FR-011, FR-012, FR-013, FR-014, FR-015."""
++
++import sqlite3
++
++
++def lines(result):
++    assert result.returncode == 0
++    return result.stdout.split("\n")[:-1] if result.stdout else []
++
++
++def stored_title(db, bookmark_id):
++    connection = sqlite3.connect(str(db))
++    try:
++        return connection.execute(
++            "SELECT title FROM bookmarks WHERE id = ?", (bookmark_id,)
++        ).fetchone()[0]
++    finally:
++        connection.close()
++
++
++# --------------------------------------------------------------------------- FR-011
++
++
++def test_fr011_sc003_list_prints_every_bookmark_in_ascending_identifier_order(run_cli, db):
++    """FR-011, SC-003: every bookmark, ascending identifier order."""
++    for url in ("https://a.example.com", "https://b.example.com", "https://c.example.com"):
++        run_cli("--db", db, "add", url)
++    result = run_cli("--db", db, "list")
++    assert [line.split("\t")[0] for line in lines(result)] == ["1", "2", "3"]
++    assert [line.split("\t")[1] for line in lines(result)] == [
++        "https://a.example.com",
++        "https://b.example.com",
++        "https://c.example.com",
++    ]
++
++
++def test_fr011_order_is_by_identifier_not_insertion_of_titles(run_cli, db):
++    """FR-011: ordering is by identifier, regardless of title or URL ordering."""
++    run_cli("--db", db, "add", "https://z.example.com", "--title", "Zebra")
++    run_cli("--db", db, "add", "https://a.example.com", "--title", "Aardvark")
++    assert [line.split("\t")[0] for line in lines(run_cli("--db", db, "list"))] == ["1", "2"]
++
++
++# --------------------------------------------------------------------------- FR-014
++
++
++def test_fr014_each_line_is_exactly_four_tab_separated_fields(run_cli, db):
++    """FR-014: identifier, URL, title, comma-joined alphabetical tags."""
++    run_cli(
++        "--db", db, "add", "https://docs.python.org",
++        "--title", "Python docs", "--tags", "python,docs",
++    )
++    (line,) = lines(run_cli("--db", db, "list"))
++    assert line.count("\t") == 3
++    assert line.split("\t") == ["1", "https://docs.python.org", "Python docs", "docs,python"]
++
++
++def test_fr014_sc003_tags_are_comma_joined_in_alphabetical_order(run_cli, db):
++    """FR-014, SC-003: the fourth field joins the bookmark's tags alphabetically."""
++    run_cli("--db", db, "add", "https://example.com", "--tags", "zeta,alpha,Mid")
++    (line,) = lines(run_cli("--db", db, "list"))
++    assert line.split("\t")[3] == "alpha,mid,zeta"
++
++
++def test_fr014_empty_title_and_empty_tags_are_empty_fields(run_cli, db):
++    """FR-014: a bookmark with no title and no tags ends in two consecutive tabs and the
++    line still carries three tabs."""
++    run_cli("--db", db, "add", "https://example.com")
++    (line,) = lines(run_cli("--db", db, "list"))
++    assert line == "1\thttps://example.com\t\t"
++    assert line.endswith("\t\t")
++    assert line.count("\t") == 3
++
++
++def test_fr014_tab_in_a_title_is_stored_and_returned_unchanged(run_cli, db):
++    """FR-014/CLI contract: fields are emitted raw with no escaping, so a title holding a
++    tab is returned unchanged and the TSV view is deliberately ambiguous for it."""
++    title = "two\tparts"
++    run_cli("--db", db, "add", "https://example.com", "--title", title)
++    assert stored_title(db, 1) == title
++    result = run_cli("--db", db, "list")
++    assert result.returncode == 0
++    assert result.stdout == f"1\thttps://example.com\t{title}\t\n"
++
++
++def test_fr014_newline_in_a_title_is_stored_and_returned_unchanged(run_cli, db):
++    """FR-014/CLI contract: a title holding a newline is stored and returned unchanged;
++    the lossless views are the CSV and JSON exports."""
++    title = "first\nsecond"
++    run_cli("--db", db, "add", "https://example.com", "--title", title)
++    assert stored_title(db, 1) == title
++    result = run_cli("--db", db, "list")
++    assert result.returncode == 0
++    assert result.stdout == f"1\thttps://example.com\t{title}\t\n"
++
++
++# --------------------------------------------------------------------------- FR-015
++
++
++def test_fr015_list_on_an_empty_store_prints_nothing_and_exits_zero(run_cli, db):
++    """FR-015: no matches means empty stdout and status 0."""
++    result = run_cli("--db", db, "list")
++    assert result.returncode == 0
++    assert result.stdout == ""
++
++
++# --------------------------------------------------------------------------- FR-004
++
++
++def test_fr004_bookmarks_persist_across_separate_invocations(run_cli, db):
++    """FR-004: a later process returns what earlier, separate processes stored."""
++    run_cli("--db", db, "add", "https://docs.python.org", "--title", "Python docs",
++            "--tags", "python,docs")
++    run_cli("--db", db, "add", "https://example.com")
++    result = run_cli("--db", db, "list")
++    assert lines(result) == [
++        "1\thttps://docs.python.org\tPython docs\tdocs,python",
++        "2\thttps://example.com\t\t",
++    ]
++
++
++# --------------------------------------------------------------------------- FR-012
++
++
++def test_fr012_tag_filter_prints_only_bookmarks_carrying_that_tag(run_cli, db):
++    """FR-012: --tag keeps only bookmarks carrying that whole tag, ascending id order,
++    in the same four-field layout as an unfiltered listing."""
++    run_cli("--db", db, "add", "https://a.example.com", "--tags", "python,docs")
++    run_cli("--db", db, "add", "https://b.example.com", "--tags", "news")
++    run_cli("--db", db, "add", "https://c.example.com", "--tags", "python")
++    result = run_cli("--db", db, "list", "--tag", "python")
++    assert lines(result) == [
++        "1\thttps://a.example.com\t\tdocs,python",
++        "3\thttps://c.example.com\t\tpython",
++    ]
++    for line in lines(result):
++        assert line.count("\t") == 3
++
++
++def test_fr012_filter_is_trimmed_and_lower_cased_before_comparison(run_cli, db):
++    """FR-012: --tag Python, --tag python and --tag " PYTHON " select the same bookmarks."""
++    run_cli("--db", db, "add", "https://a.example.com", "--tags", "python")
++    run_cli("--db", db, "add", "https://b.example.com", "--tags", "news")
++    selected = [
++        lines(run_cli("--db", db, "list", "--tag", spelling))
++        for spelling in ("Python", "python", " PYTHON ", "PyThOn")
++    ]
++    assert selected[0] == ["1\thttps://a.example.com\t\tpython"]
++    assert all(result == selected[0] for result in selected)
++
++
++def test_fr012_comparison_is_against_whole_tags_never_a_substring(run_cli, db):
++    """FR-012, spec Edge Cases: --tag py returns nothing for a bookmark tagged python."""
++    run_cli("--db", db, "add", "https://a.example.com", "--tags", "python")
++    result = run_cli("--db", db, "list", "--tag", "py")
++    assert result.returncode == 0
++    assert result.stdout == ""
++
++
++def test_fr015_tag_filter_matching_nothing_prints_nothing_and_exits_zero(run_cli, db):
++    """FR-015: a filter naming a tag no bookmark carries prints nothing, status 0."""
++    run_cli("--db", db, "add", "https://a.example.com", "--tags", "python")
++    result = run_cli("--db", db, "list", "--tag", "absent")
++    assert result.returncode == 0
++    assert result.stdout == ""
++
++
++def test_fr012_us2_scenario6_mixed_case_tags_are_found_by_either_spelling(run_cli, db):
++    """US2 acceptance scenario 6: added with --tags "Python,Docs", found by --tag python
++    and --tag PYTHON, with its tags field reading docs,python."""
++    run_cli("--db", db, "add", "https://docs.python.org", "--title", "Python docs",
++            "--tags", "Python,Docs")
++    for spelling in ("python", "PYTHON"):
++        (line,) = lines(run_cli("--db", db, "list", "--tag", spelling))
++        assert line.split("\t")[3] == "docs,python"
++
++
++# --------------------------------------------------------------------------- FR-013
++
++
++def test_fr013_search_matches_the_title_disregarding_capitalisation(run_cli, db):
++    """FR-013: search matches the title, ignoring case, ascending identifier order."""
++    run_cli("--db", db, "add", "https://docs.python.org", "--title", "Python docs")
++    run_cli("--db", db, "add", "https://news.example.com", "--title", "News")
++    result = run_cli("--db", db, "search", "PYTHON")
++    assert lines(result) == ["1\thttps://docs.python.org\tPython docs\t"]
++
++
++def test_fr013_search_matches_the_url_even_when_the_title_does_not(run_cli, db):
++    """FR-013: the URL is searched too."""
++    run_cli("--db", db, "add", "https://news.example.com", "--title", "Headlines")
++    result = run_cli("--db", db, "search", "EXAMPLE")
++    assert lines(result) == ["1\thttps://news.example.com\tHeadlines\t"]
++
++
++def test_fr013_search_returns_matches_in_ascending_identifier_order(run_cli, db):
++    """FR-013: ascending identifier order."""
++    for index in range(3):
++        run_cli("--db", db, "add", f"https://example.com/{index}", "--title", "Thing")
++    result = run_cli("--db", db, "search", "thing")
++    assert [line.split("\t")[0] for line in lines(result)] == ["1", "2", "3"]
++
++
++def test_fr013_search_folds_case_for_non_ascii_titles(run_cli, db):
++    """FR-013: case folding is Unicode-aware, not ASCII-only (research R-005)."""
++    run_cli("--db", db, "add", "https://cafe.example.com", "--title", "CAFÉ ÜNÏCODE")
++    result = run_cli("--db", db, "search", "café")
++    assert [line.split("\t")[0] for line in lines(result)] == ["1"]
++
++
++def test_fr015_search_matching_nothing_prints_nothing_and_exits_zero(run_cli, db):
++    """FR-015: search text appearing nowhere prints nothing and exits 0."""
++    run_cli("--db", db, "add", "https://example.com", "--title", "Thing")
++    result = run_cli("--db", db, "search", "zzz")
++    assert result.returncode == 0
++    assert result.stdout == ""
++
++
++def test_fr013_empty_search_text_matches_every_bookmark(run_cli, db):
++    """Spec Edge Cases: every string contains the empty string."""
++    run_cli("--db", db, "add", "https://a.example.com")
++    run_cli("--db", db, "add", "https://b.example.com")
++    result = run_cli("--db", db, "search", "")
++    assert [line.split("\t")[0] for line in lines(result)] == ["1", "2"]
++
++
++def test_fr013_search_text_is_matched_literally_with_no_wildcards(run_cli, db):
++    """FR-013, CLI contract, research R-005: % and _ are not wildcards."""
++    run_cli("--db", db, "add", "https://example.com/a", "--title", "100% done")
++    run_cli("--db", db, "add", "https://example.com/b", "--title", "a_b")
++    run_cli("--db", db, "add", "https://example.com/c", "--title", "axb")
++
++    percent = run_cli("--db", db, "search", "100%")
++    assert [line.split("\t")[0] for line in lines(percent)] == ["1"]
++
++    underscore = run_cli("--db", db, "search", "a_b")
++    assert [line.split("\t")[0] for line in lines(underscore)] == ["2"]
++
++    # '%' alone would match everything if it were a wildcard.
++    wildcard = run_cli("--db", db, "search", "%")
++    assert [line.split("\t")[0] for line in lines(wildcard)] == ["1"]
+diff --git a/tests/test_performance.py b/tests/test_performance.py
+new file mode 100644
+index 0000000..f7cc882
+--- /dev/null
++++ b/tests/test_performance.py
+@@ -0,0 +1,69 @@
++"""The performance budget and large-store fidelity: SC-002 and SC-007.
++
++The 1,000-bookmark store is seeded through ``store.py`` directly — 1,000 subprocess
++launches would cost minutes, and the seeding route is not what is under test (research
++R-009). The user-visible commands are then measured as real subprocesses.
++"""
++
++import time
++
++import pytest
++
++COUNT = 1000
++BUDGET_SECONDS = 1.0
++
++
++@pytest.fixture
++def large_store(db, seed_many):
++    identifiers = seed_many(db, COUNT)
++    assert len(identifiers) == COUNT
++    return db
++
++
++def timed(run_cli, *args):
++    start = time.perf_counter()
++    result = run_cli(*args)
++    elapsed = time.perf_counter() - start
++    assert result.returncode == 0, result.stderr
++    return result, elapsed
++
++
++# --------------------------------------------------------------------------- SC-007
++
++
++@pytest.mark.parametrize(
++    "command",
++    [
++        ("list",),
++        ("list", "--tag", "common"),
++        ("search", "Page 7"),
++        ("export", "--format", "csv"),
++        ("export", "--format", "json"),
++        ("delete", 1),
++    ],
++    ids=["list", "list-tag", "search", "export-csv", "export-json", "delete"],
++)
++def test_sc007_each_command_returns_in_under_a_second_on_a_1000_bookmark_store(
++    run_cli, large_store, command
++):
++    """SC-007: under one second per command, measured through a real subprocess."""
++    _, elapsed = timed(run_cli, "--db", large_store, *command)
++    assert elapsed < BUDGET_SECONDS, f"{command} took {elapsed:.3f}s"
++
++
++# --------------------------------------------------------------------------- SC-002
++
++
++def test_sc002_list_returns_all_1000_bookmarks_unchanged(run_cli, large_store):
++    """SC-002: all 1,000 come back with URLs, titles and tags identical to what was
++    stored, in ascending identifier order."""
++    result, _ = timed(run_cli, "--db", large_store, "list")
++    lines = result.stdout.split("\n")[:-1]
++    assert len(lines) == COUNT
++
++    for index, line in enumerate(lines):
++        identifier, url, title, tags = line.split("\t")
++        assert identifier == str(index + 1)
++        assert url == f"https://example.com/page/{index}"
++        assert title == f"Page {index}"
++        assert tags == ",".join(sorted({"common", f"tag{index % 10}"}))
+diff --git a/tests/test_store.py b/tests/test_store.py
+new file mode 100644
+index 0000000..e077546
+--- /dev/null
++++ b/tests/test_store.py
+@@ -0,0 +1,241 @@
++"""Store lifecycle: FR-002, FR-003, FR-003a, FR-004 and SC-009.
++
++These exercise ``store.open_store`` directly; the subprocess-level assertions for the
++same failures (exit status 1, empty stdout) are at the bottom of this file.
++"""
++
++import hashlib
++import os
++import sqlite3
++import stat
++from pathlib import Path
++
++import pytest
++
++from bookmarks import store
++from bookmarks.cli import build_parser
++
++
++def sha256(path):
++    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
++
++
++def tables_of(path):
++    connection = sqlite3.connect(str(path))
++    try:
++        return {
++            row[0]
++            for row in connection.execute(
++                "SELECT name FROM sqlite_master WHERE type='table'"
++            )
++        }
++    finally:
++        connection.close()
++
++
++# --------------------------------------------------------------------------- FR-002
++
++
++def test_fr002_default_store_is_bookmarks_db_in_the_current_directory():
++    """FR-002: with no --db, the store is bookmarks.db in the working directory."""
++    assert build_parser().get_default("db") == "bookmarks.db"
++
++
++def test_fr002_default_path_is_relative_to_the_working_directory(tmp_path, monkeypatch):
++    """FR-002: the default path resolves against the current directory, so two
++    directories hold two separate collections."""
++    monkeypatch.chdir(tmp_path)
++    store.open_store("bookmarks.db").close()
++    assert (tmp_path / "bookmarks.db").exists()
++
++
++def test_fr002_db_option_path_overrides_the_default(tmp_path):
++    """FR-002: --db PATH selects the store file."""
++    elsewhere = tmp_path / "chosen.db"
++    store.open_store(elsewhere).close()
++    assert elsewhere.exists()
++
++
++# --------------------------------------------------------------------------- FR-003
++
++
++def test_fr003_absent_path_with_existing_parent_is_created_with_its_schema(db):
++    """FR-003: the store file and its structure are created when absent."""
++    assert not db.exists()
++    store.open_store(db).close()
++    assert db.exists()
++    assert {"bookmarks", "tags"} <= tables_of(db)
++
++
++def test_fr003_existing_store_is_opened_and_appended_to_never_reset(db):
++    """FR-003: an existing store is opened without destroying its contents."""
++    connection = store.open_store(db)
++    connection.execute("INSERT INTO bookmarks (url, title) VALUES ('https://a', 'A')")
++    connection.commit()
++    connection.close()
++
++    reopened = store.open_store(db)
++    try:
++        rows = reopened.execute("SELECT url, title FROM bookmarks").fetchall()
++        reopened.execute("INSERT INTO bookmarks (url, title) VALUES ('https://b', 'B')")
++        reopened.commit()
++        assert rows == [("https://a", "A")]
++        assert reopened.execute("SELECT count(*) FROM bookmarks").fetchone()[0] == 2
++    finally:
++        reopened.close()
++
++
++def test_fr003_valid_but_empty_sqlite_database_gets_the_schema(db):
++    """FR-003: a zero-table SQLite file is initialised rather than refused."""
++    sqlite3.connect(str(db)).close()
++    assert tables_of(db) == set()
++    store.open_store(db).close()
++    assert {"bookmarks", "tags"} <= tables_of(db)
++
++
++def test_fr003_foreign_keys_are_enabled_on_every_connection(db):
++    """FR-003/FR-016: without PRAGMA foreign_keys = ON the ON DELETE CASCADE is inert."""
++    connection = store.open_store(db)
++    try:
++        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
++    finally:
++        connection.close()
++
++
++# -------------------------------------------------------------------------- FR-003a
++
++
++def test_fr003a_missing_parent_directory_fails_without_creating_anything(tmp_path):
++    """FR-003a: exit status 1, and no directory and no file is created."""
++    missing_parent = tmp_path / "nope"
++    target = missing_parent / "bookmarks.db"
++
++    with pytest.raises(store.BookmarkError) as raised:
++        store.open_store(target)
++
++    assert raised.value.status == 1
++    assert str(target) in raised.value.message
++    assert not missing_parent.exists()
++    assert not target.exists()
++
++
++def test_fr003a_sc009_plain_text_file_is_refused_byte_for_byte_unchanged(tmp_path):
++    """FR-003a, SC-009: a file that is not a bookmark database is left untouched."""
++    plain = tmp_path / "plain.txt"
++    plain.write_text("this is not a database\n", encoding="utf-8")
++    before = sha256(plain)
++
++    with pytest.raises(store.BookmarkError) as raised:
++        store.open_store(plain)
++
++    assert raised.value.status == 1
++    assert str(plain) in raised.value.message
++    # Names the reason as well as the path (constitution Principle II).
++    assert "not a bookmark database" in raised.value.message
++    assert sha256(plain) == before
++
++
++def test_fr003a_sc009_another_programs_database_is_refused_and_untouched(tmp_path):
++    """FR-003a, SC-009: a valid SQLite file holding foreign tables is still not ours."""
++    other = tmp_path / "other.db"
++    connection = sqlite3.connect(str(other))
++    connection.execute("CREATE TABLE other (x)")
++    connection.commit()
++    connection.close()
++    before = sha256(other)
++
++    with pytest.raises(store.BookmarkError) as raised:
++        store.open_store(other)
++
++    assert raised.value.status == 1
++    assert str(other) in raised.value.message
++    assert "another program" in raised.value.message
++    assert sha256(other) == before
++    assert tables_of(other) == {"other"}
++
++
++@pytest.mark.skipif(
++    os.geteuid() == 0,
++    reason="root bypasses the mode bits, so a chmod 000 store would still open and the "
++    "test would pass without proving anything (research R-002)",
++)
++def test_fr003a_permission_denied_is_reported_as_an_unusable_store(db):
++    """FR-003a: the file system denying the required access exits 1, file unchanged."""
++    store.open_store(db).close()
++    before = sha256(db)
++    db.chmod(0)
++    try:
++        with pytest.raises(store.BookmarkError) as raised:
++            store.open_store(db)
++        assert raised.value.status == 1
++        assert str(db) in raised.value.message
++    finally:
++        db.chmod(stat.S_IRUSR | stat.S_IWUSR)
++    assert sha256(db) == before
++
++
++# ------------------------------------- FR-003a, SC-009 at the subprocess level (T021)
++#
++# The same failures as above, now observed the way a user does: a real exit status, a
++# diagnostic on stderr and nothing on stdout, for a read command and a write command
++# alike (research R-009).
++
++
++def unusable_store_cases(tmp_path):
++    plain = tmp_path / "plain.txt"
++    plain.write_text("this is not a database\n", encoding="utf-8")
++
++    other = tmp_path / "other.db"
++    connection = sqlite3.connect(str(other))
++    connection.execute("CREATE TABLE other (x)")
++    connection.commit()
++    connection.close()
++
++    return {
++        "missing-parent": tmp_path / "nope" / "bookmarks.db",
++        "not-a-database": plain,
++        "another-program": other,
++    }
++
++
++@pytest.mark.parametrize("case", ["missing-parent", "not-a-database", "another-program"])
++@pytest.mark.parametrize("command", [("list",), ("add", "https://x.example.com")])
++def test_fr003a_sc009_unusable_store_exits_1_with_empty_stdout(
++    run_cli, tmp_path, case, command
++):
++    """FR-003a, SC-009: status 1, a diagnostic naming the path on stderr, nothing on
++    stdout, no file or directory created, and the target byte-for-byte unchanged — for
++    both a read command (list) and a write command (add)."""
++    target = unusable_store_cases(tmp_path)[case]
++    before = sha256(target) if target.exists() else None
++
++    result = run_cli("--db", target, *command)
++
++    assert result.returncode == 1
++    assert result.stdout == ""
++    assert str(target) in result.stderr
++    if before is None:
++        assert not target.exists()
++        assert not target.parent.exists()
++    else:
++        assert sha256(target) == before
++
++
++@pytest.mark.skipif(
++    os.geteuid() == 0,
++    reason="root bypasses the mode bits, so a read-only store would still open and the "
++    "test would pass without proving anything (research R-002)",
++)
++def test_fr003a_read_only_store_file_fails_with_status_1_even_for_list(run_cli, db):
++    """Research R-002, CLI contract: all commands open the store read-write because any
++    command may have to create it, so a read-only file exits 1 even for `list` — a
++    documented consequence, not an accident."""
++    store.open_store(db).close()
++    db.chmod(stat.S_IRUSR)
++    try:
++        result = run_cli("--db", db, "list")
++        assert result.returncode == 1
++        assert result.stdout == ""
++        assert str(db) in result.stderr
++    finally:
++        db.chmod(stat.S_IRUSR | stat.S_IWUSR)

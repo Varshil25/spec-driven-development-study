@@ -1,0 +1,155 @@
+diff --git a/specs/001-bookmark-manager-cli/checklists/requirements.md b/specs/001-bookmark-manager-cli/checklists/requirements.md
+index 4fb50b6..509bcf2 100644
+--- a/specs/001-bookmark-manager-cli/checklists/requirements.md
++++ b/specs/001-bookmark-manager-cli/checklists/requirements.md
+@@ -47,7 +47,10 @@
+ - **Unresolved questions**: none. Gaps in the feature description (duplicate URLs, identifier reuse
+   after deletion, tag normalisation, tag-filter case sensitivity, empty-store export) were resolved
+   with documented defaults in the Assumptions section rather than [NEEDS CLARIFICATION] markers,
+-  since each has a clear conventional answer. Three of these are worth a confirming glance before
+-  planning: identifiers are never reused, duplicate URLs are allowed, and `list --tag` matches
+-  whole tags case-sensitively while `search` ignores case.
++  since each has a clear conventional answer. Two of these remain assumptions worth a confirming
++  glance before planning: identifiers are never reused, and duplicate URLs are allowed. Tag case
++  handling is no longer an assumption — the `/speckit-clarify` session of 2026-11-16 settled it
++  (tags are stored lower-cased and `--tag` matches case-insensitively), along with the exit-status
++  map, CSV line endings, unusable-store behaviour and JSON layout. See the spec's Clarifications
++  section.
+ - Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`
+diff --git a/specs/001-bookmark-manager-cli/spec.md b/specs/001-bookmark-manager-cli/spec.md
+index 354b888..296afdb 100644
+--- a/specs/001-bookmark-manager-cli/spec.md
++++ b/specs/001-bookmark-manager-cli/spec.md
+@@ -8,6 +8,16 @@
+ 
+ **Input**: User description: "Build a command-line bookmark manager that stores bookmarks in an SQLite database. Run it as `python -m bookmarks [--db PATH] COMMAND ...` with commands add, list, search, delete and export; tab-separated output for list/search; CSV and JSON export; validation of URL scheme with exit status 2; missing-id deletion with exit status 3."
+ 
++## Clarifications
++
++### Session 2026-11-16
++
++- Q: When the user makes a plain usage mistake (unknown command, missing required argument, non-numeric `delete` id, unsupported `--format`), which exit status should the tool report? → A: All usage mistakes exit 2, the same status as a rejected URL; 3 stays reserved for deleting an identifier that does not exist.
++- Q: Should each line of the CSV export end with a plain newline (LF) or the standard's CRLF pair? → A: Plain LF (`\n`), matching the tool's other output and Unix pipeline convention.
++- Q: What should happen when the store file cannot be opened (not a bookmark database, missing parent directory, unreadable or unwritable)? → A: Exit status 1 with a diagnostic naming the path and the reason; the existing file is never overwritten, truncated or repaired.
++- Q: How should the JSON export be laid out, and should non-English characters appear literally or as escape codes? → A: Two-space indentation, non-ASCII written literally as UTF-8, one trailing newline; all output is encoded UTF-8 regardless of the machine's locale.
++- Q: When a bookmark's tags differ in capitalisation, what counts as "alphabetical order" for the tags column? → A: Tags are case-insensitive throughout — stored trimmed and lower-cased with duplicates collapsed, and `--tag` matches case-insensitively — so the question does not arise.
++
+ ## User Scenarios & Testing *(mandatory)*
+ 
+ ### User Story 1 - Save a bookmark and get it back later (Priority: P1)
+@@ -43,6 +53,7 @@ Once a collection grows past a screenful, reading the whole list stops working.
+ 3. **Given** a bookmark named "Python docs" at `https://docs.python.org`, **When** the user searches for `PYTHON`, **Then** that bookmark is printed, demonstrating that capitalization is ignored.
+ 4. **Given** bookmarks whose addresses contain the search text but whose names do not, **When** the user searches, **Then** those bookmarks are printed — the text is matched against name and address alike.
+ 5. **Given** search text that appears nowhere, **When** the user searches, **Then** nothing is printed and the command finishes successfully.
++6. **Given** a bookmark added with the labels `Python,Docs`, **When** the user lists with the label filter `python` and again with `PYTHON`, **Then** the bookmark is printed both times and its label field reads `docs,python` — labels are kept in lower case and matched without regard to capitalization.
+ 
+ ---
+ 
+@@ -77,24 +88,26 @@ The user wants the whole collection in a form another program can read: a spread
+ 2. **Given** a bookmark whose name contains a comma or a quotation mark, or a bookmark carrying more than one label, **When** the user exports in table form, **Then** the affected fields are quoted so that a standard table reader recovers the original values exactly.
+ 3. **Given** bookmarks in the store, **When** the user exports in structured form, **Then** the output is a single list of records in ascending identifier order, each record carrying the identifier as a number, the address, the name, and the labels as a list of separate values in alphabetical order.
+ 4. **Given** an empty store, **When** the user exports in table form, **Then** only the header line is printed; **When** the user exports in structured form, **Then** an empty list is printed. Both finish successfully.
+-5. **Given** an export form that is neither of the two supported forms, **When** the user requests it, **Then** the tool prints a diagnostic on the diagnostic stream and reports a non-zero failure code.
++5. **Given** an export form that is neither of the two supported forms, **When** the user requests it, **Then** the tool prints a diagnostic on the diagnostic stream and reports failure code 2.
+ 
+ ---
+ 
+ ### Edge Cases
+ 
+ - **Address rejected**: any address not beginning with `http://` or `https://` — including `ftp://example.com`, a bare `example.com`, empty text, or text where the scheme appears later in the string — is rejected before anything is stored, with failure code 2.
+-- **Store does not exist yet**: the first command that needs the store creates it, including when `--db` points at a path whose file is absent. A path whose parent directory does not exist is a failure, reported with a diagnostic and a non-zero code.
++- **Store does not exist yet**: the first command that needs the store creates it, including when `--db` points at a path whose file is absent. A path whose parent directory does not exist is a failure, reported with a diagnostic and failure code 1; the tool does not create missing directories.
++- **Store path unusable**: if `--db` names an existing file that is not a bookmark database — a text file, an image, a database from another program — or a file the tool may not read or write, the command fails with a diagnostic and code 1 and the file is left exactly as it was. The tool never overwrites or re-initialises a file it cannot recognise.
+ - **No `--db` given**: the store is the file `bookmarks.db` in the directory the command was run from, so running from two different directories uses two different collections.
+ - **Existing store**: a store created by an earlier run is opened and added to, never reset or overwritten.
+ - **Empty and whitespace-only labels**: `--tags "python,,docs"`, `--tags ""`, and surrounding spaces produce the label set that a reader would expect — no empty label is ever stored or printed.
+-- **Duplicate labels on one bookmark**: naming the same label twice leaves the bookmark carrying it once.
++- **Duplicate labels on one bookmark**: naming the same label twice leaves the bookmark carrying it once. Labels differing only in capitalization are the same label, so `--tags "Python,python"` leaves the bookmark carrying `python` alone.
++- **Label capitalization**: labels are stored and printed in lower case whatever case they were typed in, so a listing never shows both `Python` and `python`.
+ - **Label order**: labels are always printed in alphabetical order regardless of the order they were supplied in.
+ - **Same address added twice**: both bookmarks are kept, each with its own identifier; addresses are not required to be unique.
+ - **Empty name**: a bookmark added without a name has an empty name field in listings, searches and exports — not a placeholder.
+ - **Search text that is empty**: matches every bookmark, since every name and address contains empty text.
+-- **Label filter matches whole labels only**: filtering by `py` does not return a bookmark labelled `python`.
+-- **Identifier that is not a number**: deleting with a non-numeric identifier is reported as a usage mistake with a diagnostic and a non-zero code, distinct from a successful deletion.
++- **Label filter matches whole labels only**: filtering by `py` does not return a bookmark labelled `python`, though filtering by `PYTHON` does.
++- **Identifier that is not a number**: deleting with a non-numeric identifier is reported as a usage mistake with a diagnostic and failure code 2 — never code 3, which means the identifier was well-formed but absent.
+ - **Name or label containing a tab or newline**: stored and returned unchanged; the specification does not require escaping in the tab-separated listing, but table and structured exports must still round-trip such values.
+ 
+ ## Requirements *(mandatory)*
+@@ -106,6 +119,7 @@ The user wants the whole collection in a form another program can read: a spread
+ - **FR-001**: The tool MUST be invocable as `python -m bookmarks [--db PATH] COMMAND ...` and MUST support the commands `add`, `list`, `search`, `delete` and `export`.
+ - **FR-002**: The tool MUST store bookmarks in a single SQLite database file, which MUST be the path given by `--db` when present and `bookmarks.db` in the current working directory otherwise.
+ - **FR-003**: The tool MUST create the database file and its structure when it does not already exist, and MUST open an existing file without destroying its contents.
++- **FR-003a**: When the store cannot be opened for use — the path exists but is not a readable bookmark database, its parent directory does not exist, or the file system denies the required read or write access — the tool MUST write a diagnostic to standard error naming the path and the reason, MUST leave any existing file untouched (never overwritten, truncated, re-initialised or repaired), MUST create no new file or directory, MUST write nothing to standard output, and MUST exit with status 1.
+ - **FR-004**: Bookmarks MUST persist across separate invocations of the tool.
+ 
+ **Adding**
+@@ -115,12 +129,12 @@ The user wants the whole collection in a form another program can read: a spread
+ - **FR-007**: `add` MUST reject any URL that does not begin with the literal text `http://` or `https://`, writing a diagnostic naming the rejected URL and the accepted schemes to standard error, storing nothing, and exiting with status 2.
+ - **FR-008**: `--title TITLE` MUST set the bookmark's title; when omitted the title MUST be the empty string.
+ - **FR-009**: `--tags TAGS` MUST interpret TAGS as a comma-separated list of tags (for example `python,cli`); when omitted the bookmark MUST have no tags.
+-- **FR-010**: Tag parsing MUST discard empty entries, MUST trim surrounding whitespace from each tag, and MUST store each distinct tag at most once per bookmark.
++- **FR-010**: Tag parsing MUST trim surrounding whitespace from each entry, MUST discard entries that are empty after trimming, MUST convert each remaining tag to lower case, and MUST then store each distinct tag at most once per bookmark. Tags that differ only in capitalisation are therefore the same tag: `--tags "Python,python,PYTHON"` stores the single tag `python`.
+ 
+ **Listing and searching**
+ 
+ - **FR-011**: `list` MUST print every bookmark in ascending identifier order.
+-- **FR-012**: `list --tag TAG` MUST print only bookmarks carrying a tag exactly equal to TAG, in ascending identifier order.
++- **FR-012**: `list --tag TAG` MUST print only bookmarks carrying a tag equal to TAG when capitalisation is disregarded, in ascending identifier order. TAG MUST be trimmed and lower-cased before comparison, so `--tag Python`, `--tag python` and `--tag " PYTHON "` select the same bookmarks. The comparison MUST be against whole tags, never a substring.
+ - **FR-013**: `search TEXT` MUST print every bookmark whose title or URL contains TEXT when capitalization is disregarded, in ascending identifier order.
+ - **FR-014**: `list` and `search` MUST print one bookmark per line as exactly four tab-separated fields in this order: identifier, URL, title, and the bookmark's tags joined by commas in alphabetical order. A bookmark with no tags MUST have an empty fourth field.
+ - **FR-015**: `list` and `search` that match no bookmarks MUST print nothing on standard output and exit with status 0.
+@@ -134,14 +148,17 @@ The user wants the whole collection in a form another program can read: a spread
+ 
+ - **FR-018**: `export --format csv` MUST print the header line `id,url,title,tags` followed by one row per bookmark in ascending identifier order, with the tags column holding that bookmark's tags joined by commas in alphabetical order.
+ - **FR-019**: CSV output MUST quote fields as needed so that values containing commas, quotation marks or line breaks are recovered unchanged by a standard CSV reader.
++- **FR-019a**: Every CSV line, including the header, MUST be terminated by a single line feed (`\n`), not a carriage-return/line-feed pair. Line breaks occurring inside a quoted field are part of that field's value and MUST be preserved as given.
+ - **FR-020**: `export --format json` MUST print a single JSON array of objects, in ascending identifier order, each with the keys `id` (a number), `url`, `title` and `tags` (an array of strings in alphabetical order).
++- **FR-020a**: JSON output MUST be indented by two spaces per nesting level, one key per line, and MUST end with a single trailing newline. Characters outside ASCII MUST be written literally rather than as `\uXXXX` escapes. An empty store MUST therefore print `[]` followed by a newline.
+ - **FR-021**: Export of an empty store MUST print the header line alone in CSV form and an empty array in JSON form, exiting with status 0 in both cases.
+ 
+ **Exit statuses and streams**
+ 
+ - **FR-022**: Every command that completes its work MUST exit with status 0.
+ - **FR-023**: All command results MUST be written to standard output and all diagnostics to standard error; a failing command MUST NOT write partial results to standard output.
+-- **FR-024**: Status 2 MUST be used for a rejected URL and status 3 for deleting an identifier that does not exist. Other usage mistakes — an unknown command, a missing required argument, a non-numeric identifier, an unsupported export format — MUST produce a diagnostic on standard error and a non-zero exit status.
++- **FR-023a**: Standard output and standard error MUST be encoded as UTF-8 irrespective of the machine's locale settings, so that a title, tag or URL containing non-ASCII characters is emitted correctly instead of raising an encoding error.
++- **FR-024**: Exit statuses MUST form one complete map: 0 success, 1 the store could not be used (per FR-003a), 2 any mistake in what the user supplied, 3 deleting an identifier that does not exist. Status 2 MUST be used for a rejected URL, and every other usage mistake — an unknown command, a missing required argument, a non-numeric identifier, an unsupported export format — MUST produce a diagnostic on standard error and exit with status 2 as well; status 3 is reserved exclusively for the missing-identifier case.
+ 
+ **Platform**
+ 
+@@ -152,7 +169,7 @@ The user wants the whole collection in a form another program can read: a spread
+ ### Key Entities
+ 
+ - **Bookmark**: one saved web address. Carries an identifier unique within the store and never reused, the URL, a title (possibly empty), and a set of tags (possibly empty). Ordering among bookmarks is by identifier.
+-- **Tag**: a short label attached to a bookmark. A bookmark carries each tag at most once; a tag may be shared by many bookmarks. Tags have no meaning beyond grouping and are presented in alphabetical order.
++- **Tag**: a short label attached to a bookmark, held in lower case so that two spellings differing only in capitalization are one and the same tag. A bookmark carries each tag at most once; a tag may be shared by many bookmarks. Tags have no meaning beyond grouping and are presented in alphabetical order.
+ 
+ ## Success Criteria *(mandatory)*
+ 
+@@ -163,9 +180,10 @@ The user wants the whole collection in a form another program can read: a spread
+ - **SC-003**: Every listing, search and export returns bookmarks in ascending identifier order and every tag group in alphabetical order, in 100% of cases.
+ - **SC-004**: 100% of URLs lacking an `http://` or `https://` prefix are refused, with nothing stored and failure signalled by exit status 2, verified across at least five differently malformed inputs.
+ - **SC-005**: Deleting an identifier that does not exist signals failure by exit status 3 and leaves the stored collection byte-for-byte unchanged, in 100% of attempts.
+-- **SC-006**: CSV and JSON exports of a collection containing commas, quotation marks, multiple tags and empty titles are read back by standard tools with no value altered or lost.
++- **SC-006**: CSV and JSON exports of a collection containing commas, quotation marks, line breaks, non-ASCII characters, multiple tags and empty titles are read back by standard tools with no value altered or lost.
+ - **SC-007**: Each command on a store of 1,000 bookmarks returns its result in under one second on ordinary hardware.
+ - **SC-008**: Every functional requirement is demonstrated by at least one automated test, and the full suite passes.
++- **SC-009**: Pointing the tool at an unusable store — a path inside a directory that does not exist, or an existing file that is not a bookmark database — fails with exit status 1 and an explanatory message in 100% of attempts, and the targeted file is byte-for-byte unchanged afterwards.
+ 
+ ## Assumptions
+ 
+@@ -173,9 +191,9 @@ The user wants the whole collection in a form another program can read: a spread
+ - Scheme validation is a literal prefix check for `http://` and `https://`, matching the stated requirement; no further URL structure is validated and the address is not fetched or checked for reachability.
+ - URLs are not required to be unique — the same address may be saved more than once, each time receiving its own identifier — because the description gives no de-duplication rule.
+ - Identifiers are never reused after deletion, matching the stated rule that identifiers "start at 1 and increase".
+-- Tag matching in `list --tag` is exact and case-sensitive; only `search` is specified as ignoring capitalization.
+-- Tags are stored as given apart from trimming surrounding whitespace, dropping empty entries, and collapsing exact duplicates; no case folding or other normalisation is applied.
+-- Alphabetical tag ordering is the standard ordering of the stored text, which for the plain lowercase tags in the examples is ordinary alphabetical order.
++- Tags are case-insensitive: they are stored lower-cased, and `list --tag` matches whole tags while disregarding capitalization, as does `search`. A tag's original capitalization is not retained anywhere.
++- Tag normalisation is limited to trimming surrounding whitespace, dropping empty entries, lower-casing, and collapsing the duplicates that result; no stemming, synonym handling or other normalisation is applied.
++- Alphabetical tag ordering is the standard ordering of the stored text. Because stored tags are always lower case, this is ordinary alphabetical order with no case-related surprises.
+ - `list` and `search` emit raw tab-separated fields with no escaping, as shown in the examples; a title containing a tab would therefore be ambiguous in that view, which is accepted because the lossless views are the CSV and JSON exports.
+ - Output is plain text on standard output with no colour, paging or interactive prompting, so the tool composes with other command-line tools.
+ - There is no update or edit command, no import, and no archiving of page content; the five listed commands are the whole scope.

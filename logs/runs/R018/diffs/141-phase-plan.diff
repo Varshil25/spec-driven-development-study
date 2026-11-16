@@ -1,0 +1,1249 @@
+diff --git a/specs/001-bookmark-manager-cli/contracts/cli-contract.md b/specs/001-bookmark-manager-cli/contracts/cli-contract.md
+new file mode 100644
+index 0000000..1053658
+--- /dev/null
++++ b/specs/001-bookmark-manager-cli/contracts/cli-contract.md
+@@ -0,0 +1,235 @@
++# CLI Contract: `python -m bookmarks`
++
++**Feature**: `001-bookmark-manager-cli` | **Date**: 2026-11-16
++
++This is the complete external interface of the tool — the command grammar, the byte-level output
++formats, and the exit-status map. It is the contract tests assert against. Nothing here is
++optional and nothing beyond here is offered: the five commands are the whole scope.
++
++---
++
++## Invocation
++
++```text
++python -m bookmarks [--db PATH] COMMAND [ARGS...]
++```
++
++`src/` must be on `PYTHONPATH` (FR-026). `--db` is a global option and must appear **before** the
++command, as the grammar above shows.
++
++| Option       | Default                            | Meaning |
++| ------------ | ---------------------------------- | ------- |
++| `--db PATH`  | `bookmarks.db` in the current directory | The SQLite store file (FR-002) |
++
++Because the default is relative to the working directory, running from two different directories
++uses two different collections.
++
++`--help` on the tool or on any command prints usage to stdout and exits **0**.
++
++---
++
++## Commands
++
++### `add URL [--title TITLE] [--tags TAGS]`
++
++Stores a bookmark and prints its identifier.
++
++| Argument      | Required | Default | Meaning |
++| ------------- | -------- | ------- | ------- |
++| `URL`         | yes      | —       | Must begin with the literal `http://` or `https://` (FR-007) |
++| `--title`     | no       | `""`    | Display title (FR-008) |
++| `--tags`      | no       | none    | Comma-separated tag list, e.g. `python,cli` (FR-009) |
++
++**stdout**: the new identifier followed by a newline, and nothing else (FR-005).
++
++```console
++$ python -m bookmarks add https://docs.python.org --title "Python docs" --tags python,docs
++1
++```
++
++Identifiers start at 1 in a fresh store, increase, and are never reissued — not even after the
++bookmark holding one is deleted (FR-006).
++
++Tags are trimmed, lower-cased, de-duplicated, and empty entries dropped before storage
++(FR-010); see [data-model.md](../data-model.md) for the worked cases.
++
++**Failure**: a URL failing the prefix check writes a diagnostic to stderr naming the rejected URL
++and the accepted schemes, stores nothing, writes nothing to stdout, and exits **2** (FR-007).
++
++### `list [--tag TAG]`
++
++Prints bookmarks in ascending identifier order (FR-011).
++
++| Argument  | Required | Meaning |
++| --------- | -------- | ------- |
++| `--tag`   | no       | Keep only bookmarks carrying this tag (FR-012) |
++
++`TAG` is trimmed and lower-cased before comparison, and matched against **whole tags only**: so
++`--tag Python`, `--tag python` and `--tag " PYTHON "` select the same bookmarks, while `--tag py`
++does **not** match a bookmark tagged `python`.
++
++**stdout**: the TSV record format below, one bookmark per line. No match prints nothing and
++exits 0 (FR-015).
++
++### `search TEXT`
++
++Prints every bookmark whose title **or** URL contains `TEXT`, disregarding capitalisation, in
++ascending identifier order (FR-013).
++
++| Argument | Required | Meaning |
++| -------- | -------- | ------- |
++| `TEXT`   | yes      | Substring to look for; matching ignores case |
++
++Empty `TEXT` matches every bookmark, since every string contains the empty string. `TEXT` is
++matched literally — it holds no wildcards, so `100%` searches for `100%`.
++
++**stdout**: the TSV record format below. No match prints nothing and exits 0 (FR-015).
++
++### `delete ID`
++
++Removes the bookmark with that identifier, together with its tags, so it appears in no later
++listing, search or export (FR-016).
++
++| Argument | Required | Meaning |
++| -------- | -------- | ------- |
++| `ID`     | yes      | Identifier of the bookmark to remove; must be an integer |
++
++**stdout**: nothing. **Exit**: 0 on success.
++
++**Failures**, which must never be confused:
++
++| Case                          | Exit | Reason |
++| ----------------------------- | ---- | ------ |
++| `ID` is not an integer        | 2    | Usage mistake (FR-024) |
++| No bookmark holds `ID`        | 3    | Well-formed but absent; store left unchanged (FR-017) |
++
++### `export --format {csv,json}`
++
++Prints the whole collection in ascending identifier order.
++
++| Argument    | Required | Values         |
++| ----------- | -------- | -------------- |
++| `--format`  | yes      | `csv`, `json`  |
++
++Any other value is a usage mistake: diagnostic on stderr, exit **2** (FR-024). Formats are
++specified byte-for-byte below.
++
++---
++
++## Output formats
++
++### TSV record format — `list` and `search`
++
++Exactly four tab-separated fields per line, in this order (FR-014):
++
++```text
++id <TAB> url <TAB> title <TAB> tags
++```
++
++- `tags` is the bookmark's tags joined by `,` in alphabetical order; a bookmark with no tags has
++  an **empty** fourth field (the line still has three tabs).
++- An empty title is an empty field, not a placeholder.
++- Fields are emitted raw with **no escaping**. A title containing a tab or newline is stored and
++  returned unchanged, which makes this view ambiguous for such values — accepted deliberately,
++  because the lossless views are the CSV and JSON exports.
++
++```text
++1	https://docs.python.org	Python docs	docs,python
++2	https://example.com		
++```
++
++(Line 2 is a bookmark with no title and no tags: `2`, URL, empty, empty.)
++
++### CSV — `export --format csv`
++
++- First line is exactly the header `id,url,title,tags` (FR-018).
++- Then one row per bookmark in ascending identifier order, the `tags` column holding that
++  bookmark's tags joined by `,` in alphabetical order.
++- Fields containing a comma, a double quote or a line break are quoted, with embedded quotes
++  doubled, such that a standard CSV reader recovers the original values exactly (FR-019).
++- Every line, header included, ends with a single line feed `\n` — **not** `\r\n`. A line break
++  inside a quoted field is part of that field's value and is preserved as given (FR-019a).
++- An empty store prints the header line alone and exits 0 (FR-021).
++
++```csv
++id,url,title,tags
++1,https://docs.python.org,Python docs,"docs,python"
++2,https://example.com,"He said ""hi"", then
++left",
++```
++
++### JSON — `export --format json`
++
++- A single JSON array of objects in ascending identifier order, each with the keys `id`
++  (a number, not a string), `url`, `title` and `tags` (an array of strings in alphabetical
++  order) (FR-020).
++- Indented two spaces per nesting level, one key per line, ending with a single trailing
++  newline (FR-020a).
++- Characters outside ASCII are written literally as UTF-8, never as `\uXXXX` escapes (FR-020a).
++- An empty store prints `[]` followed by a newline and exits 0 (FR-021, FR-020a).
++
++```json
++[
++  {
++    "id": 1,
++    "url": "https://docs.python.org",
++    "title": "Python docs",
++    "tags": [
++      "docs",
++      "python"
++    ]
++  },
++  {
++    "id": 2,
++    "url": "https://example.com",
++    "title": "",
++    "tags": []
++  }
++]
++```
++
++---
++
++## Streams
++
++- All command **results** go to stdout; all **diagnostics** go to stderr (FR-023).
++- A failing command writes **nothing** to stdout — no partial results (FR-023).
++- Both streams are encoded UTF-8 regardless of the machine's locale, so a title, tag or URL
++  containing non-ASCII characters is emitted correctly instead of raising an encoding error
++  (FR-023a).
++- Output is plain text: no colour, no paging, no interactive prompting.
++
++---
++
++## Exit statuses
++
++This map is complete and exhaustive (FR-024).
++
++| Status | Meaning | Cases |
++| ------ | ------- | ----- |
++| **0** | Success | Any command that completed its work, including one that matched nothing (FR-015, FR-021, FR-022); also `--help` |
++| **1** | The store could not be used | Parent directory of `--db` does not exist; the path is an existing file that is not a bookmark database (plain text, an image, another program's database); the file system denies the required read or write access. Diagnostic names the path and the reason. No file or directory is created, nothing is written to stdout, and any existing file is left byte-for-byte unchanged — never overwritten, truncated, re-initialised or repaired (FR-003a, SC-009) |
++| **2** | A mistake in what the user supplied | A URL not beginning with `http://` or `https://` (FR-007); an unknown command; a missing required argument; a non-numeric `delete` identifier; an unsupported `--format`. Every case writes a diagnostic to stderr (FR-024) |
++| **3** | Deleting an identifier that does not exist | `delete ID` where `ID` is well-formed but no bookmark holds it. Reserved **exclusively** for this case (FR-017, FR-024) |
++
++Every diagnostic names what was invalid and what was expected; "error" or "invalid input" alone
++is insufficient (constitution, Principle II).
++
++---
++
++## Store behaviour
++
++| Situation | Behaviour |
++| --------- | --------- |
++| `--db` omitted | Store is `bookmarks.db` in the current working directory (FR-002) |
++| Store file absent, parent directory exists | Created with its schema on first use, then used (FR-003) |
++| Store file absent, parent directory missing | Exit 1; no directory is created — the tool never creates missing directories (FR-003a) |
++| Store exists from an earlier run | Opened and appended to, never reset or overwritten (FR-003) |
++| Store unrecognisable or inaccessible | Exit 1, file untouched (see status 1 above) |
++
++Bookmarks persist across separate invocations (FR-004). The tool serves one person on one
++machine; concurrent use of one store by several processes is out of scope.
++
++All commands require read **and** write access to the store, because any command may have to
++create it. A read-only store file therefore fails with status 1 even for `list` — a deliberate
++consequence of one uniform access requirement (research R-002).
+diff --git a/specs/001-bookmark-manager-cli/data-model.md b/specs/001-bookmark-manager-cli/data-model.md
+new file mode 100644
+index 0000000..a642fc5
+--- /dev/null
++++ b/specs/001-bookmark-manager-cli/data-model.md
+@@ -0,0 +1,174 @@
++# Phase 1 Data Model: Bookmark Manager CLI
++
++**Feature**: `001-bookmark-manager-cli` | **Date**: 2026-11-16
++
++Derived from the Key Entities and Functional Requirements in [spec.md](./spec.md); storage
++decisions are justified in [research.md](./research.md) (R-004, R-006).
++
++---
++
++## Entities
++
++### Bookmark
++
++One saved web address. Identified by an integer that is unique within a store and never reused.
++
++| Field   | Type               | Required | Notes |
++| ------- | ------------------ | -------- | ----- |
++| `id`    | integer            | yes      | Assigned by the store, starts at 1, strictly increasing, never reused (FR-006) |
++| `url`   | text               | yes      | Stored verbatim as supplied, after the scheme check passes (FR-007) |
++| `title` | text               | yes      | Empty string when `--title` is omitted — never `NULL`, never a placeholder (FR-008) |
++| `tags`  | set of Tag         | no       | Possibly empty; held in the `tags` relation, not as a column (FR-009) |
++
++Ordering between bookmarks is always ascending `id` (FR-011, FR-013, FR-018, FR-020).
++
++### Tag
++
++A short lower-case label grouping bookmarks. Has no attributes beyond its text and no meaning
++beyond grouping.
++
++| Field         | Type    | Required | Notes |
++| ------------- | ------- | -------- | ----- |
++| `bookmark_id` | integer | yes      | The bookmark carrying the tag |
++| `tag`         | text    | yes      | Already normalised: trimmed, lower-cased, non-empty (FR-010) |
++
++### Relationship
++
++`Bookmark` 1 — 0..n `Tag`. A bookmark carries each distinct tag at most once; a tag text may be
++shared by any number of bookmarks. Deleting a bookmark deletes its tag rows (FR-016).
++
++---
++
++## Schema
++
++```sql
++CREATE TABLE IF NOT EXISTS bookmarks (
++    id    INTEGER PRIMARY KEY AUTOINCREMENT,
++    url   TEXT NOT NULL,
++    title TEXT NOT NULL DEFAULT ''
++);
++
++CREATE TABLE IF NOT EXISTS tags (
++    bookmark_id INTEGER NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE,
++    tag         TEXT    NOT NULL,
++    PRIMARY KEY (bookmark_id, tag)
++);
++```
++
++Every connection runs `PRAGMA foreign_keys = ON`, because SQLite leaves foreign keys disabled by
++default and the `ON DELETE CASCADE` above would otherwise do nothing.
++
++Why each clause is present, and not more:
++
++- **`AUTOINCREMENT`** — without it, `id` is a plain `rowid` alias whose next value is
++  `max(rowid) + 1`, which **reuses** the identifier of a deleted highest row. FR-006 and User
++  Story 3 acceptance scenario 4 forbid reuse, so the keyword is load-bearing, not decoration.
++- **`title TEXT NOT NULL DEFAULT ''`** — makes "no title means empty string" a storage
++  invariant, so no read path has to translate `NULL` into `''` (FR-008).
++- **`PRIMARY KEY (bookmark_id, tag)`** — enforces FR-010's at-most-once rule in the database
++  rather than trusting the caller. Also supplies the only index the tag queries need.
++- **No index on `tags(tag)`** — the `--tag` filter would be faster with one, but SC-007 allows a
++  full second for 1,000 bookmarks and the measured workload is far inside that. Adding storage
++  no requirement demands is the scope creep Principle IV calls a defect (research R-006).
++- **No `UNIQUE` on `bookmarks.url`** — the spec is explicit that the same address may be saved
++  more than once, each time receiving its own identifier.
++- **No timestamps, no `visit_count`, no `folder`** — nothing in the spec reads them.
++
++---
++
++## Validation rules
++
++Applied in `store.py` so that no caller can bypass them.
++
++### URL scheme (FR-007)
++
++Accept only a `url` that begins with the literal text `http://` or `https://`. The check is a
++literal prefix test — the spec's Assumptions say so explicitly: no parsing, no host validation,
++no reachability check. Consequences the spec calls out as rejections: `ftp://example.com`, bare
++`example.com`, the empty string, and any string where the scheme appears somewhere other than the
++start (for example `"see https://x"`). A rejected URL stores nothing and exits 2.
++
++### Tag normalisation (FR-010)
++
++`"TAGS"` → set of tags, in this order:
++
++1. split on `,`
++2. strip surrounding whitespace from each entry
++3. drop entries that are empty after stripping
++4. lower-case each remaining entry
++5. collapse duplicates
++
++Worked cases from the spec:
++
++| Input                      | Stored tags        |
++| -------------------------- | ------------------ |
++| `python,cli`               | `cli`, `python`    |
++| `python,,docs`             | `docs`, `python`   |
++| `""` (or omitted)          | *none*             |
++| `"  python  ,  docs "`     | `docs`, `python`   |
++| `Python,python,PYTHON`     | `python`           |
++| `Python,Docs`              | `docs`, `python`   |
++
++The same function normalises the `--tag` filter value before comparison, which is what makes
++`--tag Python`, `--tag python` and `--tag " PYTHON "` select the same bookmarks (FR-012). Reusing
++one function for both sides is what guarantees the two can never disagree.
++
++Normalisation stops there — no stemming, no synonyms, no Unicode form folding beyond
++`str.lower()`.
++
++### Identifier (FR-017, FR-024)
++
++A `delete` identifier must be a well-formed integer; a non-numeric one is a usage mistake caught
++by the parser and exits 2. A well-formed identifier that no bookmark holds exits 3. These two
++statuses must never be confused — status 3 means "well-formed but absent" and nothing else.
++
++---
++
++## Derived values
++
++Neither is stored; both are computed on read.
++
++- **Tag list for display** — a bookmark's tags sorted with Python's default string ordering.
++  Because stored tags are always lower case, this is ordinary alphabetical order with no
++  case-related surprises (FR-014, FR-018, FR-020). Rendered comma-joined for TSV and CSV, as a
++  JSON array for JSON.
++- **Match sets** — `search` filters candidate rows in Python on lower-cased substring
++  containment against `title` and `url`; `--tag` filters in SQL with `=` against the normalised
++  filter value. The reasons for that split (Unicode case folding, `LIKE` wildcards, whole-tag
++  matching) are in research R-005.
++
++---
++
++## State transitions
++
++A bookmark has one lifecycle, and it is deliberately short — the spec defines no update or edit
++command.
++
++```text
++            add (URL accepted)                 delete ID
++(absent) ──────────────────────▶ (stored) ──────────────────▶ (absent, id retired)
++    │                                                               │
++    │ add (URL rejected, FR-007)                      delete ID again (FR-017)
++    └──▶ (absent, nothing written, exit 2)            └──▶ exit 3, store unchanged
++```
++
++- There is no transition back into `stored` for a retired identifier: `AUTOINCREMENT` guarantees
++  a new bookmark gets a number above every identifier ever issued.
++- `list`, `search` and `export` cause no transition.
++- A failed `add` leaves the store exactly as it was — the scheme check runs before any insert.
++
++### Store lifecycle
++
++```text
++path absent, parent exists      ──▶ created with schema, then used        (FR-003)
++path absent, parent missing     ──▶ exit 1, no file and no directory made (FR-003a)
++valid empty SQLite database     ──▶ schema initialised, then used        (FR-003)
++store with our tables           ──▶ opened and appended to, never reset  (FR-003)
++not a SQLite database           ──▶ exit 1, file byte-for-byte unchanged (FR-003a, SC-009)
++SQLite database of another app  ──▶ exit 1, file byte-for-byte unchanged (FR-003a, SC-009)
++read or write access denied     ──▶ exit 1, file unchanged               (FR-003a)
++```
++
++The sequence that makes the failing branches non-destructive — opening with `mode=rw` so no file
++is created, and deferring the verdict to a read-only query so no write ever happens — is
++described and verified in research R-002.
+diff --git a/specs/001-bookmark-manager-cli/plan.md b/specs/001-bookmark-manager-cli/plan.md
+new file mode 100644
+index 0000000..a850fed
+--- /dev/null
++++ b/specs/001-bookmark-manager-cli/plan.md
+@@ -0,0 +1,162 @@
++# Implementation Plan: Bookmark Manager CLI
++
++**Branch**: `001-bookmark-manager-cli` | **Date**: 2026-11-16 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/001-bookmark-manager-cli/spec.md`
++
++## Summary
++
++A single-user command-line bookmark manager, invoked as
++`python -m bookmarks [--db PATH] COMMAND ...`, that stores bookmarks in one SQLite file and
++offers five commands: `add`, `list`, `search`, `delete`, `export`. Listings and searches emit
++four tab-separated fields; exports emit LF-terminated CSV or two-space-indented UTF-8 JSON. Exit
++statuses form one complete map — 0 success, 1 unusable store, 2 any user mistake, 3 deleting an
++identifier that does not exist.
++
++Technical approach: four flat standard-library modules under `src/bookmarks/`. `argparse`
++supplies the command grammar and, by its own default behaviour, every status-2 usage diagnostic
++without hand-written validation. Storage is two SQLite tables — `bookmarks` with
++`INTEGER PRIMARY KEY AUTOINCREMENT` so identifiers are never reused, and a `tags` join table with
++a composite primary key enforcing at-most-once tagging and `ON DELETE CASCADE`. The store is
++opened through the `mode=rw` SQLite URI and validated by a read-only query, so an unrecognisable
++file is reported and left byte-for-byte unchanged rather than overwritten. Case-insensitive
++`search` is filtered in Python rather than with SQL `LIKE`, avoiding both ASCII-only case folding
++and wildcard injection from the user's text. All decisions and the experiments confirming them
++are recorded in [research.md](./research.md).
++
++## Technical Context
++
++**Language/Version**: Python 3.11+ (declared floor; developed and verified on 3.13.17)
++
++**Primary Dependencies**: None. Standard library only — `argparse`, `sqlite3`, `csv`, `json`,
++`sys`, `pathlib`. pytest is a development dependency, never imported by shipped code.
++
++**Storage**: One SQLite database file — `--db PATH` when given, otherwise `bookmarks.db` in the
++current working directory. Two tables; schema in [data-model.md](./data-model.md).
++
++**Testing**: pytest (9.1.1 available). Contract-level tests invoke the CLI as a subprocess so
++real exit statuses and the stdout/stderr split can be asserted; `pythonpath = ["src"]` in
++`pyproject.toml` resolves imports with no install step.
++
++**Target Platform**: Any POSIX or Windows system with Python 3.11+; single user, single process,
++local filesystem. Developed on Linux.
++
++**Project Type**: Single-project CLI tool with no network, no service, and no UI.
++
++**Performance Goals**: Each command returns in under one second on a 1,000-bookmark store
++(SC-007); a 1,000-bookmark store round-trips with every URL, title and tag identical (SC-002).
++
++**Constraints**: Results on stdout, diagnostics on stderr, no partial output on failure; both
++streams UTF-8 regardless of locale; CSV lines LF-terminated; JSON two-space indented with
++literal non-ASCII and one trailing newline; an unusable store is never overwritten, truncated,
++re-initialised or repaired; identifiers never reused.
++
++**Scale/Scope**: Five commands, two entities, four runtime modules, 27 functional requirements.
++Thousands of bookmarks in a personal collection. Explicitly out of scope: concurrent access,
++multi-user accounts, synchronisation, update/edit, import, archiving page content.
++
++No NEEDS CLARIFICATION items remain — the five clarifications recorded in the spec plus
++Phase 0 research resolved every open question.
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++Gates derive from [the project constitution](../../.specify/memory/constitution.md) v1.0.0.
++
++### Pre-Phase-0 evaluation
++
++| Gate | Source | Status | Evidence |
++| ---- | ------ | ------ | -------- |
++| Standard library only | Principle I | **PASS** | FR-025 requires it and the user input confirms it; every needed module (`argparse`, `sqlite3`, `csv`, `json`, `sys`) ships with Python. pytest is dev-only and will not be imported by `src/bookmarks/`. |
++| Fail loudly | Principle II | **PASS** | FR-003a, FR-007, FR-017 and FR-024 already specify a diagnostic naming what was invalid plus a non-zero status for every failure, and FR-023 forbids partial stdout. The spec requires no silent recovery, coercion or default substitution anywhere. |
++| Every requirement testable | Principle III | **PASS** | FR-027 makes per-requirement pytest coverage a requirement of the feature itself; all 27 requirements are observable through stdout, stderr, exit status or store contents. |
++| Simplicity | Principle IV | **PASS** | Scope is the five specified commands. The plan rejects the template's `models/services/cli/lib` tree for four flat modules, and adds no index, column or abstraction a requirement does not demand. |
++| Declared version floor | Additional Constraints | **PASS** | Python 3.11 declared once, in `pyproject.toml`; no feature newer than 3.11 is used. |
++| pytest as the test framework | Additional Constraints | **PASS** | pytest, per user input and constitution. |
++| stdout/stderr convention | Additional Constraints | **PASS** | FR-023 and the CLI contract. |
++| No hidden global state | Additional Constraints | **PASS** | Behaviour is driven by arguments only. The store path comes from `--db` or a documented default; no environment variable switches behaviour. (`PYTHONPATH` is import resolution, not a behaviour switch.) |
++
++**Result**: all gates pass. No violations, no entries in Complexity Tracking. Proceed to Phase 0.
++
++### Post-Phase-1 re-evaluation
++
++| Gate | Status | Evidence from the design |
++| ---- | ------ | ------------------------ |
++| Standard library only | **PASS** | Final module list imports `argparse`, `sqlite3`, `csv`, `json`, `sys`, `pathlib` and nothing else (research R-001, R-010). |
++| Fail loudly | **PASS** | One `BookmarkError(message, status)` raised at the point of detection and one handler at the entry point, which Principle II permits because it exists only to convert an error into a clearer diagnostic (R-008). Unexpected `sqlite3` faults deliberately propagate rather than being folded into a documented status — a crash is preferred to a wrong answer. The store-open sequence refuses rather than repairs (R-002). |
++| Every requirement testable | **PASS** | Exit statuses and stream separation are asserted through subprocess invocation, the only way to observe a real process status (R-009). Quickstart scenarios 1–10 cover every requirement group; the traceability obligation is restated as a done-criterion in [quickstart.md](./quickstart.md). One honest caveat recorded: a permission-denied test cannot pass as `root`, so it must skip itself under `geteuid() == 0` instead of silently appearing to pass (R-002). |
++| Simplicity | **PASS** | Four modules, two tables, no extra index, no `formats.py`, no tag-dictionary table, no custom argparse error handler — each alternative considered and rejected in writing (R-003, R-006, R-010). |
++| Declared version floor | **PASS** | 3.11 in `pyproject.toml`; nothing in the design needs more. |
++| pytest as the test framework | **PASS** | `pythonpath`/`testpaths` configured in `pyproject.toml`; no packaging or install step added (R-009). |
++| stdout/stderr convention | **PASS** | Specified byte-for-byte in [contracts/cli-contract.md](./contracts/cli-contract.md). |
++| No hidden global state | **PASS** | Stream reconfiguration is the only process-wide mutation, performed once at the entry point and required by FR-023a; it changes encoding, not behaviour. |
++
++**Result**: the design introduces no violation. Complexity Tracking stays empty.
++
++One design consequence is worth flagging to the user rather than burying: because any command may
++need to create the store, all commands open it read-write, so a read-only store file fails with
++status 1 even for `list`. This follows FR-003a's wording ("the required read or write access")
++and the alternative — per-command access modes — was rejected as more moving parts for a case the
++spec does not raise (R-002). It is documented in the CLI contract.
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/001-bookmark-manager-cli/
++├── plan.md               # This file (/speckit-plan command output)
++├── spec.md               # Feature specification
++├── research.md           # Phase 0 output — 10 decisions, alternatives, verified findings
++├── data-model.md         # Phase 1 output — entities, schema, validation, state transitions
++├── quickstart.md         # Phase 1 output — 10 runnable validation scenarios
++├── contracts/
++│   └── cli-contract.md   # Phase 1 output — command grammar, output formats, exit statuses
++├── checklists/           # Pre-existing quality checklists
++└── tasks.md              # Phase 2 output (/speckit-tasks command — NOT created by /speckit-plan)
++```
++
++### Source Code (repository root)
++
++```text
++pyproject.toml                  # Python 3.11 floor + [tool.pytest.ini_options] pythonpath/testpaths
++
++src/
++└── bookmarks/
++    ├── __init__.py             # empty package marker
++    ├── __main__.py             # `python -m bookmarks` entry point: sys.exit(main(sys.argv[1:]))
++    ├── cli.py                  # argparse grammar, UTF-8 stream setup, dispatch,
++    │                           #   TSV/CSV/JSON rendering, the single error handler
++    └── store.py                # open/validate the database, schema, tag normalisation,
++                                #   URL scheme check, add/list/search/delete/export queries
++
++tests/
++├── conftest.py                 # scratch-store fixture, CLI subprocess runner, bulk seeder
++├── test_add.py                 # FR-005 … FR-010
++├── test_list_search.py         # FR-011 … FR-015
++├── test_delete.py              # FR-016, FR-017, identifier non-reuse (FR-006)
++├── test_export.py              # FR-018 … FR-021, round-trip losslessness (SC-006)
++├── test_store.py               # FR-002, FR-003, FR-003a, FR-004 (store lifecycle, SC-009)
++├── test_cli_contract.py        # FR-001, FR-022 … FR-024, FR-026 (statuses, streams, encoding)
++└── test_performance.py         # SC-002, SC-007 on a 1,000-bookmark store
++```
++
++**Structure Decision**: Single project, flat four-module package under `src/bookmarks/`, exactly
++as FR-026 requires (`python -m bookmarks` with `src/` on `PYTHONPATH`). The plan template's
++default `src/models/`, `src/services/`, `src/cli/`, `src/lib/` tree is **not** used: Principle IV
++directs a flat module layout with subpackages only when module count makes a flat layout
++unnavigable, and four files do not. The one seam that earns its place is `store.py` versus
++`cli.py` — data rules and SQL on one side, argument grammar and presentation on the other — which
++also lets the performance fixture seed 1,000 rows through `store.py` directly instead of paying
++for 1,000 subprocess launches. Tests are split by requirement group so the traceability mapping
++Principle III demands is visible from the filenames; the `contract/integration/unit` tree from
++the template is dropped for the same reason the source tree is flat. Rationale and rejected
++alternatives: [research.md](./research.md) R-009, R-010.
++
++## Complexity Tracking
++
++> **Fill ONLY if Constitution Check has violations that must be justified**
++
++No violations. Both Constitution Check evaluations passed every gate, so this table is
++intentionally empty.
+diff --git a/specs/001-bookmark-manager-cli/quickstart.md b/specs/001-bookmark-manager-cli/quickstart.md
+new file mode 100644
+index 0000000..1d66a4e
+--- /dev/null
++++ b/specs/001-bookmark-manager-cli/quickstart.md
+@@ -0,0 +1,274 @@
++# Quickstart & Validation Guide: Bookmark Manager CLI
++
++**Feature**: `001-bookmark-manager-cli` | **Date**: 2026-11-16
++
++Runnable scenarios that prove the feature works end to end. Field layouts and the exit-status map
++live in [contracts/cli-contract.md](./contracts/cli-contract.md); storage rules live in
++[data-model.md](./data-model.md). This guide does not repeat them, and contains no
++implementation code.
++
++---
++
++## Prerequisites
++
++- Python **3.11 or newer** (`python3 --version`)
++- `pytest` for the automated suite — the only development dependency, and never imported by
++  shipped code
++- No other installation step: the runtime uses the standard library only, so there is nothing to
++  `pip install` for the tool itself
++
++## Setup
++
++Run from the repository root. `src/` must be on `PYTHONPATH` for `python -m bookmarks` to resolve:
++
++```bash
++export PYTHONPATH=src
++cd "$(mktemp -d)"     # a scratch directory, so the default store is fresh
++```
++
++Each scenario below assumes a fresh scratch directory. `cd` back to the repository root before
++running the test suite.
++
++---
++
++## Scenario 1 — Save a bookmark and get it back later (User Story 1)
++
++Proves creation of the store, identifier assignment, persistence across processes, and the TSV
++layout.
++
++```bash
++python -m bookmarks add https://docs.python.org --title "Python docs" --tags python,docs
++python -m bookmarks add https://example.com
++python -m bookmarks list
++```
++
++**Expected**: the first `add` prints `1`, the second prints `2`, each exiting 0. `list` — a
++separate process, reading the store written by the earlier ones — prints two lines in ascending
++identifier order, four tab-separated fields each. Bookmark 2 has an empty title field and an
++empty tags field, so its line ends with two consecutive tabs.
++
++Check the store was created where expected and nothing else was:
++
++```bash
++ls bookmarks.db
++```
++
++## Scenario 2 — A rejected URL stores nothing (User Story 1, scenario 5)
++
++```bash
++python -m bookmarks add ftp://example.com; echo "exit=$?"
++python -m bookmarks list
++```
++
++**Expected**: `exit=2`. The diagnostic naming the rejected URL and the accepted schemes appears
++on **stderr**, nothing on stdout, and `list` prints nothing — the rejection happened before any
++write. Repeat with `example.com`, `""`, and `"see https://x"` (scheme not at the start); all four
++behave identically, which is the shape SC-004 asks for across at least five malformed inputs.
++
++To confirm the stream split rather than trusting the terminal:
++
++```bash
++python -m bookmarks add ftp://example.com 2>/dev/null   # prints nothing at all
++```
++
++## Scenario 3 — Find the bookmark I am looking for (User Story 2)
++
++Seed a store with mixed-case tags, then filter and search:
++
++```bash
++python -m bookmarks add https://docs.python.org --title "Python docs" --tags Python,Docs
++python -m bookmarks add https://news.example.com --title "News" --tags news
++python -m bookmarks list --tag python      # case-insensitive, whole-tag
++python -m bookmarks list --tag PYTHON      # same result
++python -m bookmarks list --tag py          # no match
++python -m bookmarks search PYTHON          # matches the title, ignoring case
++python -m bookmarks search example         # matches the URL, not the title
++python -m bookmarks search zzz             # no match
++```
++
++**Expected**: the two `--tag` spellings each return the Python docs bookmark, and its tags field
++reads `docs,python` — lower-cased and alphabetical whatever case was typed. `--tag py` returns
++nothing and exits 0, proving whole-tag matching. `search PYTHON` returns the docs bookmark;
++`search example` returns the news bookmark, proving URLs are searched too. `search zzz` prints
++nothing and exits 0. Also try `search ""` — it matches every bookmark.
++
++## Scenario 4 — Remove a bookmark, and the identifier stays retired (User Story 3)
++
++```bash
++python -m bookmarks add https://a.example.com
++python -m bookmarks add https://b.example.com
++python -m bookmarks delete 2; echo "exit=$?"
++python -m bookmarks list
++python -m bookmarks add https://c.example.com     # new identifier, not a reused 2
++python -m bookmarks delete 2; echo "exit=$?"      # already gone
++python -m bookmarks delete 99; echo "exit=$?"     # never issued
++python -m bookmarks delete abc; echo "exit=$?"    # not a number
++```
++
++**Expected**: the first `delete` exits 0 and `list` then shows bookmark 1 only. The next `add`
++prints **3**, not 2 — identifiers are never reissued, which is the behaviour `AUTOINCREMENT`
++guarantees and the single most likely thing to regress. Deleting 2 again and deleting 99 both
++exit **3** with a diagnostic naming the identifier. `delete abc` exits **2** — a usage mistake,
++never 3. That 2-versus-3 distinction is the point of the scenario.
++
++## Scenario 5 — Take the collection somewhere else (User Story 4)
++
++Seed values that stress quoting, then export both ways:
++
++```bash
++python -m bookmarks add https://docs.python.org --title "Python docs" --tags python,docs
++python -m bookmarks add https://example.com --title 'He said "hi", then
++left'
++python -m bookmarks add https://café.example.com --title "Café — ünïcode"
++python -m bookmarks export --format csv
++python -m bookmarks export --format json
++python -m bookmarks export --format xml; echo "exit=$?"
++```
++
++**Expected**: CSV begins with the header `id,url,title,tags`, quotes the title containing a
++comma, a quotation mark and a line break, doubles the embedded quotes, and terminates every line
++with a bare `\n`. JSON is a two-space-indented array with `id` as a number, `tags` as an
++alphabetical array, non-ASCII written literally, and one trailing newline.
++`--format xml` exits **2** with a diagnostic.
++
++Verify the exports are genuinely lossless rather than merely plausible — this is SC-006, and
++eyeballing quoted CSV is how round-trip bugs survive:
++
++```bash
++python -m bookmarks export --format csv  | python3 -c 'import csv,sys; [print(r) for r in csv.reader(sys.stdin)]'
++python -m bookmarks export --format json | python3 -c 'import json,sys; print(json.load(sys.stdin))'
++```
++
++Each field must come back exactly as it went in, including the embedded newline and quote.
++Confirm the CSV line endings directly:
++
++```bash
++python -m bookmarks export --format csv | od -c | grep -c '\\r'   # expect 0
++```
++
++## Scenario 6 — Empty store (User Story 4, scenario 4)
++
++```bash
++cd "$(mktemp -d)"
++python -m bookmarks list;                 echo "exit=$?"
++python -m bookmarks search anything;      echo "exit=$?"
++python -m bookmarks export --format csv;  echo "exit=$?"
++python -m bookmarks export --format json; echo "exit=$?"
++```
++
++**Expected**: all exit 0. `list` and `search` print nothing. CSV prints the header line alone.
++JSON prints `[]` and a newline.
++
++## Scenario 7 — Unusable store is never damaged (FR-003a, SC-009)
++
++The most important failure path: the tool must refuse rather than repair.
++
++```bash
++# (a) parent directory does not exist
++python -m bookmarks --db /tmp/nope-$$/x.db list; echo "exit=$?"
++ls -d /tmp/nope-$$ 2>&1            # must NOT exist — no directory was created
++
++# (b) the path is not a bookmark database
++printf 'this is not a database\n' > plain.txt
++sha256sum plain.txt > before.sha
++python -m bookmarks --db plain.txt list; echo "exit=$?"
++python -m bookmarks --db plain.txt add https://x.example.com; echo "exit=$?"
++sha256sum -c before.sha            # must report OK
++```
++
++**Expected**: every command exits **1** with a diagnostic on stderr naming the path and the
++reason, and nothing on stdout. In (a) no directory and no file is created. In (b) the checksum
++matches — the file was not overwritten, truncated, re-initialised or repaired, by the read path
++or the write path.
++
++```bash
++# (c) a database belonging to another program
++python3 -c "import sqlite3; c=sqlite3.connect('other.db'); c.execute('CREATE TABLE other(x)'); c.commit()"
++python -m bookmarks --db other.db list; echo "exit=$?"
++```
++
++**Expected**: exit **1**. A valid SQLite file with foreign tables is still not our store, and is
++left untouched.
++
++## Scenario 8 — Separate stores, explicit and default (FR-002)
++
++```bash
++cd "$(mktemp -d)" && python -m bookmarks add https://one.example.com    # prints 1
++mkdir elsewhere && cd elsewhere
++python -m bookmarks add https://two.example.com                         # prints 1 again
++python -m bookmarks list                                                # one bookmark only
++python -m bookmarks --db ../bookmarks.db list                           # the other collection
++```
++
++**Expected**: each directory has its own `bookmarks.db`, so both `add` calls print `1`, and
++`--db` reaches across to the first collection.
++
++## Scenario 9 — Usage mistakes (FR-024)
++
++```bash
++python -m bookmarks;                      echo "exit=$?"   # no command
++python -m bookmarks bogus;                echo "exit=$?"   # unknown command
++python -m bookmarks add;                  echo "exit=$?"   # missing URL
++python -m bookmarks export;               echo "exit=$?"   # missing --format
++python -m bookmarks --help;               echo "exit=$?"   # help is not an error
++```
++
++**Expected**: the first four exit **2**, each with a diagnostic on stderr naming what was
++missing or invalid. `--help` prints usage to stdout and exits **0**.
++
++## Scenario 10 — Non-ASCII output under a C locale (FR-023a)
++
++```bash
++LC_ALL=C LANG=C python -m bookmarks add https://café.example.com --title "Café ünïcode"
++LC_ALL=C LANG=C python -m bookmarks list
++LC_ALL=C LANG=C python -m bookmarks export --format json
++```
++
++**Expected**: the accented characters appear correctly in all three, with no
++`UnicodeEncodeError`. This fails loudly if stream reconfiguration was skipped, and an
++ASCII-locale machine is where it would otherwise first be noticed — by a user, not a test.
++
++---
++
++## Automated suite
++
++From the repository root:
++
++```bash
++pytest                 # the whole suite must pass
++pytest -q              # quiet
++pytest -k export       # one area
++```
++
++`pytest` resolves the package through `pythonpath = ["src"]` in `pyproject.toml`; no install step
++and no `PYTHONPATH` export is needed for the suite itself.
++
++### What "done" means
++
++The constitution's quality gates, as they apply here:
++
++- **Traceability** — every functional requirement FR-001 … FR-027 is named by at least one test
++  (in the test's name or a comment), per Principle III and FR-027. A requirement with no test
++  counts as unimplemented regardless of the code.
++- **Suite green** — the full suite passes.
++- **Dependency check** — no third-party import in `src/bookmarks/`; `grep -r "^import\|^from"
++  src/bookmarks/` should show standard-library modules only.
++- **Failure-path check** — each of exit statuses 1, 2 and 3 has a test asserting both the status
++  and the message content, not just the status.
++- **Simplicity review** — no code that no requirement demands.
++
++Exit statuses and stream separation are asserted by running the CLI as a subprocess, because an
++in-process call cannot observe a real process exit status.
++
++### Performance validation (SC-002, SC-007)
++
++Seed 1,000 bookmarks through the store module directly — 1,000 subprocess calls would take
++minutes and the seeding route is not what is under test — then time the user-visible commands:
++
++```bash
++pytest -k performance
++```
++
++**Expected**: `list`, `search`, `export` and `delete` each return in under one second on a
++1,000-bookmark store (SC-007), and all 1,000 come back with URLs, titles and tags identical to
++what was stored (SC-002).
+diff --git a/specs/001-bookmark-manager-cli/research.md b/specs/001-bookmark-manager-cli/research.md
+new file mode 100644
+index 0000000..b783516
+--- /dev/null
++++ b/specs/001-bookmark-manager-cli/research.md
+@@ -0,0 +1,374 @@
++# Phase 0 Research: Bookmark Manager CLI
++
++**Feature**: `001-bookmark-manager-cli` | **Date**: 2026-11-16
++
++**Input**: [spec.md](./spec.md), [constitution](../../.specify/memory/constitution.md)
++
++All Technical Context unknowns are resolved below. Every decision was checked against the
++constitution's four principles (Standard Library Only, Fail Loudly, Every Requirement Is
++Testable, Simplicity). Findings marked **verified** were confirmed by running the code on
++Python 3.13.17 / SQLite 3.45.1 during this phase.
++
++---
++
++## R-001: Python version floor and standard-library surface
++
++**Decision**: Target Python 3.11 as the declared minimum. Runtime imports are limited to
++`argparse`, `sqlite3`, `csv`, `json`, `sys`, `pathlib` (or `os.path`). No third-party runtime
++import anywhere.
++
++**Rationale**: FR-025 states 3.11+ and standard library only; the user input confirms it. Every
++module needed is in the standard library, so Principle I is satisfied without exception. Nothing
++in the design needs a feature newer than 3.11, so the floor can stay at the specified version
++even though development happens on 3.13.
++
++**Alternatives considered**:
++
++- *Targeting 3.13 (the installed interpreter)*: rejected — narrows supported platforms for no
++  gain; no required feature is newer than 3.11.
++- *Adding `click`/`typer` for the CLI*: rejected — forbidden by Principle I, and `argparse`
++  already produces the exact exit status the spec requires (see R-003).
++
++---
++
++## R-002: Detecting an unusable store without ever modifying it (FR-003a, SC-009)
++
++**Decision**: Three-step open sequence.
++
++1. If the target file **does not exist**, open with the SQLite URI `file:<path>?mode=rwc` to
++   create it, then run `CREATE TABLE IF NOT EXISTS` for both tables.
++2. If the target file **does exist**, open with `file:<path>?mode=rw` (never `rwc`, so no file
++   is created on a typo) and immediately run
++   `SELECT name FROM sqlite_master WHERE type='table'`:
++   - raises `sqlite3.DatabaseError` → the file is not a SQLite database → exit 1;
++   - returns a table set that contains neither `bookmarks` nor `tags` **and is non-empty** → a
++     database belonging to another program → exit 1;
++   - returns an empty table set (a 0-byte or freshly created empty database) → initialise the
++     schema and continue;
++   - contains our tables → use as-is.
++3. `sqlite3.OperationalError` from the connect/first-query step (missing parent directory,
++   permission denied) → exit 1.
++
++Percent-encode the path before building the URI so that a path containing `?` or `#` is not
++misread as URI syntax.
++
++**Verified**:
++
++- `sqlite3.connect("file:text.db?mode=rw", uri=True)` on a plain text file **succeeds**; the
++  error surfaces only on the first query, as `DatabaseError: file is not a database`. So the
++  validation query is mandatory — connecting alone proves nothing.
++- The text file was byte-for-byte identical (same SHA-256, same size) after the failed attempt,
++  satisfying SC-009.
++- `mode=rw` against a missing parent directory raises `OperationalError: unable to open database
++  file` and creates **no** directory and **no** file.
++- `mode=rw` against an absent file raises the same error and does **not** create the file.
++
++**Rationale**: `mode=rw` is the only way to ask SQLite to open without creating. Deferring the
++verdict to a read-only query means the failure path never writes. This is Fail Loudly applied to
++storage: no repair, no re-initialisation, no truncation — just a named path, a named reason, and
++status 1.
++
++**Alternatives considered**:
++
++- *Reading the 16-byte `SQLite format 3\0` header magic ourselves*: rejected — duplicates logic
++  SQLite already has, and would accept a corrupt file whose header happens to be right.
++- *`mode=ro` for read-only commands (`list`, `search`, `export`)*: rejected — it would make the
++  same store usable for some commands and not others, and a brand-new store needs write access
++  to be created at all. One uniform `rw` requirement is simpler and matches FR-003a's wording
++  ("the required read or write access"). Documented as a deliberate consequence: a read-only
++  file fails with status 1 even for `list`.
++- *`sqlite3.connect(path)` plainly*: rejected — creates the file as a side effect, which breaks
++  FR-003a's "MUST create no new file".
++
++**Test-environment caveat**: a permission-denied test (`chmod 000`) does **not** fail when the
++suite runs as `root`, which is the case in this environment — root bypasses the mode bits. The
++permission case must be covered by a test that skips itself when `os.geteuid() == 0`, so the
++suite stays honest instead of silently passing. The missing-parent-directory and
++not-a-database cases have no such caveat and carry the weight of SC-009.
++
++---
++
++## R-003: Mapping usage mistakes to exit status 2 (FR-024)
++
++**Decision**: Let `argparse` handle every usage mistake. Its default `error()` already writes a
++specific diagnostic to stderr and exits **2**, which is exactly the status FR-024 demands. Wire
++it up so that each usage mistake in the spec falls out of the parser declaration:
++
++| Spec case (FR-024)        | Parser declaration                                     |
++| ------------------------- | ------------------------------------------------------ |
++| unknown command           | `add_subparsers(dest="command", required=True)`         |
++| missing required argument | positional arguments (`url`, `text`, `id`)              |
++| non-numeric `delete` id   | `type=int` on the `id` positional                       |
++| unsupported export format | `--format`, `required=True`, `choices=["csv", "json"]`  |
++
++The rejected-URL case (FR-007) is a domain rule, not a grammar rule, so it is raised by the
++application code and mapped to status 2 by the same table of codes.
++
++**Verified** on Python 3.13.17 — observed exit statuses and last stderr line:
++
++```text
++(no args)              -> 2  error: the following arguments are required: command
++bogus                  -> 2  error: argument command: invalid choice: 'bogus' ...
++delete abc             -> 2  error: argument id: invalid int value: 'abc'
++export --format xml    -> 2  error: argument --format: invalid choice: 'xml' ...
++add                    -> 2  error: the following arguments are required: url
++--help                 -> 0
++```
++
++**Rationale**: Zero hand-written validation for four of the five usage cases, and the messages
++name both what was invalid and what was expected — Principle II satisfied by the library's own
++output. Principle IV says do not write code a requirement does not demand; argparse's default
++already *is* the requirement.
++
++**Alternatives considered**:
++
++- *Custom `ArgumentParser.error` override*: rejected — it would have to re-implement status 2,
++  which is already the default.
++- *Hand-rolled `sys.argv` parsing*: rejected — more code, worse messages, no `--help`.
++- *Validating the id with a manual `int()` call*: rejected — `type=int` gets status 2 and a
++  precise message for free, and keeps status 3 strictly reserved for the well-formed-but-absent
++  identifier (the spec is emphatic about this distinction).
++
++**Note**: `argparse`'s default `prog` under `python -m bookmarks` is the literal string
++`__main__.py` (**verified**), which would make every diagnostic misname the tool. `prog` must be
++set explicitly to `python -m bookmarks`.
++
++---
++
++## R-004: Identifiers that are never reused (FR-006)
++
++**Decision**: `id INTEGER PRIMARY KEY AUTOINCREMENT`.
++
++**Rationale**: A bare `INTEGER PRIMARY KEY` is an alias for SQLite's `rowid`, and its default
++allocation is `max(rowid) + 1` — so deleting the highest row **reuses** that identifier on the
++next insert. That is precisely the behaviour acceptance scenario 4 of User Story 3 forbids.
++`AUTOINCREMENT` makes SQLite keep a high-water mark in the internal `sqlite_sequence` table, so
++an issued identifier is never issued again. Identifiers also start at 1 in a fresh database, as
++FR-006 requires.
++
++**Alternatives considered**:
++
++- *Bare `INTEGER PRIMARY KEY`*: rejected — reuses identifiers after deleting the maximum.
++- *Application-managed counter in a separate table*: rejected — reimplements `AUTOINCREMENT`
++  with more moving parts and a race the single-user assumption does not even need solved.
++
++---
++
++## R-005: Case-insensitive matching for `search` and `--tag` (FR-012, FR-013)
++
++**Decision**: Do the `search TEXT` match in **Python**, not SQL: read the candidate rows and keep
++those where `text.lower()` is a substring of `title.lower()` or `url.lower()`. The `--tag TAG`
++filter stays in SQL as plain `=` equality, because stored tags are already normalised to lower
++case (FR-010) and the filter value is trimmed and lower-cased with the same function before the
++query.
++
++**Rationale**: Two correctness traps make SQL `LIKE` the wrong tool for `search`:
++
++- SQLite's `LIKE` and `lower()` are **ASCII-only** by default, so a non-ASCII title would not
++  fold case — a silent wrong answer, the defect Principle II ranks highest.
++- `LIKE` treats `%` and `_` as wildcards, so searching for `100%` or `a_b` would match rows it
++  must not. Correct use needs `ESCAPE` plus manual escaping of the user's text — more code and a
++  classic place to get it subtly wrong.
++
++Python's `str.lower()` is Unicode-aware and substring containment has no metacharacters, so the
++Python-side filter is both shorter and more correct. SC-007 allows a full second for 1,000
++bookmarks; scanning 1,000 rows in Python is microseconds, so there is no cost to pay.
++
++Whole-tag matching (FR-012: `py` must not match `python`) comes free from SQL `=`.
++
++**Alternatives considered**:
++
++- *`WHERE lower(title) LIKE '%'||lower(?)||'%'`*: rejected — ASCII-only folding and unescaped
++  wildcards, as above.
++- *`LIKE ... ESCAPE '\'` with manual escaping*: rejected — fixes the wildcard trap but not the
++  Unicode one, and adds code.
++- *Registering a Python `lower` via `create_function`*: rejected — pushes Unicode-correct folding
++  into SQL, but still needs wildcard escaping and adds indirection for no benefit over filtering
++  in Python.
++- *`COLLATE NOCASE`*: rejected — also ASCII-only, same silent-wrong-answer risk.
++
++---
++
++## R-006: Tag storage — join table versus a single delimited column
++
++**Decision**: Two tables. `bookmarks(id, url, title)` and `tags(bookmark_id, tag)` with a
++composite primary key `(bookmark_id, tag)` and
++`FOREIGN KEY(bookmark_id) REFERENCES bookmarks(id) ON DELETE CASCADE`. Enable
++`PRAGMA foreign_keys = ON` on every connection, since SQLite leaves foreign keys off by default.
++
++**Rationale**: FR-012 requires whole-tag matching that a `py`/`python` substring must not satisfy.
++With a join table that is the single character `=`; with a delimited column it becomes
++`LIKE '%,' || tag || ',%'` over a sentinel-padded string — a construction that is easy to get
++wrong and hard to read, and that re-introduces the wildcard-escaping trap from R-005. The
++composite primary key also enforces FR-010's "each distinct tag at most once per bookmark" at
++the storage layer rather than trusting application code. `ON DELETE CASCADE` gives FR-016
++("remove the bookmark together with its tags") in one declaration instead of two `DELETE`
++statements that could drift apart.
++
++This is the simplest design that satisfies the requirements, which is what Principle IV asks for
++— not the fewest tables in the abstract. Two tables is also the plain reading of the spec, which
++names Bookmark and Tag as separate key entities.
++
++**Alternatives considered**:
++
++- *`bookmarks.tags` as a comma-joined string*: rejected — one fewer table, but makes the
++  whole-tag filter a fragile `LIKE` pattern and moves the uniqueness invariant into application
++  code. Fewer tables, more moving parts in the part that matters.
++- *A shared `tags(id, name)` dictionary table plus a `bookmark_tags` link table*: rejected —
++  three tables and a join to resolve a short string. Nothing in the spec needs tag identity,
++  renaming, or per-tag metadata; this is the speculative generality Principle IV forbids.
++
++**Indexes**: none beyond the two primary keys. An index on `tags(tag)` would speed the `--tag`
++filter, but SC-007's budget is one second for 1,000 bookmarks and the primary-key index on
++`(bookmark_id, tag)` already orders the data by bookmark. Adding an index no requirement demands
++is exactly the scope Principle IV calls a defect. Revisit only if a measured test fails.
++
++---
++
++## R-007: UTF-8 output regardless of locale, and LF-only CSV (FR-019a, FR-023a)
++
++**Decision**: Reconfigure both streams once, at the top of the entry point:
++
++```python
++sys.stdout.reconfigure(encoding="utf-8", newline="")
++sys.stderr.reconfigure(encoding="utf-8")
++```
++
++Then write CSV with `csv.writer(sys.stdout, lineterminator="\n")` and JSON with
++`json.dumps(rows, indent=2, ensure_ascii=False)` followed by a single `"\n"`.
++
++**Rationale**: `reconfigure(encoding="utf-8")` (`io.TextIOWrapper`, 3.7+) makes output UTF-8 even
++when the machine's locale is `C`/ASCII, which FR-023a requires and which would otherwise raise
++`UnicodeEncodeError` on a non-ASCII title. `newline=""` disables newline translation on stdout,
++which is what the `csv` module documents as the correct setup and which keeps a line break
++*inside* a quoted field intact on every platform (FR-019a). `lineterminator="\n"` overrides
++`csv`'s RFC-4180 default of `\r\n`, as the clarification session decided.
++
++**Verified**: with that configuration, the writer emits
++`id,url,title,tags\n1,https://x,"He said ""hi"", then\nleft","a,b"\n` — no `\r\n` anywhere,
++quoting applied exactly where needed, and `csv.reader` recovers `He said "hi", then\nleft`
++unchanged (FR-019, SC-006). `json.dumps(..., indent=2, ensure_ascii=False)` emits `café — ü`
++literally rather than as `\uXXXX` escapes (FR-020a).
++
++**Alternatives considered**:
++
++- *`PYTHONIOENCODING` or wrapping `sys.stdout.buffer` by hand*: rejected — the environment
++  variable is outside the program's control (and Principle "Configuration" forbids implicit
++  environment-based behaviour switches), and a manual `TextIOWrapper` is more code for the same
++  effect.
++- *Building CSV rows with manual quoting*: rejected — the `csv` module's quoting is correct and
++  round-trip tested; hand-rolled quoting is a known source of data-corrupting bugs (SC-006).
++- *`json.dump` straight to the stream*: acceptable, but `dumps` plus one explicit write makes the
++  "exactly one trailing newline" guarantee of FR-020a visible in a single line.
++
++---
++
++## R-008: Error reporting and the exit-status map (FR-024)
++
++**Decision**: One exception type carrying its own status —
++`BookmarkError(message, status)` — raised where the problem is detected (rejected URL → 2,
++unusable store → 1, missing identifier → 3). The entry point has exactly one handler: it writes
++`f"bookmarks: {message}"` to stderr and returns `status`. Usage mistakes never reach it, because
++`argparse` has already exited 2 (R-003).
++
++**Rationale**: Principle II forbids broad handlers that swallow errors and permits catching only
++to re-raise or to convert into a clearer diagnostic — which is exactly this handler's job. One
++handler at one place keeps the status map auditable against FR-024 by reading a single function.
++Results are written to stdout only after the work succeeds, so a failing command cannot emit
++partial output (FR-023).
++
++**Alternatives considered**:
++
++- *A distinct exception class per status*: rejected — three near-empty classes where one field
++  does the job.
++- *Returning status codes up through the call chain*: rejected — every intermediate function
++  would have to check and forward, and a forgotten check becomes a silent success.
++- *Catching `sqlite3.Error` broadly at the top*: rejected — would convert unexpected database
++  faults into one of the four documented statuses and hide genuine bugs. Only the specific,
++  expected store-open failures of R-002 are converted; anything else propagates and crashes
++  loudly, which Principle II prefers over a wrong answer.
++
++---
++
++## R-009: Running `python -m bookmarks` and importing it from tests (FR-026, FR-027)
++
++**Decision**: Code lives in `src/bookmarks/`, with `__main__.py` as the `-m` entry point. Tests
++reach the package through pytest's built-in `pythonpath` ini option, declared in
++`pyproject.toml`:
++
++```toml
++[tool.pytest.ini_options]
++pythonpath = ["src"]
++testpaths = ["tests"]
++```
++
++Tests that exercise the real contract (exit status, stream separation) invoke the CLI as a
++subprocess: `subprocess.run([sys.executable, "-m", "bookmarks", ...], env={**os.environ,
++"PYTHONPATH": "src"}, capture_output=True)`.
++
++**Rationale**: `pythonpath` (pytest 7.0+; 9.1.1 is installed) replaces the usual
++`sys.path.insert` boilerplate in `conftest.py` with one declarative line, and needs no install
++step or packaging metadata — so `python -m bookmarks` with `src` on `PYTHONPATH` stays the real
++invocation, exactly as FR-026 words it. Subprocess tests are the only way to assert FR-022/FR-024
++exit statuses and FR-023's stdout/stderr split honestly; asserting on a function's return value
++would test a stand-in rather than the delivered contract.
++
++**Alternatives considered**:
++
++- *`pip install -e .`*: rejected — adds packaging and an install step the spec does not ask for,
++  and would let tests pass against an installed copy that differs from the tree.
++- *`sys.path` manipulation in `conftest.py`*: rejected — works, but `pythonpath` is the supported
++  mechanism and one line shorter.
++- *Testing only via in-process `main(argv)` calls*: rejected — cannot observe a real process exit
++  status; Principle III requires tests that assert the status itself.
++
++**Performance test note**: SC-007 and SC-002 use a 1,000-bookmark store. Seeding it with 1,000
++subprocess calls would cost minutes, so the fixture seeds the store through one direct
++`store`-module call (or a single multi-row insert) and then measures the user-visible commands
++via subprocess. The contract under test is the command's response time, not the seeding route.
++
++---
++
++## R-010: Module layout
++
++**Decision**: Four files under `src/bookmarks/`:
++
++| File          | Responsibility                                                          |
++| ------------- | ----------------------------------------------------------------------- |
++| `__init__.py` | empty marker                                                            |
++| `__main__.py` | `sys.exit(main(sys.argv[1:]))` — the `-m` entry point and nothing else  |
++| `cli.py`      | argparse grammar, stream setup, command dispatch, output formatting, the single error handler |
++| `store.py`    | open/validate the database, schema, tag normalisation, URL check, CRUD   |
++
++**Rationale**: Principle IV asks for a flat layout and for packages only when module count makes
++a flat layout unnavigable. Four files is navigable. The split is along the one seam that pays for
++itself: data rules and SQL on one side, argument grammar and presentation on the other — which
++also lets `store.py` be exercised directly by the seeding fixture in R-009. A separate
++`formats.py` was considered and rejected: TSV/CSV/JSON rendering is presentation, it is three
++short functions, and splitting it would add a file without removing any complexity.
++
++**Alternatives considered**:
++
++- *Single `__main__.py` holding everything*: rejected — the seeding fixture and unit-level tag
++  tests would have to import `__main__`, re-running the entry-point module.
++- *`models/`, `services/`, `cli/` package tree (the plan template's default)*: rejected outright
++  by Principle IV — subpackages for four modules, and an abstraction layer no requirement
++  demands.
++
++---
++
++## Resolved unknowns summary
++
++| Unknown from Technical Context | Resolution |
++| ------------------------------ | ---------- |
++| Language/version floor         | Python 3.11+, developed on 3.13.17 (R-001) |
++| Primary dependencies           | Standard library only: `argparse`, `sqlite3`, `csv`, `json`, `sys` (R-001) |
++| Storage engine and schema      | SQLite, two tables, `AUTOINCREMENT` ids (R-004, R-006) |
++| Unusable-store detection       | `mode=rw` URI plus a read-only validation query (R-002) |
++| Usage-mistake exit status      | `argparse` default, already 2 (R-003) |
++| Case-insensitive matching      | Python-side for `search`, SQL `=` for `--tag` (R-005) |
++| Encoding and line endings      | `reconfigure(encoding="utf-8", newline="")`, `lineterminator="\n"` (R-007) |
++| Testing approach               | pytest, `pythonpath = ["src"]`, subprocess for contract tests (R-009) |
++| Module layout                  | Four flat modules (R-010) |
++
++No NEEDS CLARIFICATION items remain.
