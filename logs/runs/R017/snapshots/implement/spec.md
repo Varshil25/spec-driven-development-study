@@ -1,0 +1,407 @@
+# Feature Specification: Pastebin Service
+
+**Feature Branch**: `001-pastebin-service`
+
+**Created**: 2026-11-16
+
+**Status**: Draft
+
+**Input**: User description: "Build a small HTTP service for sharing text snippets ("pastes"), using only Python's standard library (for example `http.server`). Run it as `python -m pastebin serve --port PORT --data DIR`. It listens on 127.0.0.1 at PORT, stores pastes under the directory DIR (creating it if needed) so that they survive a restart, and prints `listening on 127.0.0.1:PORT` to standard output once it is ready to accept requests. API (request and response bodies are JSON unless stated otherwise): POST /pastes creates a paste; GET /pastes/<id> returns its metadata and content; GET /pastes/<id>/raw returns the content as text/plain; DELETE /pastes/<id> with X-Delete-Token deletes it. An expired paste behaves as if it does not exist. Errors: 400 for malformed input, 413 for oversized content, 404 for unknown/expired pastes and unknown paths, 403 for a bad delete token, with 404 taking precedence over 403. Every error response has a JSON body of the form {"error": "<message>"}. Python 3.11+, standard library only, package `pastebin` under `src/`."
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - Share a text snippet (Priority: P1)
+
+Someone has a block of text — a log excerpt, a configuration fragment, a code sample — and
+wants to hand it to a collaborator as a link rather than pasting it into a chat window. They
+submit the text to the service and receive back a short identifier and a link. Anyone given
+that link can read the snippet back, either as structured data (identifier, content, and
+timestamps) or as plain text suitable for piping straight into a file or another tool.
+
+**Why this priority**: This is the entire point of the service. Creating a snippet and reading
+it back is the minimum that delivers any value at all; expiry, revocation, and durability are
+all refinements on top of it.
+
+**Independent Test**: Start the service, submit a snippet, and confirm the returned link
+retrieves exactly the same text both as structured data and as plain text. Delivers a usable
+sharing tool on its own.
+
+**Acceptance Scenarios**:
+
+1. **Given** a running service, **When** a user submits a snippet containing `hello`, **Then**
+   the service reports successful creation and returns a unique identifier, a single-use
+   revocation secret, and a link that points at the new snippet.
+2. **Given** a snippet that was just created, **When** a reader requests it as structured data,
+   **Then** the response contains the identifier, the exact original text, the creation time,
+   and an expiry time, and does **not** contain the revocation secret.
+3. **Given** a snippet that was just created, **When** a reader requests its plain-text form,
+   **Then** the response body is byte-for-byte the original text, labelled as UTF-8 plain text,
+   with no surrounding structure, quoting, or added newline.
+4. **Given** a snippet whose text contains non-ASCII characters, emoji, embedded newlines, and
+   quotation marks, **When** it is read back in either form, **Then** the text is identical to
+   what was submitted.
+5. **Given** a reader with an identifier that was never issued, **When** they request it,
+   **Then** the service reports that it does not exist.
+
+---
+
+### User Story 2 - Let a snippet expire on its own (Priority: P2)
+
+Someone sharing a credential fragment, a one-off debug dump, or anything else that should not
+live forever sets a lifetime when creating the snippet. Once that lifetime elapses, the snippet
+stops being readable to everyone, without anyone having to remember to clean it up. A snippet
+created without a lifetime stays available indefinitely.
+
+**Why this priority**: Self-expiry is the main safety property that makes the service usable for
+anything sensitive, but the service is still useful without it.
+
+**Independent Test**: Create a snippet with a very short lifetime, confirm it reads back before
+the deadline and is reported as non-existent after it. Can be tested without revocation or
+restart behaviour.
+
+**Acceptance Scenarios**:
+
+1. **Given** a user creating a snippet with a lifetime of one hour, **When** the snippet is read
+   back, **Then** its expiry time is reported as one hour after its creation time.
+2. **Given** a user creating a snippet with no lifetime, **When** the snippet is read back,
+   **Then** its expiry time is reported as "never".
+3. **Given** a snippet whose expiry time has passed, **When** anyone requests it as structured
+   data, as plain text, or attempts to revoke it, **Then** the service reports that it does not
+   exist.
+4. **Given** a user supplying a lifetime that is zero, negative, longer than thirty days,
+   fractional, a true/false value, or text, **When** they submit the snippet, **Then** the
+   service rejects the request as malformed and creates nothing.
+
+---
+
+### User Story 3 - Revoke a snippet early (Priority: P3)
+
+The person who created a snippet realises it should not be readable any more — they shared the
+wrong file, or the recipient has finished with it. Using the revocation secret they were given
+at creation time, they remove the snippet immediately. Readers who only have the link cannot
+remove it.
+
+**Why this priority**: Valuable control for the author, but a lifetime (Story 2) already covers
+the common "this should not live forever" need.
+
+**Independent Test**: Create a snippet, revoke it with the secret issued at creation, and
+confirm it is afterwards reported as non-existent; separately confirm that a wrong secret and a
+missing secret both fail and leave the snippet readable.
+
+**Acceptance Scenarios**:
+
+1. **Given** a snippet and its revocation secret, **When** the author revokes it, **Then** the
+   service confirms removal with no response body, and subsequent reads report that the snippet
+   does not exist.
+2. **Given** a snippet, **When** someone attempts to revoke it with no secret or with an
+   incorrect secret, **Then** the service refuses the request and the snippet remains readable
+   with its content unchanged.
+3. **Given** an identifier that was never issued, **When** someone attempts to revoke it with
+   any secret or none, **Then** the service reports that it does not exist, rather than
+   reporting a permission failure — the absence of the snippet is reported first.
+4. **Given** a snippet that has already been revoked, **When** the author repeats the revocation
+   with the same secret, **Then** the service reports that it does not exist.
+
+---
+
+### User Story 4 - Snippets survive a restart (Priority: P4)
+
+An operator runs the service, pointing it at a directory for its data. They restart the service
+— for an upgrade, a reboot, or a crash — and every snippet that has not expired or been revoked
+is still readable at the same link, with the same revocation secret still valid.
+
+**Why this priority**: Durability matters for real use but is invisible in a single session;
+the service demonstrates its value before this is proven.
+
+**Independent Test**: Create several snippets, stop the service, start it again against the same
+data directory, and confirm all of them read back identically and that revocation still works.
+
+**Acceptance Scenarios**:
+
+1. **Given** an operator starting the service with a data directory that does not yet exist,
+   **When** the service starts, **Then** it creates the directory and reports on its standard
+   output that it is listening on the loopback address and the chosen port.
+2. **Given** snippets created in a previous run, **When** the service is restarted against the
+   same data directory, **Then** every unexpired snippet reads back with identical content,
+   creation time, and expiry time, and its original revocation secret still works.
+3. **Given** a snippet that expired while the service was stopped, **When** the service is
+   restarted, **Then** that snippet is reported as non-existent.
+4. **Given** an operator starting the service, **When** the readiness line appears on standard
+   output, **Then** a request sent immediately afterwards is served rather than refused.
+
+---
+
+### Edge Cases
+
+- **Empty text**: A snippet whose text is the empty string is valid and is stored and returned
+  as empty. Emptiness is not treated as a missing value.
+- **Exact size boundary**: Text measuring exactly 65,536 bytes once encoded is accepted; one
+  byte more is rejected as too large. The limit is measured in encoded bytes, not characters, so
+  a snippet of 30,000 multi-byte characters can exceed it.
+- **Oversized submission**: A submission far larger than the limit is rejected without the
+  service first accumulating the whole thing in memory.
+- **Lifetime boundaries**: One second is the smallest accepted lifetime; 2,592,000 seconds (30
+  days) is the largest. Zero, negative values, and 2,592,001 are rejected.
+- **True/false as a lifetime**: A true/false value supplied where a whole number of seconds is
+  expected is rejected as malformed, even though it may resemble a number in some encodings.
+- **Expiry exactly now**: A snippet is readable up to and including its expiry instant and
+  non-existent after it.
+- **Malformed submission**: An empty body, text that is not valid structured data, structured
+  data that is not an object (a bare list, number, or string), a missing text field, or a text
+  field that is not text — all are rejected as malformed and create nothing.
+- **Unexpected extra fields**: Fields beyond the recognised ones are ignored rather than causing
+  a rejection.
+- **Identifier that looks like a path**: An identifier containing path separators, `..`, a
+  leading slash, percent-encoded separators, or an absolute path is treated as unknown and must
+  never cause the service to read or remove anything outside its data directory.
+- **Unknown routes**: Any address the service does not recognise — including a recognised
+  address used with an unsupported action, and an unknown sub-resource under a valid snippet —
+  is reported as not found.
+- **Both wrong**: A revocation attempt against an unknown or expired snippet with a wrong secret
+  reports non-existence, not a permission failure.
+- **Reader cannot learn the secret**: No read of a snippet, in either form, and no error message
+  ever discloses a revocation secret or any filesystem path.
+- **Concurrent revocation**: Two simultaneous revocations of the same snippet with the correct
+  secret result in the snippet being removed, with no error other than a not-found report for
+  whichever request loses the race.
+- **Concurrent reads during revocation**: A read running while a revocation is in progress either
+  returns the complete snippet or reports non-existence; it never returns truncated or partially
+  written text.
+- **Port already in use**: Starting the service on a port that is already taken fails with a
+  clear message and a non-zero exit status, and does not print the readiness line.
+- **Unusable data directory**: A data directory that cannot be created or written to fails at
+  startup with a clear message and a non-zero exit status.
+- **Foreign files in the data directory**: Unrelated or corrupt files in the data directory do
+  not prevent the service from starting or from serving valid snippets; an unreadable or corrupt
+  record is treated as a snippet that does not exist.
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+**Service lifecycle**
+
+- **FR-001**: The service MUST be startable as a single command that takes a port and a data
+  directory, and MUST bind only to the loopback interface `127.0.0.1` on the given port.
+- **FR-002**: The service MUST create the data directory, including missing parent directories,
+  if it does not already exist.
+- **FR-003**: The service MUST print exactly `listening on 127.0.0.1:PORT` (with `PORT` replaced
+  by the port in use) as a line on standard output, and MUST do so only once it is able to
+  accept requests.
+- **FR-004**: If the service cannot start — the port is unavailable, the data directory cannot
+  be created or written, or the arguments are invalid — it MUST report the reason on standard
+  error, exit with a non-zero status, and MUST NOT print the readiness line.
+
+**Creating a snippet**
+
+- **FR-005**: Users MUST be able to create a snippet by submitting an object containing a `content`
+  field holding the snippet text and an optional `expires_in` field holding a lifetime in whole
+  seconds.
+- **FR-006**: The service MUST require `content` to be present and to be a text value; the empty
+  string MUST be accepted as valid text.
+- **FR-007**: The service MUST reject `content` whose UTF-8 encoded size exceeds 65,536 bytes,
+  and MUST accept content of exactly 65,536 bytes.
+- **FR-008**: The service MUST accept `expires_in` only as a whole number from 1 to 2,592,000
+  inclusive; it MUST reject fractional numbers, true/false values, text, and values outside that
+  range. Absence of `expires_in` MUST mean the snippet never expires.
+- **FR-009**: The service MUST ignore fields other than `content` and `expires_in` rather than
+  rejecting the submission because of them.
+- **FR-010**: On success the service MUST report status `201` and return the snippet's
+  identifier, a revocation secret, and the relative address `/pastes/<id>` at which it can be
+  read.
+- **FR-011**: Each snippet MUST receive an identifier that is unique among all snippets the
+  service has issued, and that is safe to place in an address without encoding.
+
+**Reading a snippet**
+
+- **FR-012**: Users MUST be able to read a snippet by its identifier and receive status `200`
+  with its identifier, its exact original text, its creation time, and its expiry time.
+- **FR-013**: The structured read response MUST NOT include the revocation secret.
+- **FR-014**: Users MUST be able to read a snippet's text alone by its identifier and receive
+  status `200`, the exact original text as the entire response body, and a declaration that the
+  body is UTF-8 plain text.
+- **FR-015**: Creation and expiry times MUST be reported as ISO 8601 instants in UTC with a
+  trailing `Z` and second precision, for example `2026-10-23T20:15:00Z`. The expiry time MUST be
+  reported as the null value for a snippet that never expires.
+- **FR-016**: Snippet text MUST round-trip exactly, preserving non-ASCII characters, embedded
+  newlines, and whitespace, with nothing added or removed.
+
+**Expiry**
+
+- **FR-017**: A snippet whose expiry time has passed MUST be indistinguishable from one that
+  never existed, for reads in either form and for revocation attempts.
+- **FR-018**: Expiry MUST be evaluated against the current time at the moment of each request,
+  and MUST hold across a restart of the service — a snippet that expired while the service was
+  stopped MUST be non-existent when it starts again.
+
+**Revoking a snippet**
+
+- **FR-019**: Users MUST be able to revoke a snippet by supplying its identifier together with
+  the revocation secret issued at creation, in the `X-Delete-Token` header; on success the
+  service MUST report status `204` with an empty body.
+- **FR-020**: A revocation attempt with a missing or incorrect secret, against a snippet that
+  exists and has not expired, MUST be refused with status `403` and MUST leave the snippet
+  readable and unchanged.
+- **FR-021**: A revocation attempt against an unknown or expired snippet MUST report `404`
+  regardless of the secret supplied or its absence — non-existence MUST be reported in
+  preference to a permission failure.
+- **FR-022**: After successful revocation, every subsequent read or revocation of that
+  identifier MUST report `404`.
+
+**Durability**
+
+- **FR-023**: Snippets MUST be stored under the given data directory such that every unexpired,
+  unrevoked snippet — its identifier, text, creation time, expiry time, and revocation secret —
+  remains valid and readable after the service is stopped and started again against that same
+  directory.
+- **FR-024**: A stored record that is unreadable, corrupt, or not recognisable as a snippet MUST
+  be treated as a snippet that does not exist, and MUST NOT prevent the service from starting or
+  from serving other snippets.
+
+**Errors**
+
+- **FR-025**: Every error response MUST carry a structured body of the form
+  `{"error": "<message>"}` with a human-readable message describing what was rejected.
+- **FR-026**: The service MUST report `400` for a body that is not valid structured data, a body
+  that is not an object, a missing or non-text `content`, or an invalid `expires_in`.
+- **FR-027**: The service MUST report `413` for `content` exceeding the size limit, and MUST
+  apply this in preference to any other outcome for an otherwise valid oversized submission.
+- **FR-028**: The service MUST report `404` for an unknown or expired snippet and for any
+  address it does not recognise, including a recognised address used with an unsupported action.
+- **FR-029**: The service MUST reject an oversized submission without first holding the whole
+  submission in memory.
+
+### Security Requirements
+
+Derived from the OWASP Top 10 and ASVS, and binding under the project constitution's Security
+Baseline. Each is testable and requires at least one automated test, including negative tests.
+
+- **SR-001** (Unguessable capabilities, ASVS V3 / OWASP A01): Snippet identifiers and revocation
+  secrets MUST each be generated by a cryptographically secure random source with at least 128
+  bits of entropy, and MUST NOT be derived from content, time, a counter, or any predictable
+  input. Knowing one snippet's identifier or secret MUST give no information about another's.
+- **SR-002** (Constant-time secret comparison, ASVS V2): The supplied revocation secret MUST be
+  compared against the stored one using a constant-time comparison, never with a short-circuiting
+  equality test.
+- **SR-003** (Path containment, OWASP A01 / ASVS V12): The identifier taken from a request MUST
+  be validated against an allowlist of permitted characters and length before it is used to
+  locate any stored record, and any resolved path MUST be confirmed to lie inside the data
+  directory after symlink resolution. Identifiers containing path separators, `..`, percent-
+  encoded separators, or an absolute path MUST be reported as unknown, and MUST never cause a
+  read, write, or removal outside the data directory.
+- **SR-004** (Input validation before use, OWASP A03 / ASVS V5): Every request element — address,
+  action, headers, and body — MUST be validated against known-good shapes before it reaches any
+  storage, parsing, or output operation. Validation MUST be allowlist-based.
+- **SR-005** (Resource limits, OWASP A05 / ASVS V12): The service MUST bound the number of bytes
+  it reads from any single request, rejecting a submission that declares or delivers more than
+  the permitted size with `413` rather than buffering it. A request that declares no size, or
+  declares one it does not deliver, MUST be rejected rather than read without limit.
+- **SR-006** (Authorization on every operation, OWASP A01 / ASVS V4): Revocation MUST verify the
+  secret against the stored record on the server for every request; it MUST NOT rely on any
+  client-supplied claim of ownership other than the secret itself, and MUST NOT be satisfied by
+  a check performed only at an earlier stage.
+- **SR-007** (Atomic revocation, ASVS V11): The check of the revocation secret and the removal of
+  the snippet MUST be atomic with respect to concurrent requests, so that a snippet cannot be
+  removed by a request whose secret check did not succeed, and a concurrent read never observes a
+  partially written or partially removed snippet.
+- **SR-008** (Restrictive file permissions, ASVS V12): Stored snippet records — which hold
+  revocation secrets — MUST be created such that they are not readable by other users on the
+  machine at any point, including between creation and any permission change. The data directory
+  MUST likewise be created accessible only to its owner.
+- **SR-009** (Output redaction, OWASP A09 / ASVS V7): No response body, header, log line, or
+  error message MUST ever disclose a revocation secret, a filesystem path, or an internal stack
+  trace. Error messages MUST state what was rejected without echoing stored values or internal
+  state.
+- **SR-010** (Fail closed on unexpected errors, ASVS V7): An unexpected internal failure MUST
+  produce a generic error response in the standard error shape, and MUST NOT return snippet
+  content, partial content, or diagnostic internals to the caller.
+- **SR-011** (Network exposure, ASVS V1): The service MUST bind only to `127.0.0.1` in its
+  default and only configuration; there MUST be no option that exposes it on another interface.
+- **SR-012** (Content handling, OWASP A03 / ASVS V5): Snippet text MUST be returned to callers as
+  inert data — declared as plain text when returned raw, and never interpreted, executed, or
+  declared as a type a browser would render as markup.
+
+### Key Entities
+
+- **Paste**: A single shared snippet. Attributes: a unique public identifier; the snippet text
+  (UTF-8, at most 65,536 encoded bytes); the instant it was created; the instant it expires, or
+  "never"; and a revocation secret known only to its creator. A paste is readable by anyone
+  holding its identifier until it expires or is revoked, at which point it ceases to exist from
+  every caller's point of view.
+- **Paste store**: The durable collection of pastes held under the operator-chosen data
+  directory. It is the single source of truth across restarts and is keyed by paste identifier.
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: A user can share a snippet and have a collaborator read it back in two steps — one
+  submission and one retrieval — with the retrieved text identical to the original in 100% of
+  cases, including non-ASCII text.
+- **SC-002**: Every one of the five documented outcomes (created, read, removed, rejected, not
+  found) is distinguishable by the caller without inspecting the message text, and every
+  rejection carries a readable explanation.
+- **SC-003**: 100% of attempts to read or revoke a snippet after its expiry instant, or after its
+  revocation, are reported as non-existent — no snippet is ever served past its stated lifetime.
+- **SC-004**: 100% of revocation attempts without the correct secret fail, and the snippet remains
+  readable with unchanged content.
+- **SC-005**: After a restart against the same data directory, 100% of unexpired, unrevoked
+  snippets read back with identical text, creation time, and expiry time, and their original
+  revocation secrets still work.
+- **SC-006**: A snippet is retrievable immediately after the readiness line is printed; no
+  request sent after that line is refused because the service was not yet ready.
+- **SC-007**: Submissions above the size limit are rejected and the service's memory use stays
+  bounded regardless of how much a caller attempts to send.
+- **SC-008**: Every functional requirement (FR-001 … FR-029) and every security requirement
+  (SR-001 … SR-012) maps to at least one automated test that references it by identifier, and the
+  full suite passes.
+- **SC-009**: No automated test, and no manual probe, can retrieve a revocation secret, a
+  filesystem path, or internal diagnostic detail from any response the service produces.
+- **SC-010**: An identifier crafted to escape the data directory never results in any file
+  outside that directory being read, written, or removed, across every documented operation.
+
+## Assumptions
+
+- **Single operator, trusted host**: The service is intended to be run by one person on their own
+  machine, reachable only over loopback. There are no user accounts, no authentication for
+  reading, and no rate limiting; possession of the identifier is the sole credential for reading
+  and possession of the revocation secret is the sole credential for removal.
+- **Unrecognised action on a known address returns not found**: The description states that "any
+  other path" returns `404` and does not describe a distinct response for an unsupported action.
+  Unsupported action-and-address combinations (for example submitting to a specific snippet, or
+  requesting an unknown sub-resource of one) are therefore reported as `404` rather than as a
+  method-not-allowed outcome.
+- **Expired records may remain on disk**: Expiry is evaluated at request time. Records of expired
+  snippets are permitted to remain in the data directory until removed; what matters is that they
+  are never served. No background cleanup process is in scope.
+- **Second precision for timestamps**: The example timestamp carries no fractional seconds, so
+  times are recorded and reported to whole-second precision.
+- **Listing is out of scope**: There is no way to enumerate snippets, search them, or count them;
+  the only way to reach a snippet is by its identifier.
+- **Editing is out of scope**: Snippets are immutable once created — there is no update
+  operation, and neither the text nor the lifetime can be changed after creation.
+- **No web interface**: The service exposes a machine-facing interface only. There is no HTML
+  page, form, or browser-oriented asset, and none is planned in this feature.
+- **Clock**: Expiry relies on the host's system clock in UTC. Correct behaviour across a clock
+  that jumps backwards is not a requirement of this feature.
+- **Concurrency expectations**: The service is expected to handle a handful of simultaneous
+  requests correctly, not to be tuned for throughput. Correctness under concurrency (SR-007) is
+  required; a performance target is not.
+- **Scale**: Storage is sized for the kind of volume one person generates — thousands of
+  snippets, not millions. No indexing, pagination, or sharding is in scope.
+
+## Constraints *(operator- and platform-imposed)*
+
+These are fixed by the request rather than derived from user need, and are recorded here so that
+the behavioural requirements above stay free of them.
+
+- The implementation MUST use Python 3.11 or newer and the standard library only — no third-party
+  runtime dependency. This matches the project constitution's Principle I.
+- Code MUST live in a package named `pastebin` under `src/`, runnable as `python -m pastebin` when
+  `src/` is on `PYTHONPATH`.
+- The entry point MUST be `python -m pastebin serve --port PORT --data DIR`.
+- The caller-facing interface is HTTP with JSON bodies at the addresses `POST /pastes`,
+  `GET /pastes/<id>`, `GET /pastes/<id>/raw`, and `DELETE /pastes/<id>`, with the revocation
+  secret carried in the `X-Delete-Token` header, exactly as described in the input.
+- Test tooling (`pytest`) is permitted as a development-only dependency under the constitution's
+  Principle I exemption.

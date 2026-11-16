@@ -1,0 +1,459 @@
+# Feature Specification: Burn-After-Reading and Password-Protected Pastes
+
+**Feature Branch**: `002-burn-and-password-pastes`
+
+**Created**: 2026-11-16
+
+**Status**: Draft
+
+**Input**: User description: "This repository already contains `pastebin`, a small HTTP service for sharing text snippets ("pastes"). Read the existing code and any documentation in the repository before changing it. Add the two options below for creating a paste; everything the service does now must keep working exactly as it does. — **Burn after reading.** `"burn_after_reading": true` in the body of `POST /pastes` makes the paste one-time: the first successful read of it, by `GET /pastes/<id>` or `GET /pastes/<id>/raw`, returns it as usual and then deletes it, so every later request for it gets `404`. `burn_after_reading` is optional, defaults to `false`, and must be a boolean; any other value gets `400`. — **Password.** `"password": "..."` in the body of `POST /pastes` protects the paste. Reading it, by either `GET` endpoint, then requires the request header `X-Paste-Password` with that password; a missing or wrong password gets `403` (for an unknown or expired paste, `404` still takes precedence). `password` is optional and, if present, must be a string of 1 to 128 characters; anything else gets `400`. Deleting a protected paste still needs only its delete token. — `GET /pastes/<id>` also includes `"burn_after_reading"` and `"protected"` (each `true` or `false`) in its JSON. As before, every error response has a JSON body of the form `{"error": "<message>"}`."
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - Share a snippet that destroys itself once read (Priority: P1)
+
+Someone needs to hand over a single-use piece of text — a recovery code, a temporary credential, a
+one-off dump — and wants certainty that it is seen once and then gone. They mark the snippet as
+burn-after-reading when they create it. The recipient opens the link, gets the text exactly as they
+would for any other snippet, and the snippet ceases to exist at that moment. Anyone who follows the
+same link afterwards — including the recipient refreshing, or a third party who intercepted the link
+— is told it does not exist. The author does not have to come back and clean it up, and does not
+have to guess a lifetime short enough to be safe but long enough to be usable.
+
+**Why this priority**: This is a self-contained capability that delivers the headline value of the
+feature on its own. It needs nothing from the password story, and it is the option that changes the
+safety profile of the service most.
+
+**Independent Test**: Create a snippet marked burn-after-reading, read it once and confirm the text
+is returned exactly as for an ordinary snippet, then read it again and confirm it is reported as
+non-existent. Repeat using the plain-text form for the single read. Fully testable without any
+password being involved.
+
+**Acceptance Scenarios**:
+
+1. **Given** a running service, **When** a user creates a snippet marked burn-after-reading,
+   **Then** creation succeeds exactly as it does today — identifier, revocation secret, and link —
+   with no additional fields in the confirmation and no indication of the marking.
+2. **Given** a burn-after-reading snippet, **When** a reader requests it as structured data, **Then**
+   they receive the identifier, the exact original text, the creation time, the expiry time, the
+   marking reported as true, and the protection flag reported as false.
+3. **Given** a burn-after-reading snippet that has just been read as structured data, **When**
+   anyone requests it again in either form, **Then** the service reports that it does not exist.
+4. **Given** a burn-after-reading snippet, **When** a reader requests its plain-text form, **Then**
+   the body is byte-for-byte the original text, and every later request in either form reports that
+   it does not exist.
+5. **Given** a snippet created without the marking, **When** it is read any number of times, **Then**
+   every read succeeds and reports the marking as false — the existing behaviour is unchanged.
+6. **Given** a burn-after-reading snippet, **When** a revocation is attempted against it with an
+   incorrect secret, **Then** the attempt is refused, no read has occurred, and the snippet is still
+   readable once afterwards.
+7. **Given** a user supplying a marking that is not a true/false value — text, a number, a null, an
+   object — **When** they submit the snippet, **Then** the service rejects the request as malformed
+   and creates nothing.
+
+---
+
+### User Story 2 - Protect a snippet with a password (Priority: P2)
+
+Someone wants to share a snippet over a channel where the link alone may be seen by more people
+than they intend — a shared terminal, a chat log, a ticket comment. They set a password when
+creating it and pass that password to the intended reader out of band. Holding the link is no longer
+enough: a reader must present the password to see the text, in either read form. Someone with the
+link but no password is told they are not permitted, and learns nothing about the text. The author
+keeps full control: revoking the snippet still needs only the secret they were issued at creation,
+not the password.
+
+**Why this priority**: Valuable and independently useful, but the service is already safe for
+hand-to-hand sharing via unguessable links; this raises the bar for a link that leaks. It builds on
+no part of Story 1.
+
+**Independent Test**: Create a snippet with a password, confirm that reading it without the password
+and with a wrong password are both refused while the snippet stays readable, confirm the correct
+password returns the exact text in both read forms, and confirm revocation works with the secret
+alone. Fully testable without any burn-after-reading snippet being involved.
+
+**Acceptance Scenarios**:
+
+1. **Given** a running service, **When** a user creates a snippet with a password, **Then** creation
+   succeeds exactly as it does today, and the confirmation contains no trace of the password.
+2. **Given** a password-protected snippet, **When** a reader supplies the correct password, **Then**
+   they receive the snippet in whichever form they asked for, with the protection flag reported as
+   true, and the snippet remains readable.
+3. **Given** a password-protected snippet, **When** a reader supplies no password, **Then** the
+   service refuses the request as not permitted, discloses no part of the text, and leaves the
+   snippet readable to someone who does hold the password.
+4. **Given** a password-protected snippet, **When** a reader supplies an incorrect password —
+   including one differing only in case, in trailing whitespace, or in length — **Then** the service
+   refuses the request as not permitted.
+5. **Given** a password-protected snippet and the secret issued at its creation, **When** the author
+   revokes it supplying no password, **Then** the revocation succeeds and later reads report that it
+   does not exist.
+6. **Given** a snippet created without a password, **When** a reader supplies a password header
+   anyway, **Then** the read succeeds and the protection flag is reported as false — a header for a
+   snippet that is not protected is ignored.
+7. **Given** a user supplying a password that is not text, is empty, or is longer than 128
+   characters, **When** they submit the snippet, **Then** the service rejects the request as
+   malformed and creates nothing.
+
+---
+
+### User Story 3 - Combine the two, and keep non-existence private (Priority: P3)
+
+A snippet may be both one-time and password-protected. The two protections compose in the only safe
+order: a reader who cannot prove they hold the password never consumes the single read, so a
+stranger with the link cannot destroy a snippet they were never entitled to see. And whichever
+protections are in play, a snippet that is unknown, expired, or already revoked is reported as
+simply not existing — the service never answers "you are not permitted" for something that is not
+there, so the refusal never confirms that an identifier is real.
+
+**Why this priority**: A composition and precedence story rather than a new capability. It matters
+for correctness and for not handing out an existence oracle, but it has no value until Stories 1 and
+2 exist.
+
+**Independent Test**: Create a snippet that is both one-time and protected; confirm a wrong-password
+read is refused and the snippet survives, then a correct-password read returns it and destroys it.
+Separately confirm that an identifier that was never issued, and an expired one, are reported as
+non-existent rather than as not-permitted, whatever password is supplied.
+
+**Acceptance Scenarios**:
+
+1. **Given** a snippet that is both one-time and password-protected, **When** a reader supplies no
+   password or a wrong one, **Then** the request is refused as not permitted and the snippet is
+   still readable by someone holding the password.
+2. **Given** that same snippet, **When** a reader supplies the correct password, **Then** the text is
+   returned, both flags are reported as true in the structured form, and every later request in
+   either form reports that it does not exist — including one supplying the correct password.
+3. **Given** an identifier that was never issued, **When** anyone reads it with any password or
+   none, **Then** the service reports that it does not exist, never that permission was refused.
+4. **Given** a password-protected snippet whose expiry time has passed, **When** anyone reads it
+   with the correct password, **Then** the service reports that it does not exist.
+5. **Given** a password-protected snippet that has been revoked, **When** anyone reads it with the
+   correct password, **Then** the service reports that it does not exist.
+6. **Given** a one-time snippet, **When** two readers request it simultaneously, **Then** exactly one
+   of them receives the text and the other is told it does not exist; neither receives partial or
+   truncated text.
+
+---
+
+### User Story 4 - Existing snippets and existing clients keep working (Priority: P4)
+
+An operator upgrades the service against a data directory that already holds snippets created before
+this feature existed. Those snippets keep reading back exactly as they did, with no password
+required and no one-time behaviour, and they now report both flags as false. Clients that never send
+either new field, and never send a password header, see no change in any response other than the two
+added flags in the structured read.
+
+**Why this priority**: A compatibility guarantee rather than a user-facing capability. It is
+essential to release but delivers nothing new on its own.
+
+**Independent Test**: Create snippets with a build of the service that predates the feature (or
+equivalently, records carrying none of the new data), restart against the same data directory, and
+confirm every one reads back with identical text and timestamps, reports both flags as false, and is
+still revocable with its original secret.
+
+**Acceptance Scenarios**:
+
+1. **Given** snippets stored before this feature existed, **When** they are read after the upgrade,
+   **Then** the text, creation time, and expiry time are identical to before, no password is
+   required, and both flags are reported as false.
+2. **Given** a one-time or password-protected snippet created before a restart, **When** the service
+   is restarted against the same data directory, **Then** the snippet is still one-time or still
+   requires the same password respectively, and its original revocation secret still works.
+3. **Given** a submission that uses neither new field, **When** it is created and read, **Then**
+   every status, header, and field that the service produced before this feature is unchanged, apart
+   from the two added flags in the structured read.
+4. **Given** a one-time snippet that is read and so destroyed, **When** the service is restarted
+   against the same data directory, **Then** the snippet is still reported as non-existent.
+
+---
+
+### Edge Cases
+
+- **Marking absent**: A submission with no marking behaves exactly as today — the snippet is
+  readable any number of times and reports the marking as false.
+- **Marking explicitly false**: Accepted, and identical in behaviour to omitting it.
+- **Marking is null**: Rejected as malformed. An explicit null is not treated as absence, matching
+  how a null lifetime is already handled.
+- **Marking looks boolean but is not**: The texts `"true"`/`"false"`, the numbers `0`/`1`, a list,
+  and an object are all rejected as malformed.
+- **Password absent**: The snippet is unprotected, reads need no header, and the protection flag is
+  false.
+- **Password is the empty string**: Rejected as malformed — one character is the minimum.
+- **Password length boundary**: A password of exactly 128 characters is accepted; 129 is rejected.
+  The bound is counted in characters, not in encoded bytes, so a 128-character password of
+  multi-byte characters is still accepted.
+- **Password is null, a number, a true/false value, a list, or an object**: Rejected as malformed.
+- **Password with unusual characters**: Spaces, punctuation, and non-ASCII characters are accepted,
+  and a reader supplying the identical password is granted access.
+- **Password header on an unprotected snippet**: Ignored; the read succeeds.
+- **Empty password header on a protected snippet**: Treated as a wrong password — refused as not
+  permitted, never as a match for any stored password.
+- **Password header present more than once**: Treated as a wrong password unless the value the
+  service acts on is exactly the stored password; it never results in access being granted to a
+  reader who does not hold the password.
+- **Both new fields invalid in one submission**: Rejected as malformed; which message is returned is
+  unspecified, but exactly one rejection is returned and nothing is created.
+- **Invalid new field together with oversized text**: Rejected as malformed rather than as too
+  large — the too-large outcome is reserved for a submission that is otherwise valid.
+- **Refused read of a one-time snippet**: A read refused for a wrong or missing password, and a read
+  of an identifier that does not resolve, never consume the single read.
+- **Unsupported action on a one-time snippet**: A request the service does not recognise — an
+  unsupported method, an unknown sub-resource, a trailing slash — is reported as not found and never
+  consumes the single read.
+- **Failed revocation of a one-time snippet**: A revocation refused for a wrong or missing secret
+  leaves the snippet intact and still readable once.
+- **Simultaneous reads of a one-time snippet**: Exactly one read returns the text; the other reports
+  non-existence. No read ever returns truncated or partially written text.
+- **Simultaneous read and revocation of a one-time snippet**: Each either completes or reports
+  non-existence; the snippet is gone afterwards either way, and no text is returned twice.
+- **One-time snippet that also expires**: Expiry still applies independently — once the expiry
+  instant has passed the snippet is non-existent whether or not it was ever read.
+- **Protected snippet revoked with the wrong secret**: Refused as not permitted on the basis of the
+  secret, with no password involved; the password neither substitutes for the secret nor is required
+  alongside it.
+- **Stored record missing the new data**: Treated as not one-time and not protected, rather than as
+  corrupt.
+- **Stored record whose new data is unusable**: A record whose marking or protection data is not of
+  the expected shape is treated as a snippet that does not exist, consistent with how any
+  unrecognisable record is already handled — it never results in a protected snippet being served
+  without a password, nor in a one-time snippet being served twice.
+
+## Requirements *(mandatory)*
+
+Requirement identifiers continue the sequences established by `001-pastebin-service`, so that the
+existing requirement-to-test coverage gate can be extended without renumbering anything: functional
+requirements resume at **FR-030**, security requirements at **SR-013**, and success criteria at
+**SC-011**. Every requirement of `001-pastebin-service` (FR-001 … FR-029, SR-001 … SR-012, SC-001 …
+SC-010) remains in force unchanged and is incorporated here by reference.
+
+### Functional Requirements
+
+**Creating a snippet — the one-time marking**
+
+- **FR-030**: The service MUST accept an optional `burn_after_reading` field in a creation
+  submission, holding a true/false value that marks the snippet as readable exactly once. Its
+  absence MUST mean the same as `false`.
+- **FR-031**: The service MUST reject a `burn_after_reading` that is not a true/false value — text,
+  a number (including `0` and `1`), null, a list, or an object — with status `400`, and MUST create
+  nothing.
+
+**Creating a snippet — the password**
+
+- **FR-032**: The service MUST accept an optional `password` field in a creation submission, holding
+  text of at least 1 and at most 128 characters, which protects the snippet against reading. Its
+  absence MUST mean the snippet is unprotected.
+- **FR-033**: The service MUST reject a `password` that is not text, is shorter than 1 character, or
+  is longer than 128 characters — including null, a number, a true/false value, a list, and an
+  object — with status `400`, and MUST create nothing. The length bound MUST be measured in
+  characters, so a 128-character password MUST be accepted however many bytes it encodes to.
+- **FR-034**: A `password` MAY contain any character a text value can hold, including spaces,
+  punctuation, and non-ASCII characters; a reader who later supplies the identical password MUST be
+  granted access.
+- **FR-035**: The creation confirmation MUST be unchanged in shape — the identifier, the revocation
+  secret, and the relative address, and nothing else. It MUST NOT echo the password, report whether
+  the snippet is protected, or report the one-time marking.
+- **FR-036**: Both new fields MUST be validated before the size of the text is judged, so that a
+  submission carrying an invalid new field is reported as malformed (`400`) rather than as too large
+  (`413`); the too-large outcome continues to take precedence for an otherwise-valid submission
+  (FR-027).
+
+**Reading — reported flags**
+
+- **FR-037**: The structured read response MUST, in addition to the identifier, text, creation time,
+  and expiry time it already returns, include `burn_after_reading` and `protected`, each a true/false
+  value. Both MUST be present on every successful structured read, including for snippets that use
+  neither option. The response MUST still not include the revocation secret.
+- **FR-038**: `protected` MUST report only whether a password is required. No response MUST contain
+  the password itself or any value derived from it.
+- **FR-039**: The plain-text read response MUST remain exactly the snippet's text with nothing added
+  — the flags MUST NOT appear in its body, and no response header MUST carry them.
+
+**Reading — the password check**
+
+- **FR-040**: A read of a protected snippet, in either form, MUST be refused with status `403` unless
+  the request carries the `X-Paste-Password` header holding exactly the password set at creation.
+- **FR-041**: A refused read MUST disclose no part of the snippet's text, MUST leave the snippet
+  unchanged and still readable by a reader who holds the password, and MUST carry the standard
+  error body.
+- **FR-042**: A read of an unprotected snippet MUST succeed whether or not the request carries a
+  password header, and the header's value MUST have no effect.
+- **FR-043**: For a snippet that is unknown, expired, already revoked, or already consumed, the
+  service MUST report `404` regardless of the password supplied or its absence — non-existence MUST
+  be reported in preference to a permission failure, so a refusal never confirms that an identifier
+  is real.
+
+**Reading — the one-time behaviour**
+
+- **FR-044**: The first successful read of a one-time snippet, by either read form, MUST return the
+  snippet exactly as a read of an equivalent ordinary snippet would, and MUST then destroy it.
+- **FR-045**: After that read, every subsequent request for that identifier — a structured read, a
+  plain-text read, or a revocation — MUST report `404`.
+- **FR-046**: A request that does not result in a successful read MUST NOT consume a one-time
+  snippet. This includes a read refused for a missing or wrong password, a request for an identifier
+  that does not resolve, an unsupported action or address, and a refused revocation.
+- **FR-047**: Under concurrent reads of the same one-time snippet, at most one MUST return the
+  snippet; every other MUST report `404`. No read MUST return partial or truncated text.
+- **FR-048**: Destruction on read MUST be durable — a consumed snippet MUST remain non-existent
+  after the service is stopped and started again against the same data directory.
+- **FR-049**: Expiry MUST continue to apply to a one-time snippet independently of whether it has
+  been read; an unread one-time snippet past its expiry instant MUST be non-existent.
+
+**Revoking**
+
+- **FR-050**: Revocation MUST continue to require only the revocation secret issued at creation. The
+  password MUST NOT be required for revocation, MUST NOT substitute for the secret, and a password
+  header MUST have no effect on a revocation.
+
+**Compatibility and durability**
+
+- **FR-051**: A stored snippet that carries no record of either option MUST be served as not
+  one-time and not protected, rather than being treated as corrupt or unreadable.
+- **FR-052**: Both options MUST survive a restart: after the service is stopped and started again
+  against the same data directory, a snippet created as one-time MUST still be one-time, and a
+  snippet created with a password MUST still require that same password.
+- **FR-053**: Every behaviour specified by `001-pastebin-service` MUST continue to hold unchanged for
+  submissions that use neither new field — every status code, header, body shape, error message,
+  precedence rule, and startup behaviour. The only permitted difference anywhere in the existing
+  surface is the two flags added to the structured read by FR-037.
+- **FR-054**: Every error response introduced by this feature MUST carry the established structured
+  body `{"error": "<message>"}` with a human-readable message naming what was rejected.
+
+### Security Requirements
+
+Derived from the OWASP Top 10 and ASVS, and binding under the project constitution's Security
+Baseline. Each is testable and requires at least one automated test, including negative tests. The
+security requirements of `001-pastebin-service` (SR-001 … SR-012) continue to apply in full.
+
+- **SR-013** (Credential storage, ASVS V2 / OWASP A02): A paste password MUST NOT be stored in
+  recoverable form. It MUST be stored only as a salted hash produced by a deliberately slow,
+  purpose-built password hashing algorithm with current parameters, with a per-paste salt drawn from
+  a cryptographically secure random source. The plaintext password MUST NOT be written to the data
+  directory, to any response, or to any output of the process.
+- **SR-014** (Constant-time verification, ASVS V2): The verification of a supplied password against
+  the stored value MUST use a constant-time comparison, never a short-circuiting equality test.
+- **SR-015** (Authorization on every read, OWASP A01 / ASVS V4): The password MUST be verified
+  against the stored record on the server for every read of a protected snippet, in both read forms.
+  Access MUST NOT be granted on the basis of any client-supplied claim other than the password
+  itself, MUST NOT be cached across requests, and MUST NOT be satisfied by a check made only at an
+  earlier stage or on a different route.
+- **SR-016** (Atomic single-read destruction, ASVS V11 / OWASP A04): The check that a one-time
+  snippet is still available and its destruction MUST be atomic with respect to concurrent requests,
+  so that its text cannot be returned to two callers, and no concurrent read observes a partially
+  written or partially removed snippet.
+- **SR-017** (Protections are not bypassable, OWASP A01): No route, action, header, or encoding of a
+  request MUST return the text of a protected snippet without the correct password, or return the
+  text of a one-time snippet after its single read — including through an unsupported method, an
+  unknown sub-resource, a percent-encoded or otherwise disguised address, or a revocation.
+- **SR-018** (Allowlist validation and bounded work, OWASP A03 / ASVS V5, V12): The `password` and
+  `burn_after_reading` fields MUST be validated against their known-good shapes — exact type, and
+  for the password the 1-to-128-character bound — before either value reaches storage, hashing, or
+  any other operation, so that the work any single submission or read can provoke stays bounded.
+- **SR-019** (Output redaction, OWASP A09 / ASVS V7): No response body, header, error message, or
+  process output MUST ever disclose a password, a stored password hash, a salt, hashing parameters,
+  a filesystem path, or a stack trace. A refusal MUST state only that the password was missing or
+  wrong, without echoing the supplied value or revealing anything about the stored one.
+- **SR-020** (Fail closed, ASVS V7): If the service cannot determine whether a snippet is protected
+  or one-time, or cannot complete the destruction of a one-time snippet it has decided to serve, it
+  MUST NOT return the snippet's text. An unexpected failure MUST produce the generic error response
+  and MUST NOT disclose content, partial content, or diagnostic internals.
+
+### Key Entities
+
+- **Paste** *(extended)*: A single shared snippet. Existing attributes are unchanged — a unique
+  public identifier, the snippet text, the creation instant, the expiry instant or "never", and a
+  revocation secret. Two attributes are added: whether the snippet is **one-time**, meaning it
+  ceases to exist upon its first successful read; and an optional **password verifier**, a
+  non-recoverable salted hash of the password a reader must supply, whose presence makes the snippet
+  protected. A paste with neither attribute set behaves exactly as a paste did before this feature.
+- **Paste password**: A secret chosen by the author at creation, of 1 to 128 characters, held by the
+  service only in non-recoverable form. It governs reading only — never revocation — and is known to
+  the service only as something to verify, never as something to reproduce or report.
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-011**: 100% of one-time snippets return their text on exactly one successful read and are
+  reported as non-existent on every request thereafter, across both read forms and in either order.
+- **SC-012**: 100% of reads of a protected snippet without the correct password are refused, in both
+  read forms, and the snippet remains readable afterwards to a reader who holds the password.
+- **SC-013**: 100% of reads of a protected snippet with the correct password return text identical
+  to what was submitted, including non-ASCII text, in both read forms.
+- **SC-014**: 0% of refused or unresolved requests consume a one-time snippet — after any number of
+  wrong-password reads, unknown-address requests, and failed revocations, the snippet still returns
+  its text on its first successful read.
+- **SC-015**: In a concurrent test with multiple simultaneous readers of the same one-time snippet,
+  exactly one receives the text and every other is told it does not exist; no reader receives
+  truncated text, and no error other than non-existence occurs.
+- **SC-016**: 100% of requests for an unknown, expired, revoked, or already-consumed identifier are
+  reported as non-existent rather than as not permitted, whatever password is supplied — so the
+  responses give a caller no way to tell a real identifier from an invented one.
+- **SC-017**: No response, header, or process output produced by any documented operation contains a
+  password, a stored password verifier, a salt, or hashing parameters, under automated inspection
+  and manual probing alike.
+- **SC-018**: After a restart against the same data directory, 100% of unconsumed one-time snippets
+  are still one-time, 100% of protected snippets still require the same password, and 100% of
+  consumed one-time snippets are still non-existent.
+- **SC-019**: Every stored snippet that predates this feature reads back with identical text,
+  creation time, and expiry time, requires no password, and reports both flags as false.
+- **SC-020**: The complete test suite of `001-pastebin-service` passes unchanged except for the
+  assertions that must account for the two flags added to the structured read; no existing test is
+  deleted, weakened, skipped, or marked expected-to-fail.
+- **SC-021**: Every requirement introduced here (FR-030 … FR-054, SR-013 … SR-020) maps to at least
+  one automated test that references it by identifier, and the full suite passes with zero failures,
+  skips, and expected failures.
+
+## Assumptions
+
+- **Refusal reveals existence, by design**: Answering `403` for a protected snippet necessarily tells
+  the caller that the identifier is real. The requested behaviour states this outcome explicitly, so
+  it is accepted: identifiers are unguessable (SR-001), and non-existence is still reported in
+  preference to refusal (FR-043) so the distinction is never available for an identifier that does
+  not resolve.
+- **Destruction means removal**: "Deletes it" is read as the same removal that revocation performs —
+  the stored record is removed, not merely marked unreadable. A consumed snippet is therefore
+  indistinguishable from a revoked one from every caller's point of view.
+- **Destruction happens before the text is handed over**: The snippet is claimed and removed as a
+  single step, and its text is returned only once that step has succeeded. A failure to remove it
+  therefore yields an error rather than a second disclosure — no caller ever receives the text of a
+  one-time snippet that still exists.
+- **Flags appear only in the structured read**: The two flags are specified for `GET /pastes/<id>`.
+  They are deliberately not added to the creation confirmation or to the plain-text read, whose
+  shapes stay exactly as they are.
+- **Header transport of the password**: The password is carried in a request header, so a reader's
+  client must be able to transmit the author's password in one. Non-ASCII passwords are supported
+  (FR-034); the service interprets the header value as UTF-8-encoded text. Clients that mangle
+  non-ASCII header values are outside the service's control.
+- **No password change, no password recovery**: Snippets remain immutable — there is no operation to
+  add, change, or remove a password after creation, and no way to recover a forgotten one. A
+  forgotten password makes a snippet unreadable until it expires or is revoked.
+- **No rate limiting on password attempts**: Consistent with the existing assumption of a single
+  operator on a trusted loopback-only host, repeated wrong-password attempts are not throttled,
+  counted, or locked out, and a wrong attempt is not recorded anywhere — the service has no log
+  channel. Guess resistance rests on the password the author chooses.
+- **Password strength is the author's choice**: The service enforces only the 1-to-128-character
+  bound requested. It imposes no complexity rule and rejects no password as weak.
+- **Both options are independent**: Either may be used alone or together; neither implies the other,
+  and neither changes the meaning of the lifetime, the text size limit, or the revocation secret.
+- **Unknown fields are still ignored**: The existing rule that unrecognised submission fields are
+  ignored is unchanged; only `burn_after_reading` and `password` are newly recognised.
+- **Existing records need no migration**: Snippets already on disk are read as they are, with the
+  absent options defaulting to off. No upgrade step, rewrite, or startup scan of the data directory
+  is in scope.
+
+## Constraints *(operator- and platform-imposed)*
+
+These are inherited from `001-pastebin-service` and continue to bind this feature.
+
+- Python 3.11 or newer, standard library only — no third-party runtime dependency (constitution
+  Principle I). The password hashing required by SR-013 MUST therefore come from the standard
+  library.
+- Code stays in the `pastebin` package under `src/`, runnable as `python -m pastebin` with `src/` on
+  `PYTHONPATH`, entered as `python -m pastebin serve --port PORT --data DIR`.
+- The caller-facing interface stays the same four addresses — `POST /pastes`, `GET /pastes/<id>`,
+  `GET /pastes/<id>/raw`, `DELETE /pastes/<id>` — with no route, method, or command-line option
+  added by this feature. The reader's password is carried in the `X-Paste-Password` request header
+  and the revocation secret in `X-Delete-Token`, exactly as described in the input.
+- Snippets continue to be stored under the operator-chosen data directory and to survive a restart.
+- `pytest` remains permitted as a development-only dependency under the constitution's Principle I
+  exemption.
