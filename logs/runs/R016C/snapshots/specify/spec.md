@@ -1,0 +1,376 @@
+# Feature Specification: Phone Redaction and Output Folder
+
+**Feature Branch**: `002-phone-redaction-out-dir`
+
+**Created**: 2026-11-16
+
+**Status**: Draft
+
+**Input**: User description: "This repository already contains `logredact`, a command-line tool that removes personal data from log files. Read the existing code and any documentation in the repository before changing it. Change it as follows; everything else it does now must keep working exactly as it does. 1. **Phone numbers.** Phone numbers in international format, a `+` followed by 8 to 15 digits such as `+14155552671`, become `[PHONE]`. With `--count`, the summary on standard error becomes `emails=N ips=N cards=N phones=N`. 2. **Output folder.** A new option `--out-dir DIR` writes the redacted lines of each FILE to a file with the same name in DIR (the file's name only, without its directories) instead of to standard output. DIR is created, with any missing parent directories, if it does not exist, and an existing file of that name in DIR is replaced. When every FILE has been processed, the tool prints `wrote N files` to standard output, where N is the number of output files written. A FILE that cannot be read is handled as it is now: an error message naming the file on standard error, and exit status 2."
+
+## Context
+
+This feature extends the existing `logredact` tool specified in
+[specs/001-logredact-cli/spec.md](../001-logredact-cli/spec.md). That specification and its CLI
+contract remain in force except where this document explicitly amends them. Two requirements of
+feature 001 are amended here, and nothing else changes:
+
+- **001 FR-017** (summary format `emails=N ips=N cards=N`) is superseded by **FR-006** below.
+- **001 FR-006** (every input line is written to standard output) is amended by **FR-008** below:
+  with `--out-dir`, redacted lines go to per-file outputs instead of standard output.
+
+Every other behaviour of the tool — email, IPv4 and payment card recognition and placeholders,
+left-to-right precedence, byte fidelity, file ordering, standard-input handling, option placement,
+exit statuses, and failure diagnostics — MUST continue to behave exactly as it does today.
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - Redact international phone numbers (Priority: P1)
+
+An engineer shares a support log that quotes customer phone numbers in international format next to
+email addresses and IP addresses. Today those numbers survive redaction and leak into the ticket.
+After this change the tool replaces each one with a fixed placeholder, so the log can be shared
+without exposing a way to contact the customer.
+
+**Why this priority**: This is a live privacy gap — the tool currently publishes data it is trusted
+to remove. It is also the slice that delivers value on its own: phone redaction is useful with no
+change to how output is produced.
+
+**Independent Test**: Pipe text containing international phone numbers, near-miss `+`-prefixed digit
+runs, and ordinary text into the tool with no file arguments and no flags; confirm each phone number
+became `[PHONE]`, no near-miss value was altered, and everything else is byte-identical.
+
+**Acceptance Scenarios**:
+
+1. **Given** the input line `call +14155552671 now`, **When** the tool is run with no arguments,
+   **Then** standard output is exactly `call [PHONE] now` followed by a newline.
+2. **Given** the input line `uk +442071838750 us +14155552671`, **When** the tool is run, **Then**
+   both numbers are replaced and standard output is `uk [PHONE] us [PHONE]`, showing that every
+   occurrence on a line is redacted.
+3. **Given** the input line `ext +1234567`, **When** the tool is run, **Then** the line is reproduced
+   unchanged, because seven digits is below the eight-digit minimum.
+4. **Given** the input line `ref +1234567890123456`, **When** the tool is run, **Then** no `[PHONE]`
+   appears, because sixteen digits is above the fifteen-digit maximum, and no shorter prefix of the
+   run is redacted as a phone number.
+5. **Given** the input line `dial 14155552671 please` (no leading `+`), **When** the tool is run,
+   **Then** the line is reproduced unchanged, because the `+` is required.
+6. **Given** the input line `user jane@example.com from 10.0.0.7`, **When** the tool is run,
+   **Then** standard output is exactly `user [EMAIL] from [IP]`, unchanged from today's behaviour.
+7. **Given** the input line `paid with 4111 1111 1111 1111`, **When** the tool is run, **Then**
+   standard output is exactly `paid with [CARD]`, unchanged from today's behaviour.
+
+---
+
+### User Story 2 - Write redacted output to a folder, one file per input (Priority: P2)
+
+A support engineer has a set of log files to hand to a vendor and needs them delivered as separate
+files, not as one concatenated stream. They name the files and a destination folder; the tool fills
+the folder with same-named redacted copies and reports how many it wrote, leaving the originals
+untouched.
+
+**Why this priority**: It removes the need for a shell loop per file and is the only way to get
+per-file redacted copies in one invocation. It is valuable but not protective — the redaction it
+writes is the redaction the tool already performs, so it ranks below User Story 1.
+
+**Independent Test**: Create two readable files with known sensitive content, run the tool with both
+file names and `--out-dir` pointing at a folder that does not yet exist; confirm the folder was
+created, contains exactly two files named after the inputs with the correct redacted content, that
+standard output is exactly `wrote 2 files`, and that the input files are unmodified.
+
+**Acceptance Scenarios**:
+
+1. **Given** readable files `app.log` (containing `user jane@example.com`) and `web.log`
+   (containing `GET / from 10.0.0.7`), **When** the tool is run as
+   `python -m logredact --out-dir clean app.log web.log`, **Then** `clean/app.log` contains
+   `user [EMAIL]`, `clean/web.log` contains `GET / from [IP]`, standard output is exactly
+   `wrote 2 files` followed by a newline, and the exit status is 0.
+2. **Given** a destination folder path whose parent directories do not exist, **When** the tool is
+   run with `--out-dir` naming it, **Then** the folder and every missing parent are created and the
+   output files are written into it.
+3. **Given** a destination folder that already exists and already contains a file with the same name
+   as an input file, **When** the tool is run, **Then** that existing file is replaced by the
+   redacted output, retaining none of its previous content.
+4. **Given** an input file named with a path such as `logs/app.log`, **When** the tool is run with
+   `--out-dir clean`, **Then** the output is written to `clean/app.log` — the file's name only, with
+   its directories dropped.
+5. **Given** `--out-dir` and one or more readable files, **When** the tool is run, **Then** standard
+   output contains only the `wrote N files` line and no redacted log text at all.
+6. **Given** a readable but completely empty input file, **When** the tool is run with `--out-dir`,
+   **Then** an empty output file of the same name exists in the folder and standard output is
+   `wrote 1 files`.
+7. **Given** two readable files where the second cannot be read, **When** the tool is run with
+   `--out-dir`, **Then** the redacted copy of the first file is present in the folder, a message
+   naming the second file is on standard error, no `wrote N files` line is produced, and the exit
+   status is 2.
+8. **Given** no file operands at all, **When** the tool is run with `--out-dir clean`, **Then** a
+   diagnostic explaining that `--out-dir` requires at least one `FILE` is written to standard error,
+   standard input is not read, no folder is created, and the exit status is 2.
+9. **Given** readable files and no `--out-dir`, **When** the tool is run, **Then** the redacted
+   contents appear on standard output in the order named and no `wrote N files` line is produced,
+   exactly as today.
+
+---
+
+### User Story 3 - See phone numbers in the redaction tally (Priority: P3)
+
+Before sending a redacted log out, the user adds `--count` and wants the tally to account for the
+phone numbers too, so the evidence of what was removed stays complete.
+
+**Why this priority**: It is a trust and verification aid. The phone redaction of User Story 1 is
+complete and correct without it, but a tally that silently omits a category it redacted would
+misreport the run.
+
+**Independent Test**: Run the tool with `--count` over input with a known number of each of the four
+categories, capturing standard output and standard error separately; confirm exactly one summary
+line appears on standard error in the four-field form and that each field matches the number of
+corresponding placeholders in the output.
+
+**Acceptance Scenarios**:
+
+1. **Given** the input line `a@b.io +442071838750`, **When** the tool is run with `--count`, **Then**
+   standard output is `[EMAIL] [PHONE]` followed by a newline and standard error is exactly
+   `emails=1 ips=0 cards=0 phones=1` followed by a newline.
+2. **Given** input with no sensitive values at all, **When** the tool is run with `--count`, **Then**
+   standard error is `emails=0 ips=0 cards=0 phones=0` and the exit status is 0.
+3. **Given** input where the same phone number occurs three times, **When** the tool is run with
+   `--count`, **Then** the summary reports `phones=3`, because every individual replacement is
+   counted.
+4. **Given** several input files named together with `--count`, **When** the tool is run, **Then**
+   exactly one summary line is produced, totalling the replacements of all four categories across
+   all of the files.
+5. **Given** `--count` and `--out-dir` given together with two readable files, **When** the tool is
+   run, **Then** the redacted copies are in the folder, standard output is `wrote 2 files`, and
+   standard error is one summary line totalling the replacements across both files.
+6. **Given** any input, **When** the tool is run without `--count`, **Then** standard error receives
+   nothing.
+7. **Given** a run that fails because a file could not be read, **When** `--count` was given,
+   **Then** no summary line is produced.
+
+---
+
+### Edge Cases
+
+**Phone recognition**
+
+- **Below and above the length range**: `+1234567` (7 digits) and `+1234567890123456` (16 digits)
+  are left completely unchanged — in particular, no 8-to-15-digit prefix inside the over-long run is
+  redacted as a phone number.
+- **Exact boundaries**: `+12345678` (8 digits) and `+123456789012345` (15 digits) are both phone
+  numbers.
+- **Digits must be adjacent to the `+`**: `+ 14155552671` and `+1 415 555 2671` are not phone
+  numbers, because the digit run is broken; the `+`-prefixed run must be unbroken digits. The parts
+  are then judged by the existing rules, which leave them unchanged.
+- **Missing `+`**: a bare digit run such as `14155552671` is not a phone number and is unchanged
+  (the existing card rule already leaves it alone, being outside 13-19 digits).
+- **Email wins over phone**: `+14155552671@example.com` is one `[EMAIL]`, not `[PHONE]@example.com`,
+  because the email candidate starts at the same position and email has precedence. The leading `+`
+  is already a valid email local-part character today.
+- **Phone wins over card**: `+378282246310005` becomes `[PHONE]`, not `+[CARD]`. The phone candidate
+  starts one character earlier (at the `+`), and the existing leftmost-match rule therefore selects
+  it, even though those 15 digits also pass the Luhn checksum. The value is still fully redacted;
+  only which category is credited changes. This is a deliberate, documented change to today's output
+  for `+`-prefixed Luhn-valid runs of 8 to 15 digits.
+- **A longer card keeps its category**: `+4111111111111111` becomes `+[CARD]`, because 16 digits is
+  outside the phone range, so no phone candidate exists and the card rule applies unchanged.
+- **Phone adjacent to other values**: `a@b.io,+442071838750,1.2.3.4` has all three values replaced
+  and both commas preserved.
+- **A whole line that is one phone number**: the line becomes exactly `[PHONE]`.
+- **Trailing punctuation**: `call +14155552671.` becomes `call [PHONE].` — the sentence period is not
+  a digit, so it does not extend the run.
+
+**Output folder**
+
+- **Folder path already exists as a folder**: it is used as-is; no error, and files already in it
+  that do not share a name with an input are left alone.
+- **Folder path exists but is not a folder** (for example a regular file): the folder cannot be
+  created, so a diagnostic naming it is written to standard error and the exit status is 2.
+- **Output file cannot be written** (for example the folder is not writable, or the name collides
+  with an existing subdirectory): a diagnostic naming the offending path and the reason is written
+  to standard error and the exit status is 2.
+- **No output file is created for an input that cannot be read**: a failing input leaves no empty or
+  partial file of that name behind as a result of this run. An output file written for an earlier,
+  successful input is kept.
+- **Two inputs with the same file name** (for example `a/app.log b/app.log`): both map to the same
+  name in the folder, so the second output replaces the first and the folder ends with one
+  `app.log` holding the redacted second input. The run reports `wrote 2 files`, counting one write
+  per `FILE` operand.
+- **The same file named twice**: handled identically — written twice, counted twice, one file left.
+- **`--out-dir` with `--count` and `--out-dir` placement**: both options are accepted before, among,
+  or after the file operands.
+- **`wrote N files` grammar**: the message is literally `wrote N files` for every N, including
+  `wrote 1 files`; it is not pluralised.
+- **Ordering**: `wrote N files` is written to standard output only after every output file has been
+  written, and the `--count` summary is written to standard error only after that.
+- **Fidelity in output files**: an output file is byte-identical to its input where there is nothing
+  to redact — including trailing whitespace, a `\r` before a line ending, bytes that are not valid
+  UTF-8, and the absence of a trailing newline on a final line that had none.
+- **Input files are never modified**: the tool only ever reads its `FILE` operands, including when
+  an output file in the folder happens to have the same path as an input.
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+#### Phone redaction
+
+- **FR-001**: The tool MUST replace each international-format phone number with the literal text
+  `[PHONE]`.
+- **FR-002**: The tool MUST recognise as an international-format phone number a `+` followed
+  immediately by an unbroken run of 8 to 15 digits inclusive.
+- **FR-003**: The tool MUST leave unchanged any `+`-prefixed digit run outside the 8-to-15-digit
+  range, redacting no fragment of it as a phone number.
+- **FR-004**: The tool MUST redact every phone number occurring on a line, not only the first, and
+  MUST resolve a phone candidate against email, IPv4 and card candidates by the existing
+  left-to-right, no-text-reused rule (001 FR-015), with an email preferred over a phone number
+  beginning at the same position.
+- **FR-005**: The tool MUST leave the recognition and replacement of email addresses, IPv4 addresses
+  and payment card numbers exactly as they are today, so that any input containing no `+`-prefixed
+  8-to-15-digit run produces byte-identical output to the current tool.
+
+#### Counting
+
+- **FR-006**: The tool MUST, when `--count` is given, write exactly one line to standard error in
+  the form `emails=N ips=N cards=N phones=N`, where each N is the total number of replacements of
+  that category across all input read during the run. This supersedes 001 FR-017; the three existing
+  fields keep their names, order and meaning, and `phones` is appended as a fourth field.
+- **FR-007**: The tool MUST keep every other counting behaviour as it is today: the summary goes to
+  standard error and never standard output, is written only after all redacted output has been
+  written, is absent when `--count` is not given, and is absent when the run exits because a file
+  could not be read.
+
+#### Output folder
+
+- **FR-008**: The tool MUST accept an option `--out-dir DIR` which, when given, causes the redacted
+  lines of each `FILE` operand to be written to a file inside `DIR` instead of to standard output.
+  This amends 001 FR-006 for runs that use the option; without the option, redacted lines go to
+  standard output exactly as today.
+- **FR-009**: The tool MUST name each output file using only the final name component of its `FILE`
+  operand, discarding any directory part of that operand.
+- **FR-010**: The tool MUST create `DIR`, together with any missing parent directories, when it does
+  not already exist, and MUST use an existing directory at that path as-is.
+- **FR-011**: The tool MUST replace the entire contents of an existing file of that name in `DIR`,
+  leaving none of its previous content.
+- **FR-012**: The tool MUST, after every `FILE` operand has been processed successfully, write
+  exactly one line `wrote N files` to standard output, where N is the number of output files written
+  during the run, and MUST write that line after all output files have been written.
+- **FR-013**: The tool MUST write no redacted log text to standard output when `--out-dir` is given;
+  standard output carries only the `wrote N files` line.
+- **FR-014**: The tool MUST reproduce in each output file exactly the text that the same input would
+  have contributed to standard output without `--out-dir`, with the same byte fidelity (001 FR-007),
+  so switching the option on changes only where the text is written.
+- **FR-015**: The tool MUST handle a `FILE` that cannot be opened or read exactly as it does today:
+  a diagnostic on standard error naming that file and the reason, exit status 2, and consequently no
+  `wrote N files` line and no `--count` summary.
+- **FR-016**: The tool MUST NOT create an output file for a `FILE` operand that could not be read,
+  and MUST retain the output files already written for earlier operands in the same run.
+- **FR-017**: The tool MUST, when `DIR` cannot be created or an output file cannot be written, write
+  a diagnostic to standard error naming the offending path and the reason, and exit with status 2.
+- **FR-018**: The tool MUST reject `--out-dir` given with zero `FILE` operands: a diagnostic on
+  standard error explaining that at least one `FILE` is required, no directory created, standard
+  input not read, and exit status 2.
+- **FR-019**: The tool MUST accept `--out-dir DIR` in any position among the operands and in any
+  combination with `--count`, consistent with 001 FR-004.
+- **FR-020**: The tool MUST never modify or truncate any `FILE` operand.
+- **FR-021**: The tool MUST exit with status 0 when all `FILE` operands were read and all output
+  files written successfully.
+
+### Key Entities
+
+- **Redaction category**: now one of four — email, IPv4 address, payment card number, or
+  international phone number — each with one recognition rule and exactly one fixed placeholder
+  (`[EMAIL]`, `[IP]`, `[CARD]`, `[PHONE]`).
+- **Replacement tally**: now four counts, one per category, accumulated over the whole run and
+  reported only when `--count` is requested.
+- **Output destination**: either standard output (the default, carrying the concatenated redacted
+  stream) or an output folder (one output file per `FILE` operand, named after that operand's final
+  name component).
+- **Output file count**: the number of output files written during the run, reported as
+  `wrote N files` when the run completes successfully with `--out-dir`.
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: All three example invocations given in the feature description reproduce their
+  documented standard output and standard error byte for byte, including the `wrote 2 files` line.
+- **SC-002**: 100% of the functional requirements FR-001 to FR-021 are covered by at least one
+  automated test that names the requirement it covers.
+- **SC-003**: Every edge case listed in the Edge Cases section has a corresponding automated test.
+- **SC-004**: Every acceptance scenario of feature 001 still passes unchanged, except the single
+  summary-format expectation superseded by FR-006; the existing test suite, updated only for that
+  format change, passes in full.
+- **SC-005**: Of the international phone numbers placed in test input, 100% are redacted, and of the
+  `+`-prefixed near-miss values (7 digits or fewer, 16 digits or more, broken digit runs, no `+`),
+  0% are altered.
+- **SC-006**: For input containing no `+`-prefixed 8-to-15-digit run, output is byte-identical to
+  that of the current tool in 100% of test cases.
+- **SC-007**: The `--count` tally matches the number of placeholders of each of the four categories
+  present in the output for every test input.
+- **SC-008**: For every successful `--out-dir` run in the test suite, the number reported by
+  `wrote N files` equals the number of `FILE` operands given, and the concatenation of the output
+  files in operand order is byte-identical to the standard output of the same run without
+  `--out-dir`.
+- **SC-009**: Every run that cannot produce the complete redacted output — an unreadable input, an
+  uncreatable output folder, an unwritable output file, `--out-dir` with no operands, or an invalid
+  command line — exits with status 2 and explains itself on standard error naming the offending path
+  where one is involved; every run that does produce complete output exits with status 0.
+- **SC-010**: A 100,000-line log file is redacted in under 10 seconds with and without `--out-dir`,
+  and memory use does not grow with the number of lines or with the number of `FILE` operands.
+- **SC-011**: A user can produce redacted per-file copies of a set of logs and confirm what was
+  removed in a single command, with no configuration file, no installation step beyond obtaining the
+  source, and no network access.
+
+## Assumptions
+
+Constraints carried over from feature 001 and the project constitution:
+
+- The runtime stays Python 3.11 or newer, standard library only, no third-party runtime dependency;
+  `pytest` remains the only development dependency.
+- The code stays in the `logredact` package under `src/` and runs as `python -m logredact` with
+  `src/` on `PYTHONPATH`.
+- Processing stays line-based and streaming: a value split across a line ending is not redacted, and
+  memory use does not grow with input size. Input sources are still opened one at a time, in operand
+  order, with no pre-flight readability check — so earlier outputs are already written when a later
+  operand fails.
+
+Reasonable defaults chosen where the feature description did not specify:
+
+- **Phone grammar is exactly as written**: a literal `+` followed by 8 to 15 digits with no internal
+  spaces, hyphens, parentheses or dots. Grouped forms (`+1 415 555 2671`), national forms
+  (`00442071838750`, `(415) 555-2671`), and extensions are out of scope — the description gives one
+  format and one example, and a broader grammar would risk redacting ordinary numeric log data.
+- **Boundary rule for phones**: the digit run must not be followed by a further digit, so an
+  over-long run is left whole rather than partly redacted. This mirrors the existing treatment of
+  over-long dotted runs and over-long digit runs, which deliberately redact nothing rather than a
+  fragment.
+- **Precedence**: phone candidates take part in the existing single left-to-right scan. Email keeps
+  priority at an equal starting position (so `+1…@host` stays one `[EMAIL]`). Against a card, no
+  extra rule is added: the phone candidate starts at the `+`, one character before the card
+  candidate, so leftmost-match makes it a `[PHONE]`. Adding a special case to prefer the card would
+  be extra machinery for no privacy gain, since both outcomes fully redact the value.
+- **Summary field order**: `phones` is appended as the fourth field rather than inserted, as the
+  feature description shows, so existing consumers that parse the first three fields positionally
+  keep working.
+- **`--out-dir` with no operands is an error**: the option is defined entirely in terms of `FILE`
+  operands, and standard input has no file name to derive an output name from. Failing with a
+  diagnostic and status 2 is preferred over silently ignoring the option or inventing a name, per
+  the constitution's "Fail Loudly" principle.
+- **`N` counts one write per `FILE` operand**: when two operands share a final name component, the
+  second output replaces the first and both are counted, so `N` always equals the number of operands
+  on a successful run. This is the simplest rule consistent with the existing behaviour that a
+  repeated operand is read and emitted again.
+- **No `wrote N files` line on failure**: the line is specified for when every `FILE` has been
+  processed, so a run that exits with status 2 produces neither it nor a `--count` summary.
+- **`wrote N files` goes to standard output, the tally to standard error**: as the feature
+  description states. Standard output therefore carries this one status line in `--out-dir` mode and
+  nothing else, which keeps it machine-readable.
+- **Output file text handling matches the stdout path**: UTF-8 with non-UTF-8 bytes round-tripped
+  unchanged and no newline translation, so an output file is byte-identical to what standard output
+  would have received.
+- **Output files are written as the run proceeds**: each output file is opened after its input opens
+  successfully and closed before the next input is opened, so no more than one input and one output
+  are open at a time and a failing input leaves no stray output file.
+- **Scope boundaries unchanged otherwise**: no new redaction category beyond phone numbers, no
+  configuration of placeholder text, no in-place rewriting of input files, no reversible
+  pseudonymisation, no recursion into directories named as operands, no control over output file
+  naming beyond the rule in FR-009, and no detection of already-redacted output.
