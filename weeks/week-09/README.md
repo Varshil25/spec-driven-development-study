@@ -10,7 +10,7 @@ Each build is run with [run_build.py](../../tools/study/run_build.py) in a fresh
 | R015 | T-TARX-01 | unstructured | R015C | build done 11-14; change request done 11-14 |
 | R016 | T-REDACT-01 | sdd | R016C | build done 11-16; change request done 11-16 |
 | R017 | T-PASTE-01 | sdd_secure | R017C | build done 11-16; change request done 11-16 |
-| R018 | T-BOOKMARKS-01 | sdd_clarify | R018C | to do |
+| R018 | T-BOOKMARKS-01 | sdd_clarify | R018C | build done 11-16; change request done 11-16 |
 
 ## Java round 2
 

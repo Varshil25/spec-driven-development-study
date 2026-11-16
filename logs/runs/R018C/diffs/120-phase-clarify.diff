@@ -1,0 +1,221 @@
+diff --git a/specs/002-import-html-export/spec.md b/specs/002-import-html-export/spec.md
+index 44a34f0..a987999 100644
+--- a/specs/002-import-html-export/spec.md
++++ b/specs/002-import-html-export/spec.md
+@@ -18,6 +18,16 @@ Requirement identifiers below (`FR-001`, `SC-001`, …) are local to this featur
+ the earlier feature are referenced with its number, as in `001:FR-007` (the URL scheme rule) or
+ `001:FR-010` (tag normalisation).
+ 
++## Clarifications
++
++### Session 2026-11-16
++
++- Q: Must the web-page export escape exactly the characters FR-014 names and leave everything else literal, or is any well-formed escaping acceptable? → A: Exactly four substitutions and no others — `&`, `<`, `>` in address, title and labels, plus `"` in the `href` value only; every other character, including `'`, is emitted literally
++- Q: Should a CSV header line of `"id","url","title","tags"` — valid CSV parsing to the same four names — be accepted or rejected? → A: Accepted; the header is compared after CSV parsing, so any valid CSV encoding of the four names in that order is fine, while wrong names, order, count or a missing header still fail with status 2
++- Q: Should an import file that begins with a UTF-8 byte-order mark be read normally or rejected? → A: Read normally; a single leading byte-order mark is discarded before parsing, for both file shapes
++- Q: Should a completely blank line in a table file be ignored or treated as a row with the wrong field count? → A: Treated as a wrong field count and so fails with status 2; the single trailing newline ending the last row is not a blank record and remains valid
++- Q: When a successful import adds nothing against a store path that does not yet exist, is the empty store created or left untouched? → A: Created, as every other command does; only a failed import leaves no store file behind
++
+ ## User Scenarios & Testing *(mandatory)*
+ 
+ ### User Story 1 - Bring an existing collection in (Priority: P1)
+@@ -65,12 +75,15 @@ files and check the collection afterwards. Fully testable without the HTML expor
+    empty entries dropped.
+ 7. **Given** a table or structured file holding no bookmarks (a header line alone, or an empty
+    list), **When** the user imports it, **Then** the tool prints `imported 0` and finishes
+-   successfully, and the collection is unchanged.
++   successfully, and the collection is unchanged; against a store that did not exist beforehand
++   the store is created and holds no bookmarks, and a bookmark saved afterwards receives
++   identifier 1.
+ 8. **Given** a path at which no file exists, **When** the user imports it, **Then** the tool
+    prints a diagnostic naming the path and the reason on the diagnostic stream, prints nothing on
+    the result stream, adds nothing, and reports failure code 2.
+ 9. **Given** a file that is not well-formed in the shape it was declared to be — malformed
+-   structured text, a table whose header line is not exactly `id,url,title,tags`, a row with the
++   structured text, a table whose header record is not the four names `id`, `url`, `title`, `tags`
++   in that order, a row with the
+    wrong number of fields, a structured document that is not a list, a record missing a required
+    key, labels given as one string instead of a list — **When** the user imports it, **Then** the
+    tool prints a diagnostic naming the file and what was wrong, adds nothing, and reports failure
+@@ -119,13 +132,16 @@ the required page layout line by line. Fully testable without the import command
+ 5. **Given** a bookmark whose title or address contains a character with special meaning in a web
+    page — an ampersand, an angle bracket, a quotation mark — **When** the user exports as a web
+    page, **Then** the page remains well-formed and a standard page reader recovers the link
+-   target and the link text exactly as stored.
+-6. **Given** a bookmark whose title contains non-English characters, **When** the user exports as
++   target and the link text exactly as stored, and the output matches byte-for-byte the four
++   substitutions of FR-014 and no others.
++6. **Given** a bookmark whose title contains an apostrophe, **When** the user exports as a web
++   page, **Then** the apostrophe appears literally in the link text, unescaped.
++7. **Given** a bookmark whose title contains non-English characters, **When** the user exports as
+    a web page, **Then** those characters appear literally in the output, which the page declares
+    as UTF-8.
+-7. **Given** any collection, **When** the user requests the table or structured export forms,
++8. **Given** any collection, **When** the user requests the table or structured export forms,
+    **Then** their output is byte-for-byte what it was before this feature existed.
+-8. **Given** a request for an export form that is none of the three supported ones, **When** the
++9. **Given** a request for an export form that is none of the three supported ones, **When** the
+    user runs it, **Then** the tool prints a diagnostic on the diagnostic stream and reports
+    failure code 2.
+ 
+@@ -168,10 +184,15 @@ empty store, and compare the two collections field by field.
+   table and fails with code 2; structured form needs a list, so an empty document fails with code
+   2 as well.
+ - **Table file with only the header line**, or **structured file holding an empty list**:
+-  `imported 0`, success, collection unchanged.
+-- **Table header line that is not exactly `id,url,title,tags`** — reordered, renamed, missing, or
+-  with extra columns: failure code 2.
++  `imported 0`, success, collection unchanged. Against a store path that does not yet exist, the
++  empty store is created, just as a listing or an export of a fresh path creates it.
++- **Table header record that is not the four names `id`, `url`, `title`, `tags` in that order** —
++  reordered, renamed, missing, or with extra columns: failure code 2. Quoting is not a difference:
++  `"id","url","title","tags"` parses to the same four names and is accepted.
+ - **Table row with too few or too many fields**: failure code 2; no row from the file is added.
++- **Table file with a blank line**, between rows or trailing after the last row: that is a row of
++  zero fields, so failure code 2. The newline ending the last row is not a blank line, so the
++  tool's own export output imports cleanly.
+ - **Table row whose labels field holds `python,docs`**: that is one field holding two labels (the
+   export quotes it for exactly this reason), and it must produce two labels, not a parse error.
+ - **Structured document that is a single record rather than a list of records**: failure code 2.
+@@ -189,6 +210,10 @@ empty store, and compare the two collections field by field.
+   database): failure code 1, the existing file untouched, exactly as every other command behaves.
+ - **Import file with carriage-return line endings**: accepted; the table shape tolerates both
+   line-ending conventions, and a line break inside a quoted field remains part of that field.
++- **Import file beginning with a UTF-8 byte-order mark**: accepted; the mark is discarded and the
++  rest of the file parsed as usual, in both shapes.
++- **Import file that is not valid UTF-8**: failure code 2, with a diagnostic naming the file — a
++  decoding failure is a file problem, not a store problem.
+ - **Web page export of a title containing a tab or a line break**: emitted inside the link text as
+   stored; the page layout puts one bookmark per line, so such a title makes the output span more
+   lines than there are bookmarks — accepted, as it already is in the tab-separated listing.
+@@ -209,6 +234,9 @@ empty store, and compare the two collections field by field.
+ - **FR-002**: A successful import MUST print exactly `imported N` followed by a newline on
+   standard output, and nothing else, where N is the number of bookmarks added, and MUST exit with
+   status 0 — including when N is 0.
++- **FR-002a**: A successful import MUST open the store exactly as every other command does, so an
++  absent store file is created and left holding no bookmarks even when N is 0. Only a *failed*
++  import leaves no store file behind (FR-011); success with a count of 0 is not a special case.
+ - **FR-003**: Each bookmark in the file MUST be added exactly as the `add` command would add it:
+   the address MUST satisfy the scheme rule (`001:FR-007`), the title MUST be stored as given
+   (`001:FR-008`), and the labels MUST be trimmed, emptied of blank entries, lower-cased and
+@@ -223,13 +251,22 @@ empty store, and compare the two collections field by field.
+ **File shapes the import accepts**
+ 
+ - **FR-006**: With `--format csv`, the file MUST be read as the CSV form that
+-  `export --format csv` writes (`001:FR-018`, `001:FR-019`): the first line exactly
+-  `id,url,title,tags`, then one row per bookmark with exactly four fields in that order, the
+-  fourth field holding that bookmark's labels joined by commas. Standard CSV quoting MUST be
++  `export --format csv` writes (`001:FR-018`, `001:FR-019`): a first record holding exactly the
++  four field values `id`, `url`, `title`, `tags` in that order, then one row per bookmark with
++  exactly four fields in that order, the fourth field holding that bookmark's labels joined by
++  commas. The header MUST be compared after CSV parsing, not as raw text, so any valid CSV
++  encoding of those four names in that order is accepted — `id,url,title,tags` as the export
++  writes it, and equally `"id","url","title","tags"`. A header whose names, order or count differ,
++  or a file with no header record at all, MUST fail per FR-010. Standard CSV quoting MUST be
+   honoured, so a quoted field may itself contain commas, doubled quotation marks and line breaks;
+   both `\n` and `\r\n` line endings MUST be accepted. The fourth field MUST be interpreted by the
+   same rules as the `--tags` option of `add` (`001:FR-009`, `001:FR-010`). A file consisting of
+   the header line alone MUST import 0 bookmarks and succeed.
++- **FR-006a**: Every record after the header MUST hold exactly four fields. A completely blank
++  line is a record of zero fields and MUST therefore fail per FR-010; blank lines MUST NOT be
++  skipped, whether they occur between rows or after the last row. The single line feed that
++  terminates the final row (`001:FR-019a`) is the row's terminator and not a blank record, so a
++  file written by `export --format csv` MUST import without error.
+ - **FR-007**: With `--format json`, the file MUST be read as the JSON form that
+   `export --format json` writes (`001:FR-020`): a single array whose elements are objects, each
+   carrying the keys `url` (a string), `title` (a string) and `tags` (an array of strings). An `id`
+@@ -239,14 +276,18 @@ empty store, and compare the two collections field by field.
+   the shape from the file's name, extension or contents, and MUST NOT fall back to the other shape
+   when the declared one does not parse.
+ - **FR-009**: Files MUST be read as UTF-8, so that addresses, titles and labels containing
+-  non-ASCII characters are imported unchanged irrespective of the machine's locale settings.
++  non-ASCII characters are imported unchanged irrespective of the machine's locale settings. A
++  single UTF-8 byte-order mark at the very start of the file MUST be discarded before parsing, for
++  both shapes, so that a file produced by a spreadsheet or a Windows editor imports as it reads;
++  the mark MUST NOT become part of the first field name or the first address. A byte sequence that
++  is not valid UTF-8 MUST fail per FR-010.
+ 
+ **Import failures**
+ 
+ - **FR-010**: An import MUST fail when any of the following holds: the file cannot be read (it
+   does not exist, is a directory, or access is denied); the file is not well-formed in the
+   declared shape; the file is well-formed but does not match the shape required by FR-006 or
+-  FR-007 (wrong header line, wrong field count, top level that is not an array, a record missing
++  FR-007 (wrong header record, wrong field count, top level that is not an array, a record missing
+   a required key, a `tags` value that is not an array of strings, an unrecognised key); or any
+   bookmark in the file has an address failing the scheme rule. In every such case the tool MUST
+   write a diagnostic to standard error naming the file and what was invalid and what was expected,
+@@ -281,10 +322,17 @@ empty store, and compare the two collections field by field.
+   (`\n`), and the page MUST end with exactly one trailing newline. Characters outside ASCII MUST
+   be written literally as UTF-8 rather than escaped (`001:FR-023a`).
+ - **FR-014**: Characters that carry special meaning in a web page MUST be escaped in the values
+-  taken from the collection — at minimum `&`, `<` and `>` in the address, the title and the
+-  labels, and additionally the double quotation mark inside the address attribute — so that the
+-  page is well-formed and a standard page reader recovers the stored address and title exactly.
+-  The fixed lines of the page MUST be emitted verbatim as shown in FR-012.
++  taken from the collection, so that the page is well-formed and a standard page reader recovers
++  the stored address and title exactly. The set of substitutions is closed — exactly these four and
++  no others:
++  - in the address, the title and the labels: `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`;
++  - additionally, inside the `href` value only: `"` → `&quot;`.
++
++  Every other character MUST be emitted literally, including the apostrophe (`'`), which MUST NOT
++  be escaped. `&` MUST be substituted before the others, so that an escape is never doubly
++  escaped. The output of the web-page export is therefore fully determined by the collection and
++  MUST be asserted byte-for-byte. The fixed lines of the page MUST be emitted verbatim as shown in
++  FR-012.
+ 
+ **Preserved behaviour**
+ 
+@@ -334,13 +382,15 @@ empty store, and compare the two collections field by field.
+ - **SC-003**: Every unusable import file leaves the collection exactly as it was and signals
+   failure with status 2 and an explanatory message on the diagnostic stream, with nothing on the
+   result stream, in 100% of attempts — verified across at least eight distinct kinds of damage
+-  (absent file, directory, empty file, wrong header line, wrong field count, malformed structured
+-  text, top level not a list, record missing a key, labels not a list of strings, rejected
+-  address).
++  (absent file, directory, empty file, wrong header record, wrong field count, blank line, bytes
++  that are not valid UTF-8, malformed structured text, top level not a list, record missing a key,
++  labels not a list of strings, rejected address).
+ - **SC-004**: For a collection whose titles and addresses include ampersands, angle brackets,
+   quotation marks and non-English characters, a standard page reader applied to the web-page
+   export finds exactly one link per bookmark, in identifier order, each link's target equal to the
+-  stored address and each link's text equal to the stored title, for 100% of bookmarks.
++  stored address and each link's text equal to the stored title, for 100% of bookmarks; and the
++  emitted page equals the expected bytes exactly under the closed substitution set of FR-014, so
++  the same collection always produces the same page.
+ - **SC-005**: Importing a 1,000-bookmark file completes in under five seconds, and the web-page
+   export of a 1,000-bookmark collection returns in under one second, on ordinary hardware.
+ - **SC-006**: All pre-existing commands behave identically to the previous version: the whole
+@@ -360,8 +410,10 @@ empty store, and compare the two collections field by field.
+   would add it" makes the scheme rule apply to imported addresses, and `add` rejects such an
+   address with status 2; combined with the atomicity assumption above, the whole import then fails
+   with status 2.
+-- **The declared shape is strict.** A table's header line must be exactly `id,url,title,tags`, its
+-  rows must hold exactly four fields, and a structured record must carry `url`, `title` and `tags`
++- **The declared shape is strict.** A table's header record must hold exactly the four names
++  `id`, `url`, `title`, `tags` in that order (compared after CSV parsing, so quoting is
++  immaterial), its rows must hold exactly four fields, and a structured record must carry
++  `url`, `title` and `tags`
+   with `tags` an array of strings. An `id` key or column is accepted and ignored because every
+   export writes one; any other unrecognised key is a shape error rather than silently dropped
+   data. A missing `title` or `tags` key is an error too, rather than defaulting to empty — the
+@@ -378,10 +430,14 @@ empty store, and compare the two collections field by field.
+   need not be unique. There is no "update if present" behaviour and no dry-run option.
+ - **Import reads a named file only.** Reading from standard input, from several files at once, or
+   from a URL is out of scope; `FILE` is a single path on the local file system.
+-- **The web page is escaped.** Values drawn from the collection have their HTML-special characters
+-  escaped so the page stays well-formed and the stored text is recoverable; the page's fixed lines
+-  are emitted exactly as shown. The example output is unaffected, since ordinary titles and
+-  addresses contain no such characters.
++- **The web page is escaped, by a closed set of substitutions.** Values drawn from the collection
++  have their HTML-special characters escaped so the page stays well-formed and the stored text is
++  recoverable; the page's fixed lines are emitted exactly as shown. The set is exactly the four
++  substitutions of FR-014 rather than "at least" those, so that the page is byte-predictable like
++  the table and structured exports; the apostrophe is deliberately left literal, since the page's
++  only attribute is delimited by double quotation marks and the scheme rule (`001:FR-007`) already
++  bars addresses that are not `http://` or `https://`. The example output is unaffected, since
++  ordinary titles and addresses contain no such characters.
+ - **The web page is not an import shape.** It omits identifiers and is meant for reading, so
+   `import --format html` does not exist; the round-trip shapes remain the table and the structured
+   forms.

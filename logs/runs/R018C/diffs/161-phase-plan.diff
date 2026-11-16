@@ -1,0 +1,1278 @@
+diff --git a/specs/002-import-html-export/contracts/cli-contract-002.md b/specs/002-import-html-export/contracts/cli-contract-002.md
+new file mode 100644
+index 0000000..7dc34bd
+--- /dev/null
++++ b/specs/002-import-html-export/contracts/cli-contract-002.md
+@@ -0,0 +1,240 @@
++# CLI Contract Extension: `import` and `export --format html`
++
++**Feature**: `002-import-html-export` | **Date**: 2026-11-16
++
++This document extends — and never redefines — the contract of
++[`001-bookmark-manager-cli/contracts/cli-contract.md`](../../001-bookmark-manager-cli/contracts/cli-contract.md).
++Everything in that document stays true: the same five commands, the same bytes, the same
++diagnostics, the same statuses (FR-015, FR-016). What follows is the whole of what is new.
++
++---
++
++## Invocation (unchanged)
++
++```text
++python -m bookmarks [--db PATH] COMMAND [ARGS...]
++```
++
++`--db` remains a global option that must appear **before** the command, and still defaults to
++`bookmarks.db` in the working directory. `src/` must be on `PYTHONPATH` (FR-019, `001:FR-026`).
++
++---
++
++## New command: `import FILE --format csv|json`
++
++Reads bookmarks from `FILE` and adds every one of them, then reports how many it added.
++
++```text
++python -m bookmarks [--db PATH] import FILE --format {csv,json}
++```
++
++| Argument   | Required | Meaning |
++| ---------- | -------- | ------- |
++| `FILE`     | yes      | Path of a single local file to read (FR-001) |
++| `--format` | **yes**  | `csv` or `json`; no default, no inference (FR-001, FR-008) |
++
++**stdout on success**: exactly `imported N` followed by one newline, and nothing else, where `N`
++is the number of bookmarks added. **Exit 0** — including when `N` is `0` (FR-002).
++
++```console
++$ python -m bookmarks import colleague.json --format json
++imported 2
++$ python -m bookmarks list
++1	https://docs.python.org	Python docs	docs,python
++2	https://example.com		
++```
++
++### Behaviour of a successful import
++
++| Rule | Requirement |
++| ---- | ----------- |
++| Each bookmark is added exactly as `add` would add it: the scheme rule applies, the title is stored verbatim, the labels are trimmed, emptied of blanks, lower-cased and de-duplicated | FR-003 |
++| Any `id` in the file is disregarded; new identifiers come from the store's own rule | FR-004 |
++| Bookmarks are added in file order, so their identifiers ascend in file order | FR-005 |
++| Importing into a non-empty store **appends**: nothing is replaced, renumbered or removed, and the new identifiers exceed every identifier previously issued | FR-004 |
++| Addresses are **not** de-duplicated: a bookmark whose address is already stored is added again with its own identifier | spec Edge Cases |
++| The store is opened exactly as every other command opens it, so an absent store file is created — and left holding no bookmarks — even when `N` is `0` | FR-002a |
++
++### Accepted file shapes
++
++Both are the shapes `export` writes, so `export` output imports without edits. The full rules
++live in [data-model.md](../data-model.md); the essentials:
++
++**`--format csv`** (FR-006, FR-006a)
++
++```csv
++id,url,title,tags
++1,https://docs.python.org,Python docs,"docs,python"
++2,https://example.com,,
++```
++
++- First record must parse to exactly `id`, `url`, `title`, `tags`, in that order. The comparison
++  happens **after** CSV parsing, so `"id","url","title","tags"` is equally valid.
++- Every later record must hold exactly four fields.
++- Standard quoting is honoured: a quoted field may contain commas, doubled quotes and line
++  breaks. `\n` and `\r\n` both terminate a record.
++- The fourth field is read by the same rules as `add --tags`.
++- A blank line is a record of zero fields and is a **failure**; the newline ending the last row
++  is not a blank record.
++- The header alone imports 0 and succeeds.
++
++**`--format json`** (FR-007)
++
++```json
++[
++  {"id": 1, "url": "https://docs.python.org", "title": "Python docs", "tags": ["docs", "python"]},
++  {"id": 2, "url": "https://example.com", "title": "", "tags": []}
++]
++```
++
++- One array of objects. Each object must carry `url` (string), `title` (string) and `tags`
++  (array of strings).
++- `id` is accepted and its value disregarded; any other key is a failure.
++- An empty array imports 0 and succeeds.
++
++**Both shapes**: read as UTF-8; one leading byte-order mark is discarded; invalid UTF-8 is a
++failure (FR-009). The declared `--format` is authoritative — the name, extension and contents of
++the file are never consulted, and there is no fallback to the other shape (FR-008).
++
++### Failures
++
++Every failure below writes a diagnostic to **stderr** naming the file and what was invalid and
++what was expected, writes **nothing to stdout**, adds **no bookmark**, and exits **2** (FR-010,
++FR-011, FR-018).
++
++| Cause | Example diagnostic |
++| ----- | ------------------ |
++| File absent, a directory, or unreadable | `bookmarks: cannot read missing.csv: [Errno 2] No such file or directory: 'missing.csv'` |
++| Bytes are not valid UTF-8 | `bookmarks: cannot read bad.csv: it is not valid UTF-8 ('utf-8' codec can't decode byte 0xff in position 0: invalid start byte)` |
++| Malformed in the declared shape | `bookmarks: broken.json is not valid JSON: Expecting ',' delimiter: line 3 column 5 (char 42)` |
++| CSV header record wrong, or missing entirely | `bookmarks: wrong.csv: expected the header record id,url,title,tags but found name,link` |
++| CSV record with the wrong field count (a blank line is zero fields) | `bookmarks: short.csv line 4: expected 4 fields (id,url,title,tags) but found 3` |
++| JSON top level not an array | `bookmarks: one.json: expected a JSON array of bookmark objects but found an object` |
++| JSON element not an object | `bookmarks: list.json record 2: expected a JSON object but found a string` |
++| JSON record missing a required key | `bookmarks: gap.json record 2: missing the required key 'tags'` |
++| JSON record with an unrecognised key | `bookmarks: extra.json record 1: unrecognised key 'note' (expected only id, url, title, tags)` |
++| JSON `tags` not an array of strings | `bookmarks: tags.json record 1: expected 'tags' to be an array of strings but found a string` |
++| An address fails the scheme rule | `bookmarks: refusing to store 'ftp://x.example.com': a URL must begin with 'http://' or 'https://'` |
++| Missing `FILE`, missing `--format`, or an unsupported `--format` value | argparse's own usage diagnostic (FR-001) |
++
++Diagnostic wording is illustrative, not contractual; what is contractual is the stream, the exit
++status, and that the message names the file (where a file is at fault), what was invalid and what
++was expected. The scheme-rule message is the existing one from `001`, reused unchanged.
++
++**Atomicity** (FR-011): a failed import leaves the collection exactly as it was — not even the
++records preceding the first fault are added — the next bookmark saved afterwards receives the
++identifier it would have received had the import not been attempted, and if the store file did
++not exist beforehand it is **not created**.
++
++**Store failures are separate**: an unusable store (missing parent directory, a file that is not
++a bookmark database) exits **1** with the existing diagnostic and leaves the file untouched,
++exactly as for every other command. A file problem is never reported as 1; `import` never
++exits 3 (FR-017).
++
++---
++
++## Extended command: `export --format {csv,html,json}`
++
++`export` gains a third value. **`csv` and `json` output is byte-for-byte unchanged** (FR-015,
++SC-006). An unsupported value still produces argparse's diagnostic on stderr and exit **2**.
++
++### `export --format html` (FR-012, FR-013, FR-014)
++
++Prints the whole collection in ascending identifier order as one page, exit **0**:
++
++```html
++<!DOCTYPE html>
++<html>
++<head><meta charset="utf-8"><title>Bookmarks</title></head>
++<body>
++<ul>
++<li><a href="URL">TITLE</a> <small>TAGS</small></li>
++</ul>
++</body>
++</html>
++```
++
++- The five opening lines and three closing lines are **fixed** and emitted verbatim.
++- One `<li>` line per bookmark, in ascending identifier order. The identifier itself does not
++  appear on the page.
++- `TAGS` is the bookmark's labels joined by `,` in alphabetical order, **no spaces** around the
++  commas. A bookmark with no labels still has the `<small>` element, holding nothing.
++- An empty collection prints the same page with **no** `<li>` line between `<ul>` and `</ul>`.
++- Every line, including the last, ends with a single `\n`; the page ends with exactly one
++  trailing newline. Non-ASCII characters are written literally as UTF-8, never escaped.
++
++Worked example — a store holding `https://docs.python.org` / `Python docs` / `python,docs`, and
++`https://example.com` / no title / no labels:
++
++```html
++<!DOCTYPE html>
++<html>
++<head><meta charset="utf-8"><title>Bookmarks</title></head>
++<body>
++<ul>
++<li><a href="https://docs.python.org">Python docs</a> <small>docs,python</small></li>
++<li><a href="https://example.com"></a> <small></small></li>
++</ul>
++</body>
++</html>
++```
++
++#### Escaping: a closed set of four substitutions
++
++| Character | `href` value | Title and labels |
++| --------- | ------------ | ---------------- |
++| `&` | `&amp;` | `&amp;` |
++| `<` | `&lt;` | `&lt;` |
++| `>` | `&gt;` | `&gt;` |
++| `"` | `&quot;` | literal `"` |
++| `'` | literal `'` | literal `'` |
++| any other character | literal | literal |
++
++`&` is substituted first, so an escape is never doubly escaped. The set is **closed**: exactly
++these four substitutions and no others, which makes the page fully determined by the collection
++and assertable byte-for-byte.
++
++Worked example — a bookmark with address `https://x.example.com/?a=1&b=2"z` and title
++`Tom's "A&B" <tag>`:
++
++```html
++<li><a href="https://x.example.com/?a=1&amp;b=2&quot;z">Tom's "A&amp;B" &lt;tag&gt;</a> <small></small></li>
++```
++
++Note the two differences between the columns above in action: the title's `"` stays literal while
++the `href`'s becomes `&quot;`, and the apostrophe in `Tom's` stays literal in both.
++
++A title containing a tab or a line break is emitted as stored, so such a title makes the output
++span more lines than there are bookmarks — accepted, exactly as in the tab-separated listing
++(spec Edge Cases).
++
++---
++
++## Exit statuses (extended, not redefined — FR-017)
++
++| Status | Meaning | New in this feature |
++| ------ | ------- | ------------------- |
++| 0 | Success — including `imported 0` and the HTML page of an empty collection | — |
++| 1 | The store could not be used | unchanged; **never** used for an import-file problem |
++| 2 | Any mistake in what the user supplied | now also every import-file failure of FR-010, and an unsupported `--format` |
++| 3 | `delete` on an identifier that does not exist | unchanged; `import` never exits 3 |
++
++Results go to stdout, diagnostics to stderr, and a failing command puts no partial result on
++stdout (FR-018, `001:FR-023`).
++
++---
++
++## Internal contract: `src/bookmarks/`
++
++Not a user-facing interface, but the boundary the new code must respect (research R-106, R-109).
++
++| Module | Addition | Signature / behaviour |
++| ------ | -------- | --------------------- |
++| `importer.py` (new) | `read_records(path, shape)` | Returns a list of `{"url", "title", "tags"}` dicts, `tags` comma-joined. Raises `store.BookmarkError(msg, 2)` for every FR-010 cause. Opens no database. |
++| `store.py` | `add_bookmarks(connection, records)` | Checks every address first, then inserts all records in order, commits **once**, returns the count. |
++| `store.py` | `_insert_bookmark(…)` | The existing insert body, extracted and uncommitted, so `add_bookmark` and `add_bookmarks` share one path (FR-003). `add_bookmark`'s behaviour is unchanged. |
++| `cli.py` | `render_html(rows)` | Registered in the existing `RENDERERS` dict, which drives both dispatch and `--format` choices. |
++| `cli.py` | `handle_import(args)` + `import` subparser | Calls `read_records` **before** `store.open_store` (FR-011), then `add_bookmarks`, then prints `imported N`. |
++
++`store.BookmarkError` is reused for file failures with `status=2`, so `cli.main`'s single
++exception handler renders them with no new error path.
+diff --git a/specs/002-import-html-export/data-model.md b/specs/002-import-html-export/data-model.md
+new file mode 100644
+index 0000000..080efae
+--- /dev/null
++++ b/specs/002-import-html-export/data-model.md
+@@ -0,0 +1,191 @@
++# Data Model: Import and HTML Export
++
++**Feature**: `002-import-html-export` | **Date**: 2026-11-16
++
++**Input**: [spec.md](./spec.md), [research.md](./research.md)
++
++## Scope of change
++
++**The stored schema does not change.** `bookmarks` and `tags` are exactly as
++[`001-bookmark-manager-cli/data-model.md`](../001-bookmark-manager-cli/data-model.md) defines
++them, with no migration step and no new storage rule (FR-016). A store written by the previous
++version is used as-is.
++
++This document therefore covers only what is new: the two **import record** shapes (external,
++read-only, transient) and the **HTML page** projection (derived, write-only). Neither is
++persisted.
++
++```text
++import file  ──parse──▶  ImportRecord[]  ──validate──▶  store.add_bookmarks  ──▶  bookmarks + tags
++                                                                                        │
++                                                                        list_bookmarks  ▼
++                                                                                   HTML page
++```
++
++---
++
++## Entity: ImportRecord (transient)
++
++One bookmark as it appears in an import file: a plain `dict` with the keys `url`, `title`, `tags`,
++produced by whichever parser the declared `--format` selected, and consumed immediately by
++`store.add_bookmarks`. It is never stored and has no identity of its own.
++
++| Field   | Type  | Constraint | Source |
++| ------- | ----- | ---------- | ------ |
++| `url`   | `str` | Must begin with the literal `http://` or `https://` | FR-003, `001:FR-007` |
++| `title` | `str` | Any text, including empty; stored verbatim | FR-003, `001:FR-008` |
++| `tags`  | `str` | Comma-joined label text, normalised by `store.normalise_tags` | FR-003, `001:FR-009`, `001:FR-010`, research R-104 |
++
++`tags` is carried as the **comma-joined string form** in both shapes, so that a record reaching
++the store is indistinguishable from an `add --title … --tags …` invocation (research R-104). The
++JSON parser joins its array with `,` to produce it.
++
++An `id` in the file is **not** a field of this entity: it is read and discarded at the parser
++boundary (FR-004). No record ever carries an identifier into the store.
++
++### Derived at insert time, never from the file
++
++| Property | Rule |
++| -------- | ---- |
++| Identifier | Issued by the store's existing `AUTOINCREMENT`: starts at 1 in a fresh store, increases, never reissued (FR-004, `001:FR-006`) |
++| Insert order | File order, so identifiers ascend in file order (FR-005) |
++| Tag set | `normalise_tags`: split on `,`, strip, drop empties, lower-case, de-duplicate, sort (FR-003, `001:FR-010`) |
++| Uniqueness | None. The same address may appear any number of times, each occurrence becoming its own bookmark (FR-011 context, spec Edge Cases) |
++
++### Worked normalisation cases (import vs. `add`, which must agree)
++
++| File value for the labels | Stored tag set |
++| ------------------------- | -------------- |
++| `python,docs` (CSV field) / `["python","docs"]` (JSON) | `docs`, `python` |
++| `Python, DOCS ,python` / `["Python"," DOCS ","python"]` | `docs`, `python` |
++| `` (empty) / `[]` | none |
++| `,,` / `["","  "]` | none |
++
++The last two rows are why a bookmark with no labels and an empty title is stored exactly as
++`add URL` with both options omitted stores it (Acceptance Scenario 1.5).
++
++---
++
++## Shape A: the CSV file (`--format csv`)
++
++Read as the form `export --format csv` writes (FR-006, `001:FR-018`, `001:FR-019`).
++
++```text
++id,url,title,tags
++1,https://docs.python.org,Python docs,"docs,python"
++2,https://example.com,,
++```
++
++| Position | Record | Rule |
++| -------- | ------ | ---- |
++| First | Header | Must parse to exactly the four values `id`, `url`, `title`, `tags`, **in that order** (FR-006) |
++| Rest | Bookmark rows | Must each hold exactly **4** fields, in the order `id`, `url`, `title`, `tags` (FR-006a) |
++
++- The header is compared **after** CSV parsing, so `id,url,title,tags` and
++  `"id","url","title","tags"` are equally acceptable, while wrong names, wrong order, a wrong
++  count, or no header record at all is a failure (FR-006, Clarifications).
++- Field 0 (`id`) is parsed and discarded — any value, including non-numeric, is accepted and
++  ignored (FR-004). It is not validated, because it is not used.
++- Field 3 holds the labels of *one* bookmark joined by commas; the export quotes it for exactly
++  that reason, and it must yield several labels rather than a parse error (FR-006, Edge Cases).
++- Standard CSV quoting is honoured: a quoted field may contain commas, doubled quotation marks
++  and line breaks (FR-006).
++- Both `\n` and `\r\n` terminate a record (FR-006).
++- A **blank line is a record of zero fields** and therefore fails the 4-field rule, wherever it
++  occurs; blank lines are never skipped. The single line feed ending the final row is that row's
++  terminator, not a blank record (FR-006a).
++- The header record alone → 0 bookmarks, success (FR-006).
++
++## Shape B: the JSON file (`--format json`)
++
++Read as the form `export --format json` writes (FR-007, `001:FR-020`).
++
++```json
++[
++  {"id": 1, "url": "https://docs.python.org", "title": "Python docs", "tags": ["docs", "python"]},
++  {"id": 2, "url": "https://example.com", "title": "", "tags": []}
++]
++```
++
++| Level | Required type | Failure if otherwise |
++| ----- | ------------- | -------------------- |
++| Document | array | FR-007, FR-010 |
++| Element | object | FR-007, FR-010 |
++| `url` | string, required | FR-007, FR-010 |
++| `title` | string, required | FR-007, FR-010 |
++| `tags` | array of strings, required | FR-007, FR-010 |
++| `id` | any, optional | Accepted, value disregarded (FR-004, FR-007) |
++| Any other key | — | Failure: an unrecognised key is a shape error, not silently dropped data (FR-010, spec Assumptions) |
++
++- A missing `title` or `tags` is an error, **not** a default of empty (spec Assumptions).
++- An empty array → 0 bookmarks, success (FR-007).
++- A single object instead of an array → failure (Edge Cases).
++
++## Common to both shapes
++
++- Decoded as UTF-8; a single leading byte-order mark is discarded before parsing; bytes that are
++  not valid UTF-8 are a failure (FR-009, research R-101).
++- The declared `--format` alone decides the shape. The file name, extension and contents are
++  never consulted, and there is no fallback to the other shape (FR-008).
++
++---
++
++## Validation order and the atomicity invariant
++
++The validation sequence is load-bearing, not incidental (research R-105):
++
++1. **Read** the file (decode UTF-8, discard the BOM). Failure → status 2.
++2. **Parse** it in the declared shape. Failure → status 2.
++3. **Validate** every record's structure, then every record's address against the scheme rule.
++   Failure → status 2.
++4. **Only now** open the store, insert every record in file order, commit once.
++5. Print `imported N`.
++
++**Invariant**: no store call of any kind occurs before step 4. Consequences, each a requirement:
++
++| Consequence | Requirement |
++| ----------- | ----------- |
++| A failed import adds nothing — not even records preceding the fault | FR-011 |
++| A failed import creates no store file when none existed | FR-011 |
++| A failed import advances no identifier, so the next `add` gets the identifier it would have got | FR-011 |
++| A file problem is never reported as status 1 (a store problem) | FR-017 |
++| A *successful* import — even of 0 bookmarks — does open the store, so an absent store file is created and left empty | FR-002a |
++
++Steps 1–3 are "all-or-nothing" by construction: there is nothing to undo.
++
++---
++
++## Projection: the HTML page
++
++A derived, read-only rendering of the whole collection in ascending identifier order, built from
++the same `list_bookmarks` rows the CSV and JSON exports use. It carries each bookmark's address,
++title and labels but **not** its identifier, which is why it is a presentation form and not a
++round-trip shape — there is no `import --format html` (FR-012, spec Key Entities and Assumptions).
++
++| Page element | Value | Rule |
++| ------------ | ----- | ---- |
++| Fixed lines | Emitted verbatim | FR-012, FR-014 |
++| One `<li>` line | Per bookmark, ascending identifier order | FR-012 |
++| `href` value | The address | escaped per FR-014, including `"` |
++| Link text | The title, including when empty | escaped per FR-014; no placeholder for an empty title |
++| `<small>` text | Labels joined by `,`, alphabetical, no spaces; the element is present even when empty | FR-012 |
++
++### The closed escaping rule (FR-014)
++
++| Character | In `href` | In title and labels | Note |
++| --------- | --------- | ------------------- | ---- |
++| `&` | `&amp;` | `&amp;` | Substituted **first**, so no escape is doubly escaped |
++| `<` | `&lt;` | `&lt;` | |
++| `>` | `&gt;` | `&gt;` | |
++| `"` | `&quot;` | *literal* | Only the attribute value needs it |
++| `'` | *literal* | *literal* | Deliberately **not** escaped |
++| Everything else, including non-ASCII, tabs, line breaks | *literal* | *literal* | Written as UTF-8 (FR-013) |
++
++The set is closed — exactly these four substitutions and no others — which is what makes the page
++byte-predictable and assertable byte-for-byte, like the CSV and JSON exports (FR-014, SC-004).
++
++Every line, including the last, ends with a single `\n`, and the page ends with exactly one
++trailing newline (FR-013). An empty collection yields the same page with no `<li>` line between
++`<ul>` and `</ul>` (FR-012).
++
++See [contracts/cli-contract-002.md](./contracts/cli-contract-002.md) for the exact byte layout.
+diff --git a/specs/002-import-html-export/plan.md b/specs/002-import-html-export/plan.md
+new file mode 100644
+index 0000000..a0f154a
+--- /dev/null
++++ b/specs/002-import-html-export/plan.md
+@@ -0,0 +1,206 @@
++# Implementation Plan: Import and HTML Export
++
++**Branch**: `002-import-html-export` | **Date**: 2026-11-16 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/002-import-html-export/spec.md`
++
++## Summary
++
++Add two capabilities to the working bookmark manager, without changing anything it already does:
++an `import FILE --format csv|json` command that bulk-loads bookmarks from the same two file
++shapes `export` writes, and a third export format, `--format html`, that renders the collection
++as one fixed, byte-predictable HTML page.
++
++The technical approach is deliberately small — three files touched, one file added:
++
++- **`importer.py` (new)** reads the file with `encoding="utf-8-sig"` (which gives UTF-8 decoding
++  and the byte-order-mark rule in one step), parses it with `csv.reader` or `json.loads`, and
++  validates the shape by hand so every failure can name what was wrong and what was expected.
++  It opens no database.
++- **Atomicity comes from ordering, not rollback**: the file is read, parsed and fully validated —
++  including the URL scheme check on every record — *before* `store.open_store` is called. Since
++  opening the store is what creates the store file, this is the only design that delivers
++  "a failed import creates no store file" (FR-011), and it also keeps file failures (status 2)
++  structurally separate from store failures (status 1).
++- **`store.add_bookmarks`** shares one insert path with the existing `add_bookmark`, so
++  "added exactly as `add` would add it" (FR-003) is guaranteed structurally rather than by
++  inspection, and commits once so 1,000 bookmarks do not cost 1,000 fsyncs.
++- **`render_html`** uses `html.escape(value, quote=False)` plus an explicit `"` → `&quot;` inside
++  the `href`, which is exactly FR-014's closed set of four substitutions and leaves the
++  apostrophe literal. Registering it in the existing `RENDERERS` dict gives dispatch, the
++  `--format` choices and the invalid-format exit 2 for free, and leaves the CSV and JSON paths
++  literally untouched (FR-015).
++
++## Technical Context
++
++**Language/Version**: Python 3.11+ (declared once in `pyproject.toml` as `requires-python =
++">=3.11"`, unchanged). Development and verification on 3.13.17.
++
++**Primary Dependencies**: None at runtime. Standard library only: `argparse`, `csv`, `json`,
++`sqlite3`, `sys`, `html` (new to this feature), `pathlib`. `pytest` remains the only development
++dependency and is never imported by shipped code.
++
++**Storage**: The existing SQLite store, schema **unchanged** — no migration, no new table, no new
++column (FR-016). Default path `bookmarks.db`, overridable with the existing global `--db`.
++
++**Testing**: pytest. Two new files, `tests/test_import.py` and `tests/test_html_export.py`, plus
++additions to `tests/test_performance.py`; every test name identifies the requirement it covers.
++No existing test file is modified (FR-020, SC-006). CLI behaviour is exercised through the
++existing `run_cli` subprocess fixture, because the exit statuses are process statuses.
++
++**Target Platform**: Any platform with CPython 3.11+; developed and verified on Linux.
++
++**Project Type**: Single-project command-line tool (existing `src/bookmarks/` package).
++
++**Performance Goals**: Import of 1,000 bookmarks in under 5 seconds; HTML export of a
++1,000-bookmark collection in under 1 second (SC-005). Met by one commit for the whole import
++(research R-106) and by reusing the existing single-query read path for the page.
++
++**Constraints**: Byte-exact output — the HTML page is asserted byte-for-byte, and CSV/JSON output
++must be byte-identical to the previous version (FR-013, FR-014, FR-015, SC-004, SC-006). Strict
++stream split: results on stdout, diagnostics on stderr, no partial stdout from a failing command
++(FR-018). Exit-status map extended, never redefined: 0/1/2/3 as before, with every import-file
++failure landing on 2 (FR-017). All-or-nothing import, with no store file created on failure
++(FR-011).
++
++**Scale/Scope**: One new command, one new export format, one new module (~90 lines), two new
++functions in `store.py`, one renderer plus one handler and subparser in `cli.py`. Collections of
++a few thousand bookmarks; single user, single machine, no concurrent access.
++
++No `NEEDS CLARIFICATION` items remain: the spec's five clarifications settled the escaping set,
++the quoted CSV header, the byte-order mark, the blank-line rule and the empty-store-on-success
++question, and [research.md](./research.md) resolves every technical unknown (R-101 … R-110).
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++Checked against [constitution](../../.specify/memory/constitution.md) v1.0.0.
++
++### Initial check (pre-Phase 0) — PASS
++
++| Principle | Assessment |
++| --------- | ---------- |
++| **I. Standard Library Only** | PASS. `csv`, `json`, `html` are standard library; the only new import anywhere is `html`. No third-party runtime dependency is contemplated (FR-019). |
++| **II. Fail Loudly** | PASS. FR-010 requires a specific stderr diagnostic naming the file, what was invalid and what was expected, plus exit 2, for every file fault. FR-011 forbids skipping a bad record to keep going, and the spec's Assumptions explicitly rule out a partial-success mode — which is Principle II's "MUST NOT … skip a bad record" stated as a requirement. |
++| **III. Every Requirement Is Testable (NON-NEGOTIABLE)** | PASS. FR-020 requires a pytest test per functional requirement, identified by name; every FR here is observable at the CLI boundary (bytes on a stream plus an exit status). |
++| **IV. Simplicity** | PASS. One new module, two new store functions, one renderer. Scope is bounded by the spec's own exclusions (no `--continue-on-error`, no dry run, no merging, no `import --format html`, no page styling), all of which are recorded as Assumptions and none of which will be built. |
++
++### Additional Constraints
++
++| Constraint | Assessment |
++| ---------- | ---------- |
++| Python floor declared once | PASS — `pyproject.toml`, unchanged. No syntax newer than 3.11 is used. |
++| pytest as the only dev dependency | PASS — no new tooling. |
++| Results to stdout, diagnostics to stderr | PASS — FR-018; the new command adds nothing to stdout on failure. |
++| No hidden global state or env-driven behaviour | PASS — behaviour comes from `FILE`, `--format` and `--db` only. `--format` is authoritative, and the file's name, extension and contents are never consulted (FR-008). |
++
++### Post-design re-check (after Phase 1) — PASS
++
++Re-evaluated against the generated design. No violation introduced, and three design choices
++tightened compliance:
++
++| Principle | Post-design finding |
++| --------- | ------------------- |
++| **I** | Confirmed: the design adds exactly one import, `html`, used for `html.escape` only (research R-107). |
++| **II** | **Strengthened.** `utf-8-sig` with no `errors=` parameter was chosen specifically so undecodable bytes raise rather than becoming U+FFFD — the "silent wrong answer" the principle ranks highest in severity (R-101). `csv.DictReader` was rejected because it would silently absorb a wrong header and a wrong field count (R-102). The validate-before-open ordering means no failure can be misreported as a store error (R-105). Every FR-010 cause has a drafted message naming the file, the fault and the expectation, listed in the contract. |
++| **III** | Confirmed: the contract enumerates each failure cause as a separately observable outcome, and the test plan (R-110) maps FR-001…FR-014 to two new files with requirement-named tests. The pre-existing suite — the 131-passed baseline — is the evidence for FR-015/SC-006 and is not modified. |
++| **IV** | **Strengthened.** Registering `render_html` in the existing `RENDERERS` dict means the invalid-`--format` path, the help text and the dispatch need no new code (R-108). Sharing `_insert_bookmark` removes a would-be second insert path (R-106). Rejected as speculative generality: a schema-validation layer for JSON (R-103), a second tag normaliser for the JSON list form (R-104), an `html.py` module (R-108), a new exception type for file errors (R-109), and rollback machinery (R-105). |
++
++**Complexity Tracking**: not required — no violations to justify.
++
++One judgment call worth recording for the Gate 5 reviewer: `importer.py` is a *third* module in a
++package the constitution would otherwise keep flat at two. It is justified against FR-006/FR-007
++(two file shapes with a dozen distinct failure diagnostics, ~60 lines of parsing) and by the
++spec's own Key Entities, which place the import file outside the collection that `store.py` owns;
++folding it into `cli.py` or `store.py` would make that module about two things (R-109). The layout
++stays flat — three modules, no subpackages.
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/002-import-html-export/
++├── plan.md              # This file (/speckit-plan command output)
++├── spec.md              # Feature specification (input)
++├── research.md          # Phase 0 output: R-101 … R-110
++├── data-model.md        # Phase 1 output: import record shapes + HTML projection
++├── quickstart.md        # Phase 1 output: six end-to-end validation scenarios
++├── contracts/
++│   └── cli-contract-002.md   # Phase 1 output: the new CLI surface, byte-exact
++├── checklists/          # Pre-existing (from /speckit-specify)
++└── tasks.md             # Phase 2 output (/speckit-tasks — NOT created by /speckit-plan)
++```
++
++### Source Code (repository root)
++
++```text
++src/bookmarks/
++├── __init__.py          # unchanged
++├── __main__.py          # unchanged
++├── cli.py               # MODIFIED: + render_html, + handle_import, + import subparser,
++│                        #   + "html" in RENDERERS
++├── importer.py          # NEW: file reading, the two parsers, record validation
++└── store.py             # MODIFIED: + add_bookmarks, + _insert_bookmark (extracted from
++                         #   add_bookmark, whose behaviour is unchanged)
++
++tests/
++├── conftest.py          # unchanged (db, run_cli, seed, seed_many fixtures reused)
++├── test_add.py          # unchanged
++├── test_cli_contract.py # unchanged
++├── test_delete.py       # unchanged
++├── test_export.py       # unchanged — the FR-015/SC-006 evidence
++├── test_list_search.py  # unchanged
++├── test_store.py        # unchanged
++├── test_performance.py  # MODIFIED: + the two SC-005 budgets
++├── test_import.py       # NEW: FR-001 … FR-011, plus the round trip (User Story 3)
++└── test_html_export.py  # NEW: FR-012, FR-013, FR-014
++
++pyproject.toml           # unchanged
++```
++
++**Structure Decision**: The existing single-project layout is kept exactly as it is — `src/` for
++the package, `tests/` flat beside it, `src/` reached via `pythonpath = ["src"]` in
++`pyproject.toml`. This feature is an extension of a working tool, so the structure question is
++settled by precedent; the only addition is one module inside the existing package, justified in
++the Constitution Check above. No new directory is created anywhere outside `specs/`.
++
++## Phase 0: Outline & Research — complete
++
++Output: [research.md](./research.md). Ten decisions, each with rationale and rejected
++alternatives; the findings marked **verified** were confirmed by running the standard library
++during this phase (BOM stripping, the blank-line-yields-`[]` behaviour, embedded newlines in
++quoted fields, `IsADirectoryError`, `UnicodeDecodeError`, and both branches of `html.escape`).
++
++| ID | Decision |
++| --- | --- |
++| R-101 | Read with `encoding="utf-8-sig", newline=""`; `OSError`/`UnicodeDecodeError` → status 2 |
++| R-102 | `csv.reader` with default dialect; compare the parsed header record; require exactly 4 fields |
++| R-103 | `json.loads` plus explicit structural checks, in a fixed order |
++| R-104 | Both shapes reach the existing `store.normalise_tags`; JSON joins its array with `,` |
++| R-105 | Validate the entire file before `open_store` — the source of every atomicity guarantee |
++| R-106 | One shared insert path; `add_bookmarks` commits once |
++| R-107 | `html.escape(quote=False)` + an explicit `"` → `&quot;` in `href` only |
++| R-108 | `render_html` registered in the existing `RENDERERS` dict; CSV/JSON paths untouched |
++| R-109 | New module `importer.py` (not `import.py` — a reserved word); reuse `store.BookmarkError` |
++| R-110 | Two new test files, requirement-named tests, byte-for-byte page assertions |
++
++## Phase 1: Design & Contracts — complete
++
++| Artifact | Contents |
++| --- | --- |
++| [data-model.md](./data-model.md) | The transient `ImportRecord`, both file shapes field by field, the worked tag-normalisation cases, the validation order with its five atomicity consequences, and the HTML projection with FR-014's closed escaping table. States plainly that the stored schema does not change. |
++| [contracts/cli-contract-002.md](./contracts/cli-contract-002.md) | The complete new CLI surface: the `import` grammar, success output, the accepted shapes, a table of every failure cause with a drafted diagnostic, the atomicity rules, the extended `export --format` with the exact page bytes and two worked escaping examples, the extended exit-status map, and the internal module contract. Written as an extension to the `001` contract, which stays valid. |
++| [quickstart.md](./quickstart.md) | Six runnable validation scenarios: both shapes into a fresh store, thirteen kinds of damaged file checked for the stderr/empty-stdout/status-2 triple plus the no-store-file rule, the HTML page including the characters that must stay literal, the round trip through both shapes with awkward values, the two performance budgets, and the regression gate (`git status --short tests/` showing no modified test). |
++
++Entities were extracted from the spec's Key Entities and FR-003 … FR-009; the interface contract
++from FR-001 … FR-014 and the exit-status map of FR-017. A contract is warranted here because the
++project's external interface *is* a CLI, and this feature's requirements are stated in bytes and
++exit statuses.
++
++## Complexity Tracking
++
++> Fill ONLY if Constitution Check has violations that must be justified
++
++No violations. The table is intentionally empty.
+diff --git a/specs/002-import-html-export/quickstart.md b/specs/002-import-html-export/quickstart.md
+new file mode 100644
+index 0000000..867d6e5
+--- /dev/null
++++ b/specs/002-import-html-export/quickstart.md
+@@ -0,0 +1,256 @@
++# Quickstart: Validating Import and HTML Export
++
++**Feature**: `002-import-html-export` | **Date**: 2026-11-16
++
++How to prove this feature works end to end, by hand and by suite. Rules and byte layouts are not
++repeated here — see [contracts/cli-contract-002.md](./contracts/cli-contract-002.md) for the
++interface and [data-model.md](./data-model.md) for the file shapes.
++
++## Prerequisites
++
++- Python 3.11 or newer (`python3 -VV`). Standard library only — nothing to install at runtime.
++- `pytest` for the suite (the single development dependency).
++- Run everything from the repository root. `src/` must be on `PYTHONPATH`; the test suite gets
++  this from `pyproject.toml`, and the shell commands below set it explicitly.
++
++```bash
++cd /root/sdd-study/runs/R018
++export PYTHONPATH=src
++python3 -VV
++```
++
++Work in a scratch directory so no check touches a real collection:
++
++```bash
++mkdir -p /tmp/bmcheck && cd /tmp/bmcheck
++```
++
++---
++
++## Scenario 1 — Import both shapes into a fresh store (User Story 1, P1)
++
++Write one file of each shape, import each into its own fresh store, and list the result.
++
++```bash
++printf 'id,url,title,tags\n1,https://docs.python.org,Python docs,"docs,python"\n2,https://example.com,,\n' > two.csv
++cat > two.json <<'JSON'
++[{"id": 7, "url": "https://docs.python.org", "title": "Python docs", "tags": ["python", "docs"]},
++ {"id": 9, "url": "https://example.com", "title": "", "tags": []}]
++JSON
++
++python3 -m bookmarks --db from-csv.db import two.csv --format csv
++python3 -m bookmarks --db from-csv.db list
++python3 -m bookmarks --db from-json.db import two.json --format json
++python3 -m bookmarks --db from-json.db list
++```
++
++**Expected**: each import prints `imported 2` and exits 0. Each listing shows identifiers `1` and
++`2` in file order, labels lower-cased, comma-joined and alphabetical — so the file's `id` values
++`7` and `9` were disregarded (FR-002, FR-004, FR-005). The two listings are identical to each
++other.
++
++Check that importing into a populated store appends rather than replaces:
++
++```bash
++python3 -m bookmarks --db from-csv.db import two.json --format json   # expect: imported 2
++python3 -m bookmarks --db from-csv.db list                            # expect: ids 1..4
++```
++
++**Expected**: the first two bookmarks are unchanged and the new ones carry identifiers above
++every identifier previously issued (FR-004).
++
++### Successful import of an empty file creates the store (FR-002a)
++
++```bash
++printf 'id,url,title,tags\n' > empty.csv
++python3 -m bookmarks --db fresh.db import empty.csv --format csv   # expect: imported 0, status 0
++ls fresh.db                                                        # expect: the file exists
++python3 -m bookmarks --db fresh.db add https://a.example.com       # expect: 1
++```
++
++---
++
++## Scenario 2 — Every damaged file is rejected cleanly (FR-010, FR-011, SC-003)
++
++The point of each check is the same triple: a diagnostic on stderr, **nothing** on stdout, exit
++**2**. Build a set of damaged files and run them all:
++
++```bash
++mkdir -p adir
++printf 'name,link\n' > badheader.csv
++printf 'id,url,title,tags\n1,https://a.example.com,A\n' > shortrow.csv
++printf 'id,url,title,tags\n1,https://a.example.com,A,x\n\n' > blankline.csv
++printf 'id,url,title,tags\n1,ftp://a.example.com,A,x\n' > badscheme.csv
++printf '{"url": "https://a.example.com"}\n' > notalist.json
++printf '[{"url": "https://a.example.com", "title": "A"}]\n' > missingkey.json
++printf '[{"url": "https://a.example.com", "title": "A", "tags": "x"}]\n' > tagsstring.json
++printf '[{"url": "https://a.example.com", "title": "A", "tags": [], "note": "n"}]\n' > extrakey.json
++printf '[{"url": "https://a.example.com",\n' > broken.json
++: > zero.csv
++printf '\xff\xfe\x00bad' > badutf8.csv
++
++for f in missing.csv adir badheader.csv shortrow.csv blankline.csv badscheme.csv zero.csv badutf8.csv; do
++  python3 -m bookmarks --db target.db import "$f" --format csv > out.txt 2> err.txt
++  echo "$f -> status $? stdout:$(wc -c < out.txt) bytes stderr:$(head -c 120 err.txt)"
++done
++for f in notalist.json missingkey.json tagsstring.json extrakey.json broken.json; do
++  python3 -m bookmarks --db target.db import "$f" --format json > out.txt 2> err.txt
++  echo "$f -> status $? stdout:$(wc -c < out.txt) bytes stderr:$(head -c 120 err.txt)"
++done
++ls target.db 2>&1
++```
++
++**Expected**: every line reports `status 2`, `stdout:0 bytes`, and a message naming the file and
++what was wrong and what was expected. The final `ls` reports **no such file** — a failed import
++creates no store (FR-011).
++
++Then confirm the identifier sequence was untouched by the failures:
++
++```bash
++python3 -m bookmarks --db target.db add https://a.example.com   # expect: 1
++```
++
++Two more checks from the same family:
++
++```bash
++# The declared shape is never second-guessed: each file is valid, in the other shape (FR-008).
++python3 -m bookmarks --db target.db import two.json --format csv ; echo "status $?"   # expect 2
++python3 -m bookmarks --db target.db import two.csv --format json ; echo "status $?"   # expect 2
++
++# A store problem is status 1, not 2 — the two classes stay distinct (FR-017).
++python3 -m bookmarks --db no/such/dir/x.db import two.csv --format csv ; echo "status $?"  # expect 1
++```
++
++### Accepted oddities (these must *succeed*)
++
++```bash
++printf '\xef\xbb\xbfid,url,title,tags\n1,https://a.example.com,A,x\n' > bom.csv
++printf 'id,url,title,tags\r\n1,https://a.example.com,A,"x,y"\r\n' > crlf.csv
++printf '"id","url","title","tags"\n1,https://a.example.com,A,x\n' > quotedheader.csv
++
++for f in bom.csv crlf.csv quotedheader.csv; do
++  python3 -m bookmarks --db "ok-$f.db" import "$f" --format csv && python3 -m bookmarks --db "ok-$f.db" list
++done
++```
++
++**Expected**: `imported 1` each. The BOM is gone (the first address is intact, not prefixed), the
++CRLF file's quoted `x,y` became the two labels `x,y`, and the quoted header was accepted
++(FR-006, FR-009, Clarifications).
++
++---
++
++## Scenario 3 — The HTML page (User Story 2, P2)
++
++```bash
++python3 -m bookmarks --db page.db add https://docs.python.org --title "Python docs" --tags python,docs
++python3 -m bookmarks --db page.db add https://example.com
++python3 -m bookmarks --db page.db export --format html
++```
++
++**Expected**: exactly the page in the contract's worked example — five fixed opening lines, one
++`<li>` line per bookmark in identifier order, three fixed closing lines, one trailing newline.
++The second bookmark's link text is empty and its `<small>` element is present but empty
++(FR-012, FR-013).
++
++```bash
++python3 -m bookmarks --db empty-page.db export --format html | diff - <(python3 -m bookmarks --db empty-page.db export --format html) && echo stable
++python3 -m bookmarks --db empty-page.db export --format html | grep -c '<li>'   # expect: 0
++python3 -m bookmarks --db page.db export --format html | tail -c 20 | xxd | tail -1
++```
++
++**Expected**: an empty collection still prints the whole page with no `<li>` line, and the final
++byte is a single `0a` (FR-012, FR-013).
++
++Escaping, including the characters that must stay **literal**:
++
++```bash
++python3 -m bookmarks --db esc.db add 'https://x.example.com/?a=1&b=2"z' --title 'Tom'\''s "A&B" <tag>'
++python3 -m bookmarks --db esc.db export --format html | grep '<li>'
++```
++
++**Expected**: the one `<li>` line in the contract's escaping example — `&` and the angle brackets
++substituted in both places, `"` substituted **only** inside `href`, and the apostrophe in `Tom's`
++literal (FR-014).
++
++Non-ASCII stays literal, and the other two formats are untouched:
++
++```bash
++python3 -m bookmarks --db esc.db add https://café.example.com --title "Café — ünïcode"
++python3 -m bookmarks --db esc.db export --format html | grep Café   # expect: literal, no entities
++python3 -m bookmarks --db esc.db export --format fancy ; echo "status $?"   # expect: usage error, 2
++```
++
++---
++
++## Scenario 4 — Round trip between stores (User Story 3, P3)
++
++Export a collection full of awkward values, import it into an empty store, compare field by
++field. This is the check that the import really does accept what the export writes.
++
++```bash
++python3 -m bookmarks --db src.db add https://a.example.com --title 'Comma, inside' --tags b,a
++python3 -m bookmarks --db src.db add https://b.example.com --title 'Quote " inside'
++python3 -m bookmarks --db src.db add https://c.example.com --title 'Line
++break inside'
++python3 -m bookmarks --db src.db add https://café.example.com --title 'Café — ünïcode' --tags café
++python3 -m bookmarks --db src.db add https://a.example.com --title 'Duplicate address'
++
++for fmt in csv json; do
++  python3 -m bookmarks --db src.db export --format $fmt > round.$fmt
++  python3 -m bookmarks --db "rt-$fmt.db" import round.$fmt --format $fmt
++  diff <(python3 -m bookmarks --db src.db list) <(python3 -m bookmarks --db "rt-$fmt.db" list) \
++    && echo "$fmt round trip identical"
++done
++```
++
++**Expected**: `imported 5` for each shape, and both `diff`s empty — titles with commas, quotation
++marks, embedded line breaks and non-ASCII characters all survive, the duplicate address appears
++twice (no de-duplication), and the identifiers renumber from 1, which here match the source
++because the source also started from 1 (SC-001, FR-011 context).
++
++---
++
++## Scenario 5 — Performance budget (SC-005)
++
++```bash
++python3 -m bookmarks --db big.db add https://seed.example.com >/dev/null
++python3 - <<'PY'
++import csv
++with open("/tmp/bmcheck/big.csv", "w", newline="") as fh:
++    w = csv.writer(fh, lineterminator="\n")
++    w.writerow(["id", "url", "title", "tags"])
++    for i in range(1000):
++        w.writerow([i, f"https://example.com/page/{i}", f"Page {i}", f"tag{i % 10},common"])
++PY
++time python3 -m bookmarks --db big.db import big.csv --format csv     # expect: imported 1000, < 5s
++time python3 -m bookmarks --db big.db export --format html > /dev/null  # expect: < 1s
++```
++
++---
++
++## Scenario 6 — Nothing that worked before has changed (FR-015, SC-006)
++
++```bash
++cd /root/sdd-study/runs/R018
++python3 -m pytest -q
++```
++
++**Expected**: every pre-existing test passes with **no test file modified** (the baseline before
++this feature was 131 passed, 2 skipped), plus the new tests for this feature. Per constitution
++Principle III, each new test names the requirement it covers, so the mapping can be read
++straight off the output:
++
++```bash
++python3 -m pytest tests/test_import.py tests/test_html_export.py -v
++python3 -m pytest -q -k "fr014 or fr011"     # spot-check one requirement's coverage
++git status --short tests/                     # expect: only new files, none modified
++```
++
++A requirement with no test is treated as unimplemented regardless of the state of the code, so
++this scenario — not Scenarios 1–5 — is the gate that decides the feature is done.
++
++## Cleanup
++
++```bash
++rm -rf /tmp/bmcheck
++```
+diff --git a/specs/002-import-html-export/research.md b/specs/002-import-html-export/research.md
+new file mode 100644
+index 0000000..180cddc
+--- /dev/null
++++ b/specs/002-import-html-export/research.md
+@@ -0,0 +1,355 @@
++# Phase 0 Research: Import and HTML Export
++
++**Feature**: `002-import-html-export` | **Date**: 2026-11-16
++
++**Input**: [spec.md](./spec.md), [constitution](../../.specify/memory/constitution.md),
++existing code in `src/bookmarks/` and research for
++[`001-bookmark-manager-cli`](../001-bookmark-manager-cli/research.md)
++
++This feature adds one command and one export format to a working tool. The decisions below are
++therefore mostly about *where to put the new code without disturbing the old*, and about the
++exact standard-library behaviour the byte-level requirements depend on.
++
++Findings marked **verified** were confirmed by running the code during this phase on
++Python 3.13.17 / SQLite 3.45.1 (the development interpreter; the declared floor stays 3.11, per
++`pyproject.toml`). The pre-existing suite was run as a baseline: **131 passed, 2 skipped**.
++
++No `NEEDS CLARIFICATION` markers remain in the Technical Context.
++
++---
++
++## R-101: Reading the import file — encoding, byte-order mark, and invalid UTF-8
++
++**Decision**: Open the file once with `open(path, encoding="utf-8-sig", newline="")` and let the
++text layer do all three jobs: decode as UTF-8 (FR-009), discard a single leading byte-order mark,
++and leave line endings untranslated for the CSV reader. Wrap the open and the read in one
++`try`/`except (OSError, UnicodeDecodeError)` that raises `BookmarkError(..., 2)`.
++
++**Rationale**: The `utf-8-sig` codec strips exactly one leading BOM and is otherwise identical to
++`utf-8`, which is precisely the clarified rule ("a single leading byte-order mark is discarded
++before parsing, for both file shapes"). Using it on both shapes means the BOM rule has one
++implementation rather than two. `newline=""` is the same setting the CSV writer side already uses
++(`cli.main` reconfigures stdout that way) and is what keeps a line break inside a quoted field
++part of that field (FR-006).
++
++**Verified**:
++
++- `\xef\xbb\xbfid,url,title,tags\n…` read with `utf-8-sig` yields the first field as `id`, not
++  `﻿id` — the mark never reaches the header comparison (FR-009).
++- `b"\xff\xfe\x00bad"` raises `UnicodeDecodeError` (`'utf-8' codec can't decode byte 0xff in
++  position 0`) — a message that already names the file problem (FR-010).
++- Opening a directory raises `IsADirectoryError`, a subclass of `OSError`, so the absent /
++  directory / permission-denied cases of FR-010 are one except clause.
++
++**Alternatives considered**:
++
++- *Read bytes, strip `codecs.BOM_UTF8` by hand, then `.decode("utf-8")`*: rejected — three steps
++  where the codec is one, and it re-implements a standard-library behaviour (Principle IV).
++- *`encoding="utf-8", errors="replace"`*: rejected outright — it would silently substitute
++  U+FFFD for undecodable bytes, the exact "silent wrong answer" Principle II ranks as the
++  highest-severity defect. FR-009 requires failure.
++- *Streaming the file record by record instead of reading it whole*: rejected — atomicity
++  (FR-011) requires the entire file to be validated before the store is touched, so the records
++  must be held in memory anyway. At 1,000 bookmarks (SC-001, SC-005) the memory cost is trivial.
++
++---
++
++## R-102: Parsing the CSV shape — header, field count, and blank lines
++
++**Decision**: Feed the open file object straight to `csv.reader` with default dialect settings.
++Compare the **first yielded record** against the list `["id", "url", "title", "tags"]`. Require
++every later record to have `len(record) == 4`. Do not filter or skip any record.
++
++**Rationale**: Every clarified CSV rule falls out of `csv.reader`'s own behaviour, with no
++hand-written text handling:
++
++| Requirement | How `csv.reader` satisfies it |
++| --- | --- |
++| Header compared after parsing, so `"id","url","title","tags"` is accepted (FR-006) | The reader strips the quotes before the comparison sees the values |
++| Quoted fields may hold commas, doubled quotes, line breaks (FR-006) | Standard dialect, `newline=""` on the file |
++| `\n` and `\r\n` both accepted (FR-006) | The reader accepts either terminator |
++| A blank line is a record of zero fields and must fail (FR-006a) | A blank line yields `[]`, whose length is 0, not 4 |
++| The newline ending the last row is not a blank record (FR-006a) | A trailing `\n` after the final row yields no extra record |
++| A header line alone imports 0 and succeeds (FR-006) | The reader yields exactly one record |
++| An empty file fails (Edge Cases) | The reader yields nothing, so there is no header record |
++
++**Verified**, in one probe:
++
++- `id,url,title,tags\r\n1,https://a,A,"x,y"\r\n\r\n` →
++  `[['id','url','title','tags'], ['1','https://a','A','x,y'], []]`. The quoted `x,y` arrives as
++  **one** field holding two labels (FR-006, Edge Cases), and the blank line arrives as `[]`,
++  which the length check rejects (FR-006a).
++- `1,"a\nb",t,x\n` → `[['1','a\nb','t','x']]`: the embedded line break stays inside the field and
++  the single trailing newline produces no blank record, so the tool's own
++  `export --format csv` output imports cleanly (FR-006a).
++
++**Alternatives considered**:
++
++- *`csv.DictReader`*: rejected — it would hide both failures the spec cares about. A wrong header
++  silently becomes wrong key names, and a short or long row silently becomes `None` /
++  `restkey` values instead of an error (FR-006a, Principle II).
++- *Comparing the header as raw text (`line == "id,url,title,tags"`)*: rejected — contradicts the
++  clarification that `"id","url","title","tags"` must be accepted.
++- *`skipinitialspace` or any non-default dialect*: rejected — the writer side uses defaults, so
++  the reader must too, or the round trip of SC-001 is not a round trip.
++
++---
++
++## R-103: Parsing the JSON shape — structure validation
++
++**Decision**: `json.loads(text)`, catching `json.JSONDecodeError` → status 2. Then validate by
++hand, in this order: the top level is a `list`; each element is a `dict`; its key set contains
++`url`, `title`, `tags` and nothing outside `{"id", "url", "title", "tags"}`; `url` and `title`
++are `str`; `tags` is a `list` whose every element is a `str`.
++
++**Rationale**: FR-007 and FR-010 enumerate exactly these failures, and each needs a diagnostic
++naming what was wrong and what was expected (Principle II), which a bare `json.loads` cannot
++give. The `id`-accepted-and-ignored rule (FR-007) and the unrecognised-key-is-an-error rule
++(FR-010) are the two halves of one key-set comparison.
++
++`isinstance(value, bool)` deserves a note: in Python `True` is an `int`, not a `str`, so a JSON
++`true` in a `url` field is already rejected by the `str` check. No extra guard is needed.
++
++**Alternatives considered**:
++
++- *`dataclasses` + a generic validator, or `json.JSONDecoder(object_hook=…)`*: rejected — a
++  framework for two fixed shapes (Principle IV). Four explicit checks read better than a schema
++  engine and produce better messages.
++- *Accepting a single object as a one-element array*: rejected — FR-007 and the Edge Cases
++  require status 2 for a top level that is not an array.
++- *Defaulting a missing `title` or `tags` to empty*: rejected — Principle II forbids substituting
++  a default, and the spec's Assumptions call a gap in a specified shape a reportable mistake.
++
++---
++
++## R-104: Where tag normalisation happens for each shape
++
++**Decision**: Both shapes converge on the existing `store.normalise_tags`, which takes the
++comma-joined string form. CSV passes its fourth field through unchanged. JSON joins its list with
++`","` first: `normalise_tags(",".join(record["tags"]))`.
++
++**Rationale**: FR-003 requires labels to end up exactly as `add --tags` would store them, and the
++only way to *guarantee* that is to call the same function on the same kind of value. Joining the
++JSON list is lossless for every file the tool itself writes, because a stored tag can never
++contain a comma — `normalise_tags` splits on commas, so no comma survives into storage. For a
++hand-written file whose `tags` holds `["a,b"]`, joining yields the two labels `a` and `b`, which
++is precisely what `add --tags "a,b"` does; "added exactly as `add` would add it" is honoured
++rather than bent.
++
++**Alternatives considered**:
++
++- *Normalising the JSON list element-wise (strip, lower, drop empties, de-duplicate) in a second
++  function*: rejected — a second implementation of FR-010's five steps is a drift risk for no
++  behavioural gain on any file the export writes, and the two would disagree on an element
++  containing a comma, with no requirement to say which is right.
++- *Rejecting a `tags` element that contains a comma*: rejected — no requirement asks for it, and
++  it would be scope beyond the spec (Principle IV).
++
++---
++
++## R-105: Atomicity — validate the whole file before opening the store
++
++**Decision**: Order the import strictly as: **read and decode** the file → **parse** it →
++**validate every record**, including `store.check_url` for every address → **then**
++`store.open_store` → insert all records → commit once → print `imported N`. No store call of any
++kind happens until the file is known to be wholly good.
++
++**Rationale**: This single ordering satisfies four requirements at once, with no rollback
++machinery:
++
++- FR-011 (nothing added on failure): no insert has been issued.
++- FR-011 (no store file created on failure): `open_store` is what creates the file, and it has
++  not been called. This is the only way to get the behaviour, since `open_store` creates the
++  file as its first act.
++- FR-011 (the next identifier is unaffected): no `INSERT` ran, so SQLite's `AUTOINCREMENT`
++  counter never advanced.
++- FR-002a / FR-017 (a file problem is never reported as status 1): the file is fully judged
++  before the store can raise its own status-1 error, so the two error classes cannot be confused.
++
++The spec's Assumptions reach the same conclusion from the other direction ("the import file is
++read and validated before the store is opened, which is what makes 'creates no store file on
++failure' achievable"), so this is the specified design, not merely a convenient one.
++
++**Alternatives considered**:
++
++- *Insert inside a transaction and roll back on the first bad record*: rejected — it does not
++  satisfy "no store file is created", because opening the store creates the file before any
++  transaction begins. It is also more machinery for a weaker guarantee (Principle IV).
++- *Validate lazily and delete the store file if it turns out we created it*: rejected — deleting
++  a file on an error path is the kind of destructive recovery that goes wrong; and it is
++  unnecessary given the ordering above.
++
++---
++
++## R-106: One insert path shared by `add` and `import`
++
++**Decision**: Extract the body of the existing `store.add_bookmark` into an unexported
++`_insert_bookmark(connection, url, title, tags)` that inserts without committing. `add_bookmark`
++becomes `check_url` → `_insert_bookmark` → `commit` (identical behaviour to today).
++A new `store.add_bookmarks(connection, records)` checks every URL, calls `_insert_bookmark` for
++each record in file order, commits **once**, and returns the number inserted.
++
++**Rationale**: FR-003 ("added exactly as `add` would add it") is strongest when it is structural:
++one INSERT path means `add` and `import` cannot drift in how they store a title or a tag set.
++FR-005 (identifiers ascend in file order) falls out of inserting in order. The single commit is
++also what makes SC-005 comfortable — 1,000 separate commits mean 1,000 fsyncs, which on ordinary
++hardware is the one plausible way to miss a five-second budget, whereas one commit is a single
++flush.
++
++Checking *all* URLs before inserting *any* keeps R-105's guarantee intact even though
++`check_url` lives in the store module: the check needs no database.
++
++**Alternatives considered**:
++
++- *Have the import call the existing `add_bookmark` in a loop*: rejected on performance (a commit
++  per bookmark against SC-005) — though it is worth recording that it would be *correct*, since
++  all validation precedes the loop.
++- *Hand the import its own INSERT statements in `importer.py`*: rejected — duplicates the schema
++  knowledge and the tag-insert rule, and breaks the structural guarantee of FR-003.
++- *Wrapping the inserts in an explicit `BEGIN`/`ROLLBACK`*: rejected — nothing inside the loop
++  can fail for a reason the spec covers, and `sqlite3`'s implicit transaction already means an
++  uncaught fault commits nothing.
++
++---
++
++## R-107: Escaping the HTML page as a closed set of four substitutions
++
++**Decision**: Use `html.escape(value, quote=False)` for the title and the labels, and
++`html.escape(value, quote=False).replace('"', "&quot;")` for the `href` value.
++
++**Rationale**: FR-014 defines a *closed* set — `&`, `<`, `>` everywhere, plus `"` inside `href`
++only — and explicitly requires the apostrophe to stay literal and `&` to be substituted first.
++`html.escape`'s `quote=False` branch is exactly those three substitutions, in that order.
++`quote=True` is unusable here: it also rewrites `'` as `&#x27;`, which FR-014 and Acceptance
++Scenario 2.6 forbid. Hence the explicit `"` replacement for the one attribute, applied after the
++escape (which never introduces a `"`), so no escape is doubly escaped.
++
++**Verified** by reading `html.escape`'s source and running it:
++
++- `html.escape('a&<>"\'b', quote=False)` → `a&amp;&lt;&gt;"'b` — the double quote and the
++  apostrophe both literal, `&` done first (the source comments `# Must be done first!`).
++- `html.escape('a&<>"\'b')` → `a&amp;&lt;&gt;&quot;&#x27;b` — confirming why the default is
++  rejected.
++
++**Alternatives considered**:
++
++- *Hand-rolled `.replace()` chain*: rejected — `html.escape(quote=False)` is the same three
++  replacements already written, tested, and ordered correctly in the standard library.
++- *`xml.sax.saxutils.escape`*: rejected — equivalent for the three characters but a heavier
++  import from an XML package, and `quote`-style extras are specified via a dict rather than the
++  plain flag.
++- *A real HTML generator (`xml.etree`, templates)*: rejected — FR-012/FR-013 require specific
++  bytes, specific line breaks and exactly one trailing newline; a generator would have to be
++  fought to produce them (Principle IV).
++
++---
++
++## R-108: Emitting the page, and leaving CSV/JSON untouched
++
++**Decision**: Add `render_html(rows)` to `cli.py` beside `render_csv`/`render_json` and register
++it in the existing `RENDERERS` dict. Emit the five fixed opening lines, one `<li>` line per row,
++then the three fixed closing lines, each written with an explicit `\n`.
++
++**Rationale**: `handle_export` already dispatches through `RENDERERS[args.format]`, and the
++parser already derives its `choices` from `sorted(RENDERERS)`. Adding one key therefore delivers
++FR-012 *and* FR-001's sibling rule for export (an unsupported `--format` gets argparse's own
++diagnostic and status 2, Acceptance Scenario 2.9) with no new validation code, and — because
++nothing on the CSV or JSON path is touched — satisfies FR-015/SC-006 by construction rather than
++by inspection.
++
++`sorted(RENDERERS)` becomes `csv, html, json`; the help text and error messages pick that up
++automatically. Writing explicit `"\n"` (rather than relying on `print`) matches FR-013 and is
++unambiguous under the `newline=""` stdout reconfiguration `main` already performs; non-ASCII
++characters pass through literally because that same stdout is UTF-8 (FR-013, `001:FR-023a`).
++
++**Alternatives considered**:
++
++- *A separate `html.py` renderer module*: rejected — one function of a dozen lines next to its
++  two siblings; a module for it would be a package layer with no requirement behind it
++  (Principle IV, "prefer a flat module layout").
++- *A `--format html` branch written as an `if` in `handle_export`*: rejected — it would bypass
++  the `RENDERERS`/`choices` coupling that makes the invalid-format path free.
++
++---
++
++## R-109: Where the import code lives
++
++**Decision**: A new module `src/bookmarks/importer.py` holding the file reading, both parsers and
++the record validation. `cli.py` gains a thin `handle_import` and the `import` subparser; `store.py`
++gains only `add_bookmarks` (R-106). No other file changes.
++
++**Rationale**: The parsing logic is ~60 lines with two shapes and a dozen failure messages — the
++largest single piece of this feature, and the only one with no natural home in the existing two
++modules. It is neither command grammar (`cli.py`) nor storage (`store.py`); folding it into
++either would make that module about two things. The layout stays flat, as the constitution
++prefers: three modules in one package, no subpackages.
++
++The module is named `importer.py`, not `import.py`: `import` is a reserved word, so `import.py`
++could never be imported.
++
++Reusing `store.BookmarkError` for the file failures is deliberate — the status is data on the
++exception (`001` research R-008), so `cli.main`'s single `except` clause already renders a
++status-2 file diagnostic correctly with no new handler. The error type stays in `store.py` rather
++than moving, so no existing import or test changes.
++
++**Alternatives considered**:
++
++- *Put it all in `cli.py`*: rejected — pushes one module past 300 lines and mixes argument
++  grammar with file parsing.
++- *Put it in `store.py`*: rejected — the import file is explicitly *not* part of the collection
++  (spec Key Entities: "It is read, never written"), and `store.py` is the module that owns the
++  collection.
++- *A new exception type for file failures*: rejected — would require a second handler in `main`
++  for no behavioural difference (Principle IV).
++
++---
++
++## R-110: Testing approach for the new surface
++
++**Decision**: Two new test files, `tests/test_import.py` (FR-001 … FR-011) and
++`tests/test_html_export.py` (FR-012 … FR-014), plus additions to the existing performance test
++for SC-005. Every test name carries the requirement it covers, matching the existing convention
++(`test_fr018_…`). All CLI behaviour is exercised through the existing `run_cli` subprocess
++fixture; import files are written with `tmp_path`. **No existing test file is modified** (FR-015,
++SC-006, FR-020).
++
++**Rationale**: Constitution Principle III requires an explicit requirement-to-test mapping, and
++the repository already expresses it in test names. The exit statuses of FR-010 and FR-017 are
++process statuses, which only a subprocess can observe (`001` research R-009) — the `run_cli`
++fixture exists for exactly that. The two-file split mirrors the two user stories, so each story's
++"Independent Test" can be run alone.
++
++Byte-for-byte assertions are the right instrument for FR-013/FR-014/SC-004: the page is fully
++determined by the collection, so the test compares the whole string, not a parse of it. SC-004
++additionally asks that a *standard page reader* recover the values, which `html.parser`
++(standard library, test-side) supplies — a check that the escaping is correct, not merely stable.
++
++**Alternatives considered**:
++
++- *Adding the new cases to `tests/test_export.py`*: rejected — FR-020 and SC-006 require the
++  pre-existing tests to pass **unmodified**, and the cleanest way to be able to prove that is to
++  not touch the files at all.
++- *In-process calls to `cli.main` for speed*: rejected for the status assertions; `main` returns
++  a status rather than exiting, so it cannot evidence the process-level contract.
++- *A third test file for the round trip (User Story 3)*: rejected — the round trip is
++  import-driven and belongs with the import tests; a file per story would split fixtures for no
++  gain.
++
++---
++
++## Resolved unknowns summary
++
++| Unknown from Technical Context | Resolved by |
++| --- | --- |
++| How to discard a byte-order mark for both shapes | R-101 (`utf-8-sig`) |
++| How invalid UTF-8 becomes status 2, not a crash | R-101 |
++| How "blank line = zero fields" is detected | R-102 (`csv.reader` yields `[]`) |
++| How a quoted header is accepted but a wrong one rejected | R-102 (compare parsed record) |
++| Which JSON structural checks are needed, and their order | R-103 |
++| How JSON `tags` reaches the existing normaliser | R-104 (comma join) |
++| How "no store file on failure" is achieved | R-105 (validate before `open_store`) |
++| How 1,000 inserts stay inside the time budget | R-106 (single commit) |
++| How FR-014's closed substitution set maps to the stdlib | R-107 (`html.escape(quote=False)`) |
++| How CSV/JSON output is guaranteed unchanged | R-108 (new dict key only) |
++| Where the new code lives without growing the layout | R-109 (`importer.py`) |
++| How each requirement gets an identified test | R-110 |

@@ -42,7 +42,7 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R017 | 2026-11-16 | T-PASTE-01 | sdd_secure | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $14.94 |
 | R017C | 2026-11-16 | T-PASTE-01-CR | sdd_secure | OK | 0 | no | ok | change request on R017; operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $16.83 |
 | R018 | 2026-11-16 | T-BOOKMARKS-01 | sdd_clarify | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); clarify resumed after the usage limit (same session); Claude Code cost $18.30 |
-| R018C | | T-BOOKMARKS-01-CR | sdd_clarify | | | | | change request on R018 |
+| R018C | 2026-11-16 | T-BOOKMARKS-01-CR | sdd_clarify | OK | 0 | no | ok | change request on R018; operated by Claude; Claude Code 2.1.317 (pinned); tasks resumed after the usage limit; Claude Code cost $20.37 |
 | R030 | | T-QNOTES-01 | sdd | | | | |  |
 | R031 | | T-QIMPORT-01 | unstructured | | | | |  |
 | R034 | | T-ACCOUNTS-01 | sdd | | | | |  |
