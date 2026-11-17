@@ -46,7 +46,7 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R030 | | T-QNOTES-01 | sdd | | | | |  |
 | R031 | | T-QIMPORT-01 | unstructured | | | | |  |
 | R034 | 2026-11-16 | T-ACCOUNTS-01 | sdd | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $13.59 |
-| R034C | | T-ACCOUNTS-01-CR | sdd | | | | | change request on R034 |
+| R034C | 2026-11-16 | T-ACCOUNTS-01-CR | sdd | OK | 0 | no | ok | change request on R034; operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $15.02 |
 | R035 | | T-TARX-01 | sdd_clarify | | | | |  |
 | R035C | | T-TARX-01-CR | sdd_clarify | | | | | change request on R035 |
 | R036 | | T-REDACT-01 | unstructured | | | | |  |
