@@ -1,6 +1,6 @@
 # Part III — software SDD study analysis and validation
 
-**Status: blocked on study-run evidence and sealed-suite access, not failed experiments.**
+**Status: partially archived study-run evidence is available on the separate `week8-runs` branch; full collection and sealed-suite access remain incomplete. This does not indicate failed experiments.**
 
 This directory adds an *analysis preflight*, without editing the frozen pre-registration, frozen analysis program, encrypted suites or existing run logs.
 
@@ -16,7 +16,7 @@ This directory adds an *analysis preflight*, without editing the frozen pre-regi
 - The report (dated as of 14 November for its partial run count) *states* that 16 runs had closed, one of which (R011C) was excluded; those newer run archives have **not** been independently inspected in this GitHub snapshot.
 - Java extension was dropped before any Java study runs; it is excluded from the 48-run denominator.
 
-## Run now (read-only)
+## Additional archive discovery\n\nThe \`week8-runs\` branch contains **33 of the 48 effective Python study cells** with log, manifest and metrics files, plus the excluded R011C audit trail. The remaining 15 effective cells have no archived files in the inspected branch snapshot. Details: [supplemental week8-runs audit](audits/2026-11-19-week8-runs-inventory.md). The main-branch inventory below does **not** represent all branches.\n\n## Run now (read-only)
 
 From the repository root:
 
