@@ -18,3 +18,20 @@ The generated audit results, original file SHA-256 hashes and the exact checked-
 - **Timing results are provisional** until review of the protocol's idle-gap correction, phase boundaries and explicit interruption notes.
 - **R011C is excluded** and the effective replacement R019C is used in the presence audit. The original R011C audit trail remains intact.
 - The frozen `tools/study/analyze.py` is unchanged. The new `prepare_analysis_view.py` explicitly stages corrected data and replacement naming in a derivative directory only when all inputs are present and hashed.
+
+## Frozen sddlog integrity verification — subsequent CI run
+
+[Part III evidence-only audit, run 44606610182](https://github.com/Varshil25/spec-driven-development-study/actions/runs/44606610182), job `inspect`, completed **successfully** on 2026-11-19. The new read-only `tools/study/verify_archived_runs.py` imported the **unchanged `tools/sddlog/sddlog.py` `verify_run`** function and checked all available effective run manifests and events.
+
+| Check | CI output |
+|---|---:|
+| Effective scheduled cells | 48 |
+| Present runs scanned | 33 |
+| Runs passing all six log-integrity invariants | **33** |
+| Runs failing integrity | **0** |
+| Warning runs | **0** |
+| Not archived | 15 |
+
+The excluded `R011C` separately produced the **three expected** problems: duplicated sequence at position 234 (saw 233), mismatched clarify/plan phase boundary, and a phase end without a start at event 265. Its report also contains two timing warnings. `R011C` remains excluded, while replacement `R019C` is included in the 33 passes.
+
+This evidence validates the **log-format and phase-integrity checks only**. Held-out scoring, confirmed security defects, traceability coding, costs and RQ1–RQ4 inferential results remain pending.
