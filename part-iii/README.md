@@ -40,7 +40,7 @@ A nonzero `--strict` status means **evidence missing**, not a poor research outc
 
 ## Verified CI execution and derived analysis inputs
 
-GitHub Actions [read-only audit](https://github.com/Varshil25/spec-driven-development-study/actions/runs/44605961542) completed successfully on 19 November 2026: **12 synthetic-fixture utility tests passed**; **33 of 48** effective archived study cells found; **16 archived runs** had at least one hook-observed idle gap longer than 600 seconds; no arithmetic inconsistency was flagged by the correction script. Full results and limitations are documented in [CI execution evidence](audits/2026-11-19-ci-execution-evidence.md). A [preliminary per-run CSV](audits/2026-11-19-preliminary-idle-gap-candidates.csv) is available for review, **not** as final RQ3 data.
+GitHub Actions [read-only audit](https://github.com/Varshil25/spec-driven-development-study/actions/runs/44605961542) completed successfully on 19 November 2026: **12 synthetic-fixture utility tests passed**; **33 of 48** effective archived study cells found; **16 archived runs** had at least one hook-observed idle gap longer than 600 seconds; no arithmetic inconsistency was flagged by the correction script. A subsequent CI run also verified **33/33 available effective run logs against all six frozen sddlog integrity checks**; the excluded R011C reproduced its three known errors. Full results and limitations are documented in [CI execution evidence](audits/2026-11-19-ci-execution-evidence.md). A [preliminary per-run CSV](audits/2026-11-19-preliminary-idle-gap-candidates.csv) is available for review, **not** as final RQ3 data.
 
 Run the actual timing audit from a local checkout containing the `week8-runs` evidence:
 
