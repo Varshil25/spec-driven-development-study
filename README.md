@@ -33,14 +33,14 @@ its collected data. It contains:
 
 ## Status
 
-*Updated 16 November 2026.*
+*Updated 19 November 2026.*
 
 | Part | Done | Total | Where |
 | --- | --- | --- | --- |
 | Python mechanics runs (R002, R003) | 2 | 2 | [weeks/week-07](weeks/week-07/) |
 | Python study runs, round 1 (R004–R008 + change requests) | 10 | 10 | [weeks/week-08](weeks/week-08/) |
 | Python study runs, round 2 (R009–R013 + change requests) | 10 | 10 | [weeks/week-08](weeks/week-08/) |
-| Python study runs, rounds 3–4 (R014–R018, R034–R038 + change requests) | 12 | 20 | [weeks/week-09](weeks/week-09/), [weeks/week-10](weeks/week-10/) |
+| Python study runs, rounds 3–4 (R014–R018, R034–R038 + change requests) | 14 | 20 | [weeks/week-09](weeks/week-09/), [weeks/week-10](weeks/week-10/) |
 | Replication (R021–R023, R039 + change requests) | 0 | 8 | [weeks/week-10](weeks/week-10/) |
 | Java runs (R024–R025 mechanics, R026–R031 study) | — | — | dropped on 14 Nov for time; not run ([deviations log](docs/PREREGISTRATION.md#12-deviations-log)) |
 
