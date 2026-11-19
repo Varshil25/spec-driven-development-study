@@ -46,7 +46,7 @@ python3 "$KIT/tools/study/run_remaining_part_iii.py" \
   --kit "$KIT" --execute --all
 ```
 
-This wrapper delegates to **unchanged** `tools/study/run_build.py`, never supplies synthetic answers, and never unseals tests. It verifies the completed run with the frozen `sddlog` verifier before copying logs and refreshing the base run's Git bundle. Before starting it also checks the required tool versions, clean worktree, original completed build, and absence of an existing attempt. It is not a service or background runner: the original operator must remain present to classify questions and handle any interruption.
+This wrapper delegates to **unchanged** `tools/study/run_build.py`, never supplies synthetic answers, and never unseals tests. **With `--all`, it stops after each verified archive until the operator reviews the run log, commits/pushes the archived evidence, and types `NEXT`. Any integrity WARN or FAIL stops automatic progression.** It verifies the completed run with the frozen `sddlog` verifier before copying logs and refreshing the base run's Git bundle. Before starting it also checks the required tool versions, clean worktree, original completed build, and absence of an existing attempt. It is not a service or background runner: the original operator must remain present to classify questions and handle any interruption.
 
 **Important:** The wrapper will refuse execution from a checkout that does not already contain the 35 valid archives through R036, or whose `logs/runs` folder is not the latest. The handoff path must be merged into that existing study checkout; do not replace or reset the study checkout to import it. The wrapper requires the same `--clean-env` conventions used for the preceding runs.
 
