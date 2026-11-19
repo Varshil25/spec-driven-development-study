@@ -122,8 +122,16 @@ def verify_after_run(kit, target, cell):
     manifest=target/"logs/runs"/cell["run_id"]/"manifest.json"
     if not manifest.is_file() or json.loads(manifest.read_text()).get("status")!="completed":
         raise RuntimeError("Runner did not close run as completed; do not archive or advance")
-    cmd([sys.executable,str(target/"tools/sddlog/sddlog.py"),
-         "--repo",str(target),"verify","--run-id",cell["run_id"]],cwd=target)
+    checked=subprocess.run([sys.executable,str(target/"tools/sddlog/sddlog.py"),
+                            "--repo",str(target),"verify","--run-id",cell["run_id"]],
+                           cwd=target,capture_output=True,text=True)
+    print(checked.stdout, end="", flush=True)
+    if checked.stderr:
+        print(checked.stderr, file=sys.stderr)
+    if checked.returncode!=0:
+        raise RuntimeError("Frozen integrity verifier FAILED; preserve run and follow RUNBOOK exclusions/rerun rules")
+    if any(line.startswith("WARN") for line in checked.stdout.splitlines()):
+        raise RuntimeError("Frozen integrity verifier reported WARN; operator must document a deviation before archiving")
     # The frozen run_build.py records the run's closing commit.
     history=subprocess.run(["git","-C",str(target),"log","--format=%s","-n","40"],
                            capture_output=True,text=True,check=True)
@@ -206,6 +214,12 @@ def main(argv=None):
                      args.clean_env.resolve(),status["next"])
             status=overview(kit/"schedule/schedule.csv",kit)
             if not args.all:break
+            if status["next"]:
+                print("The archived run requires an actual run-log entry and repository commit/push before advancing.",flush=True)
+                choice=input("After reviewing run-log/deviations and saving the archive, type NEXT (or STOP): ")
+                if choice.strip()!="NEXT":
+                    print("Stopped by operator; no additional run started.")
+                    return 0
         print("Runs remaining:",status["remaining"],"(the held-out suites remain sealed).")
         return 0
     except (RuntimeError,OSError,subprocess.CalledProcessError,ValueError) as exc:
