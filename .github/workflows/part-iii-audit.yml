@@ -1,0 +1,63 @@
+name: Part III evidence-only audit
+
+on:
+  pull_request:
+    paths:
+      - "tools/study/**"
+      - "part-iii/**"
+      - ".github/workflows/part-iii-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out analysis branch
+        uses: actions/checkout@v4
+      - name: Check out archived study evidence (read-only)
+        uses: actions/checkout@v4
+        with:
+          ref: week8-runs
+          path: evidence-week8
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Test new evidence utilities
+        run: |
+          python -m unittest discover -s tools/study/tests -p 'test_part_iii_preflight.py' -v
+          python -m unittest discover -s tools/study/tests -p 'test_recompute_idle_time.py' -v
+          python -m unittest discover -s tools/study/tests -p 'test_prepare_analysis_view.py' -v
+      - name: Produce evidence availability audit
+        run: |
+          mkdir -p part-iii/audits/generated
+          python tools/study/preflight_part_iii.py \
+            --runs-root evidence-week8/logs \
+            --scores evidence-week8/scores \
+            --coding evidence-week8/coding/runs \
+            --json-out part-iii/audits/generated/preflight.json
+      - name: Recompute idle-gap candidates
+        run: |
+          python tools/study/recompute_idle_time.py \
+            --runs-root evidence-week8/logs/runs \
+            --csv-out part-iii/audits/generated/idle-gap-candidates.csv
+      - name: Verify available logs with frozen sddlog invariants
+        run: |
+          python tools/study/verify_archived_runs.py \
+            --archive-repo evidence-week8 \
+            --json-out part-iii/audits/generated/sddlog-integrity.json
+      - name: Record archived evidence commit
+        run: |
+          git -C evidence-week8 rev-parse HEAD > part-iii/audits/generated/source-revision.txt
+      - name: Upload audit artifacts (no decrypted sources)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: part-iii-read-only-audit
+          path: part-iii/audits/generated/
+          if-no-files-found: warn
+          retention-days: 30
