@@ -37,6 +37,37 @@ python3 tools/study/preflight_part_iii.py \
 
 A nonzero `--strict` status means **evidence missing**, not a poor research outcome. A status of `files_present_unverified_hashes` means required file *paths* exist; it is **not** a passing validation verdict.
 
+
+## Verified CI execution and derived analysis inputs
+
+GitHub Actions [read-only audit](https://github.com/Varshil25/spec-driven-development-study/actions/runs/44605961542) completed successfully on 19 November 2026: **12 synthetic-fixture utility tests passed**; **33 of 48** effective archived study cells found; **16 archived runs** had at least one hook-observed idle gap longer than 600 seconds; no arithmetic inconsistency was flagged by the correction script. Full results and limitations are documented in [CI execution evidence](audits/2026-11-19-ci-execution-evidence.md). A [preliminary per-run CSV](audits/2026-11-19-preliminary-idle-gap-candidates.csv) is available for review, **not** as final RQ3 data.
+
+Run the actual timing audit from a local checkout containing the `week8-runs` evidence:
+
+```bash
+python3 tools/study/recompute_idle_time.py \
+  --runs-root /tmp/sdd-week8-runs/logs/runs \
+  --csv-out /tmp/part-iii-idle-verified.csv
+```
+
+Once all 48 runs, 72 scores and human coding sheets are complete, build a separate audit-traceable input directory for the **unchanged frozen analyzer**:
+
+```bash
+python3 tools/study/prepare_analysis_view.py \
+  --runs-root /tmp/sdd-week8-runs/logs/runs \
+  --scores /path/to/scores \
+  --coding /path/to/coding/runs \
+  --time-csv /tmp/part-iii-idle-verified.csv \
+  --out /tmp/part-iii-analysis-view
+python3 tools/study/analyze.py \
+  --scores /tmp/part-iii-analysis-view/scores \
+  --runs /tmp/part-iii-analysis-view/runs \
+  --coding /tmp/part-iii-analysis-view/coding \
+  --out /tmp/part-iii-results
+```
+
+The preparation script refuses incomplete or stale data, saves provenance hashes, maps excluded `R011C` to replacement `R019C` within derived filenames only, and never rewrites source evidence. **Review the correction against the original interruption notes and preregistration before using it for inferential analysis.**
+
 ## Gate sequence
 
 1. **Complete data collection first.** Archive R004–R039C including run-specific logs and final code bundles; preserve the excluded R011C and its replacement R019C. Check the run log and verify each run's event-log integrity.
