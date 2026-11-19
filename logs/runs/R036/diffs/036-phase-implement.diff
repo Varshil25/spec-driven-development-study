@@ -1,0 +1,718 @@
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..de7809c
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,88 @@
++# logredact
++
++Strip personal data out of log files before sharing them.
++
++```
++python -m logredact [--count] [FILE ...]
++```
++
++Each `FILE` is read in the order given, or standard input when no file is
++given (a `FILE` of `-` also means standard input). Every line is written to
++standard output with three kinds of data replaced; everything else on the
++line, including lines with nothing to redact, is passed through byte for
++byte.
++
++| Data | Replacement | Rule |
++| --- | --- | --- |
++| E-mail address | `[EMAIL]` | `jane.doe+test@mail.example.com` → `[EMAIL]` |
++| IPv4 address | `[IP]` | four dot-separated octets, each 0-255 |
++| Payment card number | `[CARD]` | 13-19 digits, optionally in groups separated by single spaces or hyphens, passing the Luhn checksum |
++
++```console
++$ printf 'user jane@example.com from 10.0.0.7\n' | python -m logredact
++user [EMAIL] from [IP]
++
++$ printf 'paid with 4111 1111 1111 1111, ref 1234567890123\n' | python -m logredact
++paid with [CARD], ref 1234567890123
++
++$ printf 'a@b.io 1.2.3.4\n' | python -m logredact --count
++[EMAIL] [IP]
++emails=1 ips=1 cards=0          # on standard error
++```
++
++`--count` prints `emails=N ips=N cards=N` to standard error once all output
++has been written.
++
++Requires Python 3.11 or newer and nothing outside the standard library.
++`src/` must be on `PYTHONPATH`:
++
++```console
++$ PYTHONPATH=src python -m logredact app.log > app.redacted.log
++```
++
++## Exit status
++
++* `0` — all input was read and redacted.
++* `2` — a `FILE` could not be read. The name and the reason are reported on
++  standard error. Output already written for earlier files is flushed and
++  kept, the remaining files are not read, and no `--count` summary is
++  printed.
++
++## What is deliberately left alone
++
++* `999.1.1.1`, `256.1.1.1`, `010.0.0.1` — not IPv4 addresses. A longer
++  dotted run such as `1.2.3.4.5` is left whole rather than having a slice of
++  it redacted.
++* `1234567890123` — 13 digits but fails Luhn. A number next to it still
++  gets redacted: `ref 1234567890123 card 4111111111111111` →
++  `ref 1234567890123 card [CARD]`.
++* Digit runs shorter than 13 or longer than 19 digits, and digits glued to
++  letters (`deadbeef4111111111111111`).
++* `user=jane@example.com` keeps its `user=` prefix; only the address goes.
++
++A card number may be written in groups (`4111 1111 1111 1111`,
++`4111-1111-1111-1111`), but a doubled separator ends the number, so
++`4111  1111 1111 1111` is not treated as one card.
++
++## Layout
++
++```
++src/logredact/__init__.py    redact_line(), Counts, luhn_ok()
++src/logredact/redact.py      patterns, Luhn check, card scanner
++src/logredact/cli.py         argument parsing and streaming I/O
++src/logredact/__main__.py    python -m logredact
++tests/test_logredact.py      unit and end-to-end tests
++```
++
++Replacements are applied e-mail, then IPv4, then card: the earlier
++placeholders contain no digits, so a later pass cannot match inside them.
++Lines are processed one at a time, so arbitrarily large files stream without
++being held in memory. Input is decoded as UTF-8 with `surrogateescape`, and
++line endings are preserved as-is, so undecodable bytes and CRLF files
++survive the round trip.
++
++## Tests
++
++```console
++$ python -m unittest discover -s tests
++```
+diff --git a/src/logredact/__init__.py b/src/logredact/__init__.py
+new file mode 100644
+index 0000000..9c7e0e3
+--- /dev/null
++++ b/src/logredact/__init__.py
+@@ -0,0 +1,14 @@
++"""Redact personal data from log files.
++
++The package exposes the redaction primitives used by the command-line
++interface (``python -m logredact``):
++
++* :func:`redact_line` -- redact a single string, returning the counts.
++* :class:`Counts` -- the per-category tally of replacements.
++* :func:`luhn_ok` -- the Luhn checksum used to validate card numbers.
++"""
++
++from .redact import CARD, EMAIL, IP, Counts, luhn_ok, redact_line
++
++__all__ = ["CARD", "EMAIL", "IP", "Counts", "luhn_ok", "redact_line"]
++__version__ = "1.0.0"
+diff --git a/src/logredact/__main__.py b/src/logredact/__main__.py
+new file mode 100644
+index 0000000..3a0119d
+--- /dev/null
++++ b/src/logredact/__main__.py
+@@ -0,0 +1,10 @@
++"""Entry point for ``python -m logredact``."""
++
++from __future__ import annotations
++
++import sys
++
++from .cli import main
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/logredact/cli.py b/src/logredact/cli.py
+new file mode 100644
+index 0000000..3804c1f
+--- /dev/null
++++ b/src/logredact/cli.py
+@@ -0,0 +1,113 @@
++"""Command-line interface: ``python -m logredact [--count] [FILE ...]``."""
++
++from __future__ import annotations
++
++import argparse
++import io
++import os
++import sys
++from typing import IO, Iterable, Sequence
++
++from .redact import Counts, redact_line
++
++PROG = "python -m logredact"
++EXIT_OK = 0
++EXIT_UNREADABLE = 2
++
++# Log files are not always clean UTF-8, and this tool must not corrupt the
++# lines it passes through.  Undecodable bytes are kept as surrogates on input
++# and written back out unchanged; newline="" keeps CRLF endings intact.
++_ENCODING = "utf-8"
++_ERRORS = "surrogateescape"
++
++
++def _build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        prog=PROG,
++        description=(
++            "Copy log lines to standard output with e-mail addresses, IPv4 "
++            "addresses and payment card numbers replaced by [EMAIL], [IP] "
++            "and [CARD]."
++        ),
++    )
++    parser.add_argument(
++        "--count",
++        action="store_true",
++        help=(
++            "after all output has been written, print "
++            "'emails=N ips=N cards=N' to standard error"
++        ),
++    )
++    parser.add_argument(
++        "files",
++        metavar="FILE",
++        nargs="*",
++        help=(
++            "input files, read in order; standard input when none is given "
++            "or for a FILE of '-'"
++        ),
++    )
++    return parser
++
++
++def _as_byte_safe(stream: IO[str]) -> IO[str]:
++    """Make a standard stream byte-transparent, if it supports it."""
++    try:
++        stream.reconfigure(  # type: ignore[union-attr]
++            encoding=_ENCODING, errors=_ERRORS, newline=""
++        )
++    except (AttributeError, io.UnsupportedOperation, ValueError):
++        pass  # e.g. a StringIO in tests: leave it as it is
++    return stream
++
++
++def _redact_stream(lines: Iterable[str], out: IO[str], totals: Counts) -> None:
++    for line in lines:
++        redacted, counts = redact_line(line)
++        totals.add(counts)
++        out.write(redacted)
++
++
++def _discard_stdout() -> None:
++    """Point stdout at /dev/null after a broken pipe, so exit stays quiet."""
++    try:
++        devnull = os.open(os.devnull, os.O_WRONLY)
++        os.dup2(devnull, sys.stdout.fileno())
++    except (OSError, ValueError, AttributeError):
++        pass
++
++
++def main(argv: Sequence[str] | None = None) -> int:
++    args = _build_parser().parse_args(argv)
++
++    out = _as_byte_safe(sys.stdout)
++    totals = Counts()
++
++    try:
++        if not args.files:
++            _redact_stream(_as_byte_safe(sys.stdin), out, totals)
++        else:
++            for path in args.files:
++                try:
++                    if path == "-":
++                        _redact_stream(_as_byte_safe(sys.stdin), out, totals)
++                        continue
++                    with open(
++                        path, encoding=_ENCODING, errors=_ERRORS, newline=""
++                    ) as handle:
++                        _redact_stream(handle, out, totals)
++                except OSError as exc:
++                    out.flush()
++                    reason = exc.strerror or str(exc)
++                    print(f"{PROG}: cannot read {path}: {reason}",
++                          file=sys.stderr)
++                    return EXIT_UNREADABLE
++        out.flush()
++    except BrokenPipeError:
++        # The reader went away (e.g. `| head`); stop without a traceback.
++        _discard_stdout()
++        return EXIT_OK
++
++    if args.count:
++        print(totals.summary(), file=sys.stderr)
++    return EXIT_OK
+diff --git a/src/logredact/redact.py b/src/logredact/redact.py
+new file mode 100644
+index 0000000..ee56113
+--- /dev/null
++++ b/src/logredact/redact.py
+@@ -0,0 +1,199 @@
++"""Pattern matching and replacement rules for :mod:`logredact`.
++
++Three kinds of personal data are recognised, and they are replaced in this
++order: e-mail addresses, IPv4 addresses, then payment card numbers.  The
++order matters only in that the placeholders inserted by an earlier step
++(``[EMAIL]``, ``[IP]``) contain no digits and so cannot be re-matched by a
++later one.
++"""
++
++from __future__ import annotations
++
++import re
++from dataclasses import dataclass
++
++EMAIL = "[EMAIL]"
++IP = "[IP]"
++CARD = "[CARD]"
++
++# --------------------------------------------------------------------------
++# e-mail addresses
++# --------------------------------------------------------------------------
++# The local part is restricted to the characters that occur in practice
++# (letters, digits, ``.``, ``_``, ``%``, ``+``, ``-``) so that a log line
++# such as ``user=jane@example.com`` keeps its ``user=`` prefix.  Dots must
++# separate non-empty runs, which keeps a leading or trailing dot outside the
++# match.  The domain is one or more labels followed by an alphabetic TLD.
++_EMAIL_RE = re.compile(
++    r"""
++    [A-Za-z0-9_%+\-]+ (?: \. [A-Za-z0-9_%+\-]+ )*     # local part
++    @
++    (?: [A-Za-z0-9] (?: [A-Za-z0-9\-]* [A-Za-z0-9] )? \. )+   # domain labels
++    [A-Za-z]{2,}                                      # top-level domain
++    """,
++    re.VERBOSE,
++)
++
++# --------------------------------------------------------------------------
++# IPv4 addresses
++# --------------------------------------------------------------------------
++# Each octet is 0-255 with no leading zeros.  The surrounding assertions keep
++# a dotted run longer than four octets from matching one of its own slices:
++# ``999.1.1.1`` and ``1.2.3.4.5`` are left alone, while a sentence-final
++# ``10.0.0.7.`` still matches.
++_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])"
++_IP_RE = re.compile(
++    rf"(?<![0-9.])(?:{_OCTET}\.){{3}}{_OCTET}(?!\.?[0-9])",
++)
++
++# --------------------------------------------------------------------------
++# payment card numbers
++# --------------------------------------------------------------------------
++_MIN_CARD_DIGITS = 13
++_MAX_CARD_DIGITS = 19
++_WORD_RE = re.compile(r"\w")
++# A chunk is a maximal run of digit groups joined by single spaces or single
++# hyphens; a lone separator (or a doubled one) ends the chunk.
++_CHUNK_RE = re.compile(r"[0-9](?:[ \-]?[0-9])*")
++_GROUP_RE = re.compile(r"[0-9]+")
++
++
++@dataclass
++class Counts:
++    """How many replacements of each kind were made."""
++
++    emails: int = 0
++    ips: int = 0
++    cards: int = 0
++
++    def add(self, other: "Counts") -> None:
++        self.emails += other.emails
++        self.ips += other.ips
++        self.cards += other.cards
++
++    def summary(self) -> str:
++        """Render the ``--count`` summary line."""
++        return f"emails={self.emails} ips={self.ips} cards={self.cards}"
++
++
++def luhn_ok(digits: str) -> bool:
++    """Return True if ``digits`` satisfies the Luhn checksum."""
++    if not digits:
++        return False
++    total = 0
++    for index, char in enumerate(reversed(digits)):
++        value = ord(char) - 48
++        if index % 2 == 1:
++            value *= 2
++            if value > 9:
++                value -= 9
++        total += value
++    return total % 10 == 0
++
++
++def _is_word(char: str) -> bool:
++    return _WORD_RE.match(char) is not None
++
++
++def _chunk_spans(text: str, chunk: str, offset: int) -> list[tuple[int, int]]:
++    """Find the card spans inside one chunk, as offsets into ``text``.
++
++    A candidate is a run of whole digit groups totalling 13 to 19 digits.  The
++    longest candidate starting at a given group wins, so a fully grouped
++    number such as ``4111 1111 1111 1111`` is matched as a single card.  A
++    candidate that fails the Luhn checksum is rejected and shorter candidates
++    -- and then later starting groups -- are tried instead, so a valid card
++    sitting next to an unrelated digit run is still found.
++    """
++    groups = _GROUP_RE.findall(chunk)
++    sizes = [len(group) for group in groups]
++    # Groups are joined by exactly one separator, so offsets follow from the
++    # sizes alone.
++    starts: list[int] = []
++    position = 0
++    for size in sizes:
++        starts.append(position)
++        position += size + 1
++    last = len(groups) - 1
++
++    # A chunk touching a letter, digit or underscore is not a card on that
++    # side; digits cannot touch it, as chunks are maximal.
++    left_free = offset == 0 or not _is_word(text[offset - 1])
++    end_of_chunk = offset + len(chunk)
++    right_free = (
++        end_of_chunk >= len(text) or not _is_word(text[end_of_chunk])
++    )
++
++    spans: list[tuple[int, int]] = []
++    first = 0
++    while first <= last:
++        if first == 0 and not left_free:
++            first += 1
++            continue
++
++        # Candidate end groups, shortest first, capped at 19 digits.
++        candidates: list[tuple[int, int]] = []
++        total = 0
++        for index in range(first, last + 1):
++            total += sizes[index]
++            if total > _MAX_CARD_DIGITS:
++                break
++            candidates.append((index, total))
++
++        match_end = None
++        for index, total in reversed(candidates):  # longest first
++            if total < _MIN_CARD_DIGITS:
++                break
++            if index == last and not right_free:
++                continue
++            if luhn_ok("".join(groups[first : index + 1])):
++                match_end = index
++                break
++
++        if match_end is None:
++            first += 1
++        else:
++            spans.append(
++                (
++                    offset + starts[first],
++                    offset + starts[match_end] + sizes[match_end],
++                )
++            )
++            first = match_end + 1
++    return spans
++
++
++def _find_card_spans(text: str) -> list[tuple[int, int]]:
++    """Locate the spans of every card number in ``text``."""
++    spans: list[tuple[int, int]] = []
++    for match in _CHUNK_RE.finditer(text):
++        chunk = match.group()
++        if len(chunk) < _MIN_CARD_DIGITS:
++            continue  # too short to hold 13 digits, separators included
++        spans.extend(_chunk_spans(text, chunk, match.start()))
++    return spans
++
++
++def _redact_cards(text: str) -> tuple[str, int]:
++    spans = _find_card_spans(text)
++    if not spans:
++        return text, 0
++    pieces: list[str] = []
++    previous = 0
++    for start, end in spans:
++        pieces.append(text[previous:start])
++        pieces.append(CARD)
++        previous = end
++    pieces.append(text[previous:])
++    return "".join(pieces), len(spans)
++
++
++def redact_line(text: str) -> tuple[str, Counts]:
++    """Redact ``text`` and report how many replacements were made.
++
++    Text with nothing to redact is returned unchanged.
++    """
++    text, emails = _EMAIL_RE.subn(EMAIL, text)
++    text, ips = _IP_RE.subn(IP, text)
++    text, cards = _redact_cards(text)
++    return text, Counts(emails=emails, ips=ips, cards=cards)
+diff --git a/tests/test_logredact.py b/tests/test_logredact.py
+new file mode 100644
+index 0000000..9fa2a52
+--- /dev/null
++++ b/tests/test_logredact.py
+@@ -0,0 +1,258 @@
++"""Tests for the logredact package and its command-line interface."""
++
++from __future__ import annotations
++
++import os
++import subprocess
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++REPO_ROOT = Path(__file__).resolve().parent.parent
++SRC = REPO_ROOT / "src"
++sys.path.insert(0, str(SRC))
++
++from logredact import luhn_ok, redact_line  # noqa: E402
++
++
++def redact(text: str) -> str:
++    return redact_line(text)[0]
++
++
++def counts(text: str) -> tuple[int, int, int]:
++    tally = redact_line(text)[1]
++    return tally.emails, tally.ips, tally.cards
++
++
++def run_cli(*args: str, stdin: bytes = b"") -> subprocess.CompletedProcess:
++    env = dict(os.environ, PYTHONPATH=str(SRC))
++    return subprocess.run(
++        [sys.executable, "-m", "logredact", *args],
++        input=stdin,
++        capture_output=True,
++        env=env,
++        cwd=REPO_ROOT,
++    )
++
++
++class EmailTests(unittest.TestCase):
++    def test_simple_address(self):
++        self.assertEqual(redact("user jane@example.com here"),
++                         "user [EMAIL] here")
++
++    def test_dots_plus_and_subdomains(self):
++        self.assertEqual(redact("jane.doe+test@mail.example.com"), "[EMAIL]")
++
++    def test_short_tld(self):
++        self.assertEqual(redact("a@b.io"), "[EMAIL]")
++
++    def test_surrounding_punctuation_is_kept(self):
++        self.assertEqual(redact("<jane@example.com>, ok"), "<[EMAIL]>, ok")
++        self.assertEqual(redact("mail jane@example.com."), "mail [EMAIL].")
++
++    def test_key_value_prefix_is_kept(self):
++        self.assertEqual(redact("user=jane@example.com"), "user=[EMAIL]")
++
++    def test_non_addresses_are_untouched(self):
++        for text in ("@example.com", "jane@", "jane@localhost", "a @ b.io",
++                     "100@200", "not.an.email"):
++            with self.subTest(text=text):
++                self.assertEqual(redact(text), text)
++
++    def test_several_addresses_on_one_line(self):
++        self.assertEqual(redact("a@b.io, c@d.org"), "[EMAIL], [EMAIL]")
++        self.assertEqual(counts("a@b.io, c@d.org"), (2, 0, 0))
++
++
++class IpTests(unittest.TestCase):
++    def test_private_and_public_addresses(self):
++        self.assertEqual(redact("from 10.0.0.7"), "from [IP]")
++        self.assertEqual(redact("192.168.0.10"), "[IP]")
++        self.assertEqual(redact("255.255.255.255"), "[IP]")
++        self.assertEqual(redact("0.0.0.0"), "[IP]")
++
++    def test_out_of_range_octets_are_untouched(self):
++        for text in ("999.1.1.1", "256.1.1.1", "1.1.1.256", "300.300.300.300"):
++            with self.subTest(text=text):
++                self.assertEqual(redact(text), text)
++
++    def test_too_few_or_too_many_octets(self):
++        for text in ("1.2.3", "1.2.3.4.5", "10.0.0.7.8"):
++            with self.subTest(text=text):
++                self.assertEqual(redact(text), text)
++
++    def test_leading_zero_octet_is_untouched(self):
++        self.assertEqual(redact("010.0.0.1"), "010.0.0.1")
++
++    def test_adjacent_punctuation(self):
++        self.assertEqual(redact("ip=1.2.3.4, port 80"), "ip=[IP], port 80")
++        self.assertEqual(redact("(10.0.0.7)"), "([IP])")
++        self.assertEqual(redact("host 10.0.0.7."), "host [IP].")
++        self.assertEqual(redact("10.0.0.7:8080"), "[IP]:8080")
++
++    def test_several_addresses_on_one_line(self):
++        self.assertEqual(redact("1.2.3.4 -> 5.6.7.8"), "[IP] -> [IP]")
++        self.assertEqual(counts("1.2.3.4 -> 5.6.7.8"), (0, 2, 0))
++
++
++class CardTests(unittest.TestCase):
++    def test_plain_sixteen_digits(self):
++        self.assertEqual(redact("4111111111111111"), "[CARD]")
++
++    def test_space_and_hyphen_groups(self):
++        self.assertEqual(redact("paid with 4111 1111 1111 1111, ok"),
++                         "paid with [CARD], ok")
++        self.assertEqual(redact("4111-1111-1111-1111"), "[CARD]")
++
++    def test_thirteen_and_nineteen_digit_cards(self):
++        self.assertEqual(redact("4222222222222"), "[CARD]")          # 13
++        self.assertEqual(redact("4111111111111111110"), "[CARD]")    # 19
++
++    def test_luhn_failures_are_untouched(self):
++        for text in ("1234567890123", "4111111111111112",
++                     "4111 1111 1111 1112"):
++            with self.subTest(text=text):
++                self.assertEqual(redact(text), text)
++
++    def test_length_bounds(self):
++        # 12 digits is too short even though 4111111111119 (13) is valid.
++        self.assertEqual(redact("411111111111"), "411111111111")
++        # 20 digits is too long, and no 13-19 digit slice of it may match.
++        twenty = "41111111111111111115"
++        self.assertEqual(redact(twenty), twenty)
++
++    def test_valid_card_next_to_invalid_digits(self):
++        self.assertEqual(
++            redact("paid with 4111 1111 1111 1111, ref 1234567890123"),
++            "paid with [CARD], ref 1234567890123",
++        )
++        self.assertEqual(
++            redact("ref 1234567890123 card 4111111111111111"),
++            "ref 1234567890123 card [CARD]",
++        )
++
++    def test_digits_glued_to_letters_are_untouched(self):
++        for text in ("abc4111111111111111", "4111111111111111abc",
++                     "deadbeef4111111111111111"):
++            with self.subTest(text=text):
++                self.assertEqual(redact(text), text)
++
++    def test_double_separator_breaks_the_number(self):
++        self.assertEqual(redact("4111  1111 1111 1111"),
++                         "4111  1111 1111 1111")
++
++    def test_two_cards_on_one_line(self):
++        line = "4111111111111111 and 5500005555555559"
++        self.assertEqual(redact(line), "[CARD] and [CARD]")
++        self.assertEqual(counts(line), (0, 0, 2))
++
++    def test_ip_is_not_a_card(self):
++        self.assertEqual(redact("192.168.0.10"), "[IP]")
++
++    def test_luhn_helper(self):
++        self.assertTrue(luhn_ok("4111111111111111"))
++        self.assertTrue(luhn_ok("79927398713"))
++        self.assertFalse(luhn_ok("79927398710"))
++        self.assertFalse(luhn_ok(""))
++
++
++class CombinedTests(unittest.TestCase):
++    def test_all_three_on_one_line(self):
++        line = "jane@example.com 10.0.0.7 4111 1111 1111 1111"
++        self.assertEqual(redact(line), "[EMAIL] [IP] [CARD]")
++        self.assertEqual(counts(line), (1, 1, 1))
++
++    def test_clean_line_is_unchanged(self):
++        line = "INFO  starting service, pid 4321, version 2.7"
++        self.assertEqual(redact(line), line)
++        self.assertEqual(counts(line), (0, 0, 0))
++
++    def test_email_at_ip_literal(self):
++        self.assertEqual(redact("admin@192.168.1.1"), "admin@[IP]")
++
++    def test_empty_string(self):
++        self.assertEqual(redact(""), "")
++
++
++class CliTests(unittest.TestCase):
++    def test_stdin_to_stdout(self):
++        result = run_cli(stdin=b"user jane@example.com from 10.0.0.7\n")
++        self.assertEqual(result.returncode, 0)
++        self.assertEqual(result.stdout, b"user [EMAIL] from [IP]\n")
++        self.assertEqual(result.stderr, b"")
++
++    def test_count_goes_to_stderr_after_output(self):
++        result = run_cli("--count", stdin=b"a@b.io 1.2.3.4\n")
++        self.assertEqual(result.returncode, 0)
++        self.assertEqual(result.stdout, b"[EMAIL] [IP]\n")
++        self.assertEqual(result.stderr, b"emails=1 ips=1 cards=0\n")
++
++    def test_counts_accumulate_across_files(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            first = Path(tmp, "a.log")
++            second = Path(tmp, "b.log")
++            first.write_text("a@b.io\n4111111111111111\n")
++            second.write_text("1.2.3.4 c@d.org\n")
++            result = run_cli("--count", str(first), str(second))
++        self.assertEqual(result.returncode, 0)
++        self.assertEqual(result.stdout, b"[EMAIL]\n[CARD]\n[IP] [EMAIL]\n")
++        self.assertEqual(result.stderr, b"emails=2 ips=1 cards=1\n")
++
++    def test_files_are_read_in_order(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            first = Path(tmp, "1.log")
++            second = Path(tmp, "2.log")
++            first.write_text("one\n")
++            second.write_text("two\n")
++            result = run_cli(str(second), str(first))
++        self.assertEqual(result.stdout, b"two\none\n")
++
++    def test_missing_final_newline_is_preserved(self):
++        result = run_cli(stdin=b"no newline a@b.io")
++        self.assertEqual(result.stdout, b"no newline [EMAIL]")
++
++    def test_crlf_and_blank_lines_are_preserved(self):
++        result = run_cli(stdin=b"a@b.io\r\n\r\nplain\r\n")
++        self.assertEqual(result.stdout, b"[EMAIL]\r\n\r\nplain\r\n")
++
++    def test_undecodable_bytes_pass_through(self):
++        result = run_cli(stdin=b"bad \xff byte 1.2.3.4\n")
++        self.assertEqual(result.stdout, b"bad \xff byte [IP]\n")
++
++    def test_unreadable_file(self):
++        result = run_cli("no_such_file.log")
++        self.assertEqual(result.returncode, 2)
++        self.assertEqual(result.stdout, b"")
++        self.assertIn(b"no_such_file.log", result.stderr)
++
++    def test_directory_argument_is_an_error(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            result = run_cli(tmp)
++        self.assertEqual(result.returncode, 2)
++        self.assertIn(os.path.basename(tmp).encode(), result.stderr)
++
++    def test_dash_reads_stdin(self):
++        result = run_cli("-", stdin=b"a@b.io\n")
++        self.assertEqual(result.returncode, 0)
++        self.assertEqual(result.stdout, b"[EMAIL]\n")
++
++    def test_empty_input(self):
++        result = run_cli("--count", stdin=b"")
++        self.assertEqual(result.returncode, 0)
++        self.assertEqual(result.stdout, b"")
++        self.assertEqual(result.stderr, b"emails=0 ips=0 cards=0\n")
++
++    def test_large_input_is_streamed_correctly(self):
++        line = b"session a@b.io at 10.0.0.7 card 4111111111111111\n"
++        result = run_cli("--count", stdin=line * 500)
++        self.assertEqual(result.returncode, 0)
++        self.assertEqual(
++            result.stdout, b"session [EMAIL] at [IP] card [CARD]\n" * 500
++        )
++        self.assertEqual(result.stderr,
++                         b"emails=500 ips=500 cards=500\n")
++
++
++if __name__ == "__main__":
++    unittest.main()
