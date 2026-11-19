@@ -189,6 +189,14 @@ def main(argv=None):
     if evidence_root!=kit:
         print("--execute requires evidence-root equal to kit, so archives update in place",file=sys.stderr)
         return 2
+    # This launcher is specifically for the thirteen cells remaining after R036.
+    # If the checkout is outdated, fail closed instead of silently starting
+    # earlier experimental cells or recreating an already archived run.
+    if (status["archived"] < 35 or
+        not archived(kit, {"run_id":"R036","task_id":"T-REDACT-01","condition":"unstructured"}) or
+        not archived(kit, {"run_id":"R035C","task_id":"T-TARX-01-CR","condition":"sdd_clarify"})):
+        print("STOP: source study kit is missing the 35 archived cells through R036. Use the up-to-date week8-runs checkout in the original workspace.",file=sys.stderr)
+        return 2
     if args.all and not sys.stdin.isatty():
         print("--all requires continuous interactive operator supervision",file=sys.stderr)
         return 2
