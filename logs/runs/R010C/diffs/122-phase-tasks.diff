@@ -1,0 +1,281 @@
+diff --git a/specs/002-create-archive-command/tasks.md b/specs/002-create-archive-command/tasks.md
+new file mode 100644
+index 0000000..05f0594
+--- /dev/null
++++ b/specs/002-create-archive-command/tasks.md
+@@ -0,0 +1,275 @@
++---
++
++description: "Task list for 002-create-archive-command"
++---
++
++# Tasks: Create Tar Archives (`create` command)
++
++**Input**: Design documents from `/specs/002-create-archive-command/`
++
++**Prerequisites**: [plan.md](./plan.md), [spec.md](./spec.md), [research.md](./research.md), [data-model.md](./data-model.md), [contracts/create-cli.md](./contracts/create-cli.md), [quickstart.md](./quickstart.md)
++
++**Tests**: Test tasks ARE included and are mandatory. Constitution Principle III requires every
++requirement identifier to appear in the name or docstring of at least one automated test, SC-110
++restates it, and `tests/test_traceability.py` already enforces it mechanically — the suite is
++currently `144 passed, 1 failed` because this spec's `FR-1xx`/`SR-1xx` identifiers are
++uncovered (research R-118). Tests are therefore part of the feature, not an option.
++
++**Organization**: Tasks are grouped by user story so each story can be implemented, tested, and
++delivered independently.
++
++## Format: `[ID] [P?] [Story] Description`
++
++- **[P]**: Can run in parallel (different files, no dependencies on incomplete tasks)
++- **[Story]**: Which user story this task belongs to (US1, US2, US3)
++- Exact file paths appear in every task description
++
++## Path Conventions
++
++Single project, established by `001-tarx-cli` and unchanged here (plan.md Structure Decision):
++runtime code in `src/tarx/`, tests in `tests/`, `pytest.ini` puts `src/` on `pythonpath`. There
++is no install step and no package metadata (MC-101).
++
++---
++
++## Phase 1: Setup (Shared Infrastructure)
++
++**Purpose**: Record the pre-change baseline and build the on-disk source-tree fixtures every
++`create` test needs. The project itself already exists, so there is no initialisation to do.
++
++- [ ] T001 Record the baseline test result in the task notes by running `python3 -m pytest -q` from the repository root `/root/sdd-study/runs/R010`; confirm it reports `144 passed, 1 failed` with the single failure coming from `tests/test_traceability.py::test_every_requirement_identifier_is_referenced_by_a_test` (research R-118). Any other failure must be resolved before continuing, because MC-102/SC-109 require the 001 tests to keep passing unmodified.
++- [ ] T002 Add on-disk source-tree builders to `tests/helpers.py` (additions only — do not edit or reorder existing functions, which the 001 suite depends on): `build_source_tree(root, mapping)` creating regular files from a `{relative_path: bytes}` mapping with parents as needed; `build_empty_dirs(root, names)`; and the hostile builders `add_symlink(root, name, target)`, `add_fifo(root, name)` (via `os.mkfifo`), `build_deep_tree(root, depth)` for a tree deeper than `sys.getrecursionlimit()` (research R-106), `build_many_files(root, count)` for the `MAX_MEMBERS` bound, and `build_oversized_tree(root)` for the `MAX_TOTAL_BYTES`/`MAX_MEMBER_BYTES` bounds using sparse `truncate` so the tests stay fast.
++- [ ] T003 Add source-tree fixtures to `tests/conftest.py` (additions only, beside the existing `run_cli`, `snapshot_tree`, `photos_gz`, `photos_tar`, `empty_archive`): a `photos_source` fixture building `photos/a.jpg`, `photos/b.jpg`, `photos/empty-sub/`, and `notes.txt` under `tmp_path` with known bytes; an `acceptance_corpus` fixture parameterising the SC-101 corpus (single file, nested directories, empty directory, zero-byte file, names with spaces and non-ASCII characters, several PATHs at once, gzip-named and plain-named archives); and a `snapshot_bytes` fixture that records a file's exact bytes for the SC-106 before/after comparison. Depends on T002.
++
++**Checkpoint**: baseline is known, and test fixtures can build both friendly and hostile source trees.
++
++---
++
++## Phase 2: Foundational (Blocking Prerequisites)
++
++**Purpose**: The shared pieces every user story needs — source-path validation in `paths.py`, the
++`create.py` module shell with its entities and fixed constants, and the `create` command surface
++wired into `cli.py`. After this phase `python -m tarx create` parses correctly and fails usage
++errors correctly, but creates nothing.
++
++**⚠️ CRITICAL**: No user story work can begin until this phase is complete.
++
++- [ ] T004 Add `validate_source_path(path: str) -> tuple[str, ...]` to `src/tarx/paths.py` beside the existing `validate_member_name` (research R-113), reusing the module's private `_components()` helper and `_DRIVE_PREFIX` pattern. Leave `validate_member_name` byte-for-byte unchanged. Rules, **first failure wins**, each raising `TarxError` naming the PATH as the user gave it passed through `escape_name` (FR-113, SR-110): non-empty; not absolute (no leading `/`); no leading backslash (covers `\dir` and the `\\server\share` UNC form); no `C:`-style drive prefix; no `..` component; and the normalised component tuple must be non-empty, which is what rejects `.`, `./`, and `""` as PATHs naming the current directory itself. Returns the surviving component tuple so `./photos/` and `photos` yield the identical tuple (FR-104, SR-101). Docstring must name FR-104 and SR-101.
++- [ ] T005 Update the `OverwriteConflict` docstring in `src/tarx/errors.py` from "exactly one raise site" to name both raise sites (the `extract` destination-file check and the new `create` archive-exists check). Docstring change only — `exit_code` and the two statuses 2 and 3 are unchanged, because FR-121 permits no third status.
++- [ ] T006 Create `src/tarx/create.py` with the module shell: module docstring naming the validate-then-write sequence; imports of `MAX_MEMBERS`, `MAX_TOTAL_BYTES`, `MAX_MEMBER_BYTES`, `COPY_CHUNK_BYTES` from `tarx.archive` (imported, never redefined — SR-105, research R-111); the fixed constants `MEMBER_FILE_MODE = 0o644` and `MEMBER_DIR_MODE = 0o755` (SR-108); and the frozen dataclasses from data-model.md — `SourcePath(given: str, components: tuple[str, ...], name: str)` (§1), `PlannedMember(name: str, kind: Literal["file", "dir"], path: Path, size: int, origin: str)` where `kind` is exactly the two-value set `"file"`/`"dir"` and a directory's `size` is `0` (§2), `CreationPlan(members: list[PlannedMember], file_count: int, total_bytes: int)` (§3), and `ArchiveTarget(given: str, path: Path, compressed: bool, replacing: bool)` (§4). Declare `plan_members`, `write_archive`, `classify_target`, and `create_archive(archive, given_paths, overwrite: bool = False) -> int` with their plan.md signatures, bodies raising `NotImplementedError`.
++- [ ] T007 Add the `create` subparser to `build_parser()` in `src/tarx/cli.py` (research R-114): positional `archive` with `metavar="ARCHIVE"`, positional `paths` with `metavar="PATH"` and `nargs="+"`, and `--overwrite` as `action="store_true"`. Do not touch the `list` or `extract` subparsers in any way — FR-101 requires their parsing to be observably identical, and `--overwrite` must remain rejected by `list`.
++- [ ] T008 Extend the existing empty-string guard in `_parse()` in `src/tarx/cli.py` so an empty-string ARCHIVE and any empty-string PATH each call `parser.error(...)` (usage on stderr, exit 2). `argparse` accepts `""` for a positional, so these checks must stay ours (FR-102, SR-112, research R-114). Leave the existing ARCHIVE and DEST checks untouched.
++- [ ] T009 Add `run_create(archive_path: str, given_paths: list[str], overwrite: bool) -> int` to `src/tarx/cli.py` and the dispatch branch for `args.command == "create"` in `main()`. `run_create` calls `create.create_archive(...)`, then prints exactly `created {escape_name(archive_path)} with {n} files` to stdout inside a `try/except BrokenPipeError` that calls the existing `_silence_stdout_at_shutdown()` and returns 2, mirroring `run_list` (FR-110, SR-110, research R-115). Returns 0 on success. Do not add any `except` clause to `main()` — `TarxError`/`OverwriteConflict`/`OSError` are already handled there and `main()` must remain the only place a status is chosen (FR-121).
++
++**Checkpoint**: `python3 -m tarx create --help` works; `create` with no ARCHIVE, no PATH, an unknown option, or an empty-string argument exits 2 with usage on stderr; `list` and `extract` are untouched. User story implementation can now begin.
++
++---
++
++## Phase 3: User Story 1 - Package files and folders into one archive (Priority: P1) 🎯 MVP
++
++**Goal**: `create ARCHIVE PATH...` packages the named files and directories into one tar archive —
++gzip-compressed by suffix — with deterministic member names and order, normalised metadata, and a
++one-line count of regular files added; and the result round-trips exactly through the existing
++`list` and `extract`.
++
++**Independent Test**: build a directory tree of known files, run `create` on it, and confirm the
++reported count, the exit status 0, and — by running the existing `list` and `extract` on the
++result — that the member names, order, and file contents match the original tree exactly. Fully
++testable with no other story implemented.
++
++### Tests for User Story 1 ⚠️
++
++> **Write these tests FIRST and confirm they FAIL** (they will raise `NotImplementedError` from T006) **before implementing T014–T018.**
++
++- [ ] T010 [P] [US1] Create `tests/test_create.py` covering the command surface and reporting, with each requirement identifier in a test name or docstring: FR-101 (`list` and `extract` output, exit statuses, and `--overwrite` acceptance are observably identical before and after `create` exists — assert against the 001 contract, and that `list --overwrite` is still a usage error); FR-102 and SR-112 (missing ARCHIVE, missing PATH, unrecognised option `--verbose`, empty-string ARCHIVE, empty-string PATH → usage on stderr, exit 2; `--overwrite` accepted by `create` and `extract`); FR-103 (a file PATH and a directory PATH, the directory archived recursively); FR-104 (member names are relative paths — `notes.txt` → `notes.txt`, `photos` → `photos`, `photos/a.jpg`; `./photos/` and `photos` produce identical members; `photos/sub` records `photos/sub` and not `photos`); FR-105 (every directory encountered is a directory member, ancestors above a PATH are not); FR-106 (PATHs in command-line order; within a directory, the directory member first then entries in ascending code-point order, each subdirectory's contents immediately following its own member; two runs over an unchanged tree give the same names in the same order); FR-108 (`.tar.gz`, `.tgz`, `.TGZ`, `.TAR.GZ` → gzip; `out.tar`, `out`, `archive.tar.gz.bak` → plain, verified with `tarx.archive.sniff_compression`); FR-110 (stdout is exactly `created ARCHIVE with N files\n` and nothing else, exit 0, ARCHIVE echoed as the user wrote it); FR-111 (N counts regular files only — the `photos` example reports 2, not 3; `with 0 files` and `with 1 files` are both produced verbatim with no pluralisation); FR-112 (all diagnostics on stderr, stdout empty on failure, no success line on a failing run); FR-113 (an error message names the archive path, the PATH as given, or the member at issue).
++- [ ] T011 [P] [US1] Create `tests/test_create_roundtrip.py` covering FR-107 and FR-109 over the `acceptance_corpus` fixture from T003: for every tree in the corpus, `create` then `list` prints exactly the expected member names in the expected order line-for-line (SC-102); `create` then `extract` into a fresh directory reproduces identical relative paths and byte-identical contents, compared programmatically (SC-101, FR-107); the reported N equals the number of regular files in the source tree (SC-103); no member is rejected by `extract` for any reason; an empty subdirectory survives the round trip (FR-105); zero-byte files are recorded as regular files and counted; names with spaces and non-ASCII characters round-trip byte-for-byte (research R-102); and a deliberately misnamed archive (gzip content under a `.tar` name and vice versa) is still read correctly by `list`, which decides from content (research R-117). Also assert SC-107: no member records the local account's uname, gname, uid, or gid, and none has a setuid, setgid, or sticky bit.
++- [ ] T012 [P] [US1] Add the SR-108 header-field assertions to `tests/test_create_roundtrip.py` as a dedicated test reading the created archive with `tarfile` directly: every `TarInfo` has `uid == 0`, `gid == 0`, `uname == ""`, `gname == ""`, `mtime == 0`, `mode == 0o644` for files and `0o755` for directories, `linkname == ""`, and `type` in `{REGTYPE, DIRTYPE}` only; and the gzip container records no filename and a zero timestamp, so two runs over an unchanged tree produce byte-identical `.tar.gz` files (research R-103). Can be written in parallel with T011 as a separate test function in the same file only if T011 is created first; otherwise fold into T011.
++- [ ] T013 [P] [US1] Add SR-106 and SR-107 tests to `tests/test_create.py`: a freshly created archive has mode `0o600` as reported by `os.stat(...).st_mode & 0o777`, with no setuid/setgid/sticky bit, and the mode was set at creation (no `chmod` in `src/tarx/create.py` — assert by source inspection that the string `chmod` does not appear); and archiving a file larger than `COPY_CHUNK_BYTES` keeps peak memory bounded, following the pattern already used by `tests/test_performance.py::test_no_member_is_held_whole_in_memory`.
++
++### Implementation for User Story 1
++
++- [ ] T014 [US1] Implement `plan_members(given_paths, archive_path) -> CreationPlan` in `src/tarx/create.py` — Pass 1, which writes nothing (FR-118). For each PATH in command-line order: build a `SourcePath` via `paths.validate_source_path` (T004) with `name = "/".join(components)`; `os.lstat` the path and refuse anything that is not a regular file or a directory; for a file emit one `PlannedMember(kind="file", size=st_size)`; for a directory emit the directory member first, then walk it with an **explicit LIFO stack** (never recursion — research R-106) using `os.scandir(follow_symlinks=False)`, taking each entry's kind from `DirEntry.is_dir(follow_symlinks=False)` / `is_file(follow_symlinks=False)` / `is_symlink()`, pushing entries sorted by name as Python `str` (code-point order) so they are visited ascending and each subdirectory's contents follow immediately after its own member (pre-order depth-first, FR-106, research R-107). Compute `file_count` as the number of `kind == "file"` members and `total_bytes` as the sum of their `size`. Docstring names FR-103, FR-104, FR-105, FR-106, FR-118, SR-103.
++- [ ] T015 [US1] Add member-name gating to `plan_members` in `src/tarx/create.py`: every computed member name is passed through the existing `paths.validate_member_name` — the very function `extract` uses — before Pass 2 begins, so FR-109's round-trip promise is an executed check rather than an argument (research R-112). A rejected name raises `TarxError`, exit 2. Depends on T014.
++- [ ] T016 [US1] Implement the header builder in `src/tarx/create.py` — a helper returning a `tarfile.TarInfo` constructed **field by field**, never via `TarFile.add()` or `TarFile.gettarinfo()` (research R-101, SR-108): `name` from `PlannedMember.name` with no trailing slash for directories; `type` `REGTYPE` or `DIRTYPE` only; `size` from `os.fstat` on the open descriptor for files and `0` for directories; `mode` `MEMBER_FILE_MODE` / `MEMBER_DIR_MODE`; `uid = gid = 0`; `uname = gname = ""`; `mtime = 0`; `linkname = ""`. No on-disk `st_mode`, `st_uid`, `st_gid`, or `st_mtime` value may reach any header field.
++- [ ] T017 [US1] Implement `write_archive(plan, target) -> None` in `src/tarx/create.py` — Pass 2. Create the output with `tempfile.mkstemp(dir=<ARCHIVE's own directory>, prefix=".tarx-", suffix=".tmp")`, which creates with `O_CREAT|O_EXCL` and mode `0o600` at creation and must never be followed by a `chmod` (SR-107, research R-104); the temporary must live in ARCHIVE's own directory so `os.rename` never crosses a filesystem boundary. Wrap the descriptor in `gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0)` when `target.compressed`, then in `tarfile.open(fileobj=..., mode="w:", format=tarfile.PAX_FORMAT)` — `PAX_FORMAT` named explicitly, never `DEFAULT_FORMAT` (research R-102, R-103). Stream each file member's contents in `COPY_CHUNK_BYTES` (64 KiB) chunks so no file is ever held whole in memory (SR-106), emit directory members with `addfile(tarinfo)` and no payload, then close every layer and `os.rename` the temporary onto `target.path` as the final act. The whole body sits in a `try/finally` that `os.unlink`s the temporary file on every path that does not reach a successful rename, so no partial archive and no leftover temporary can survive (FR-119). Depends on T016.
++- [ ] T018 [US1] Implement `create_archive(archive, given_paths, overwrite=False) -> int` in `src/tarx/create.py`: classify the target (`compressed` from `archive.lower().endswith((".tar.gz", ".tgz"))` — the suffix test on the name as given, case-insensitive, research R-117), call `plan_members`, call `write_archive`, and return `plan.file_count` — the count computed during validation, so the number reported is the number that was validated (FR-110, FR-111). Full target-state classification arrives in T021; for this story treat an absent path as the only accepted state. Docstring names FR-108, FR-110, FR-111, FR-118. Depends on T014, T015, T017.
++- [ ] T019 [US1] Run `python3 -m pytest -q tests/test_create.py tests/test_create_roundtrip.py` plus the full suite from `/root/sdd-study/runs/R010` and confirm the US1 tests pass and the 144 inherited 001 tests still pass unmodified (MC-102, SC-109). Fix implementation, never the 001 tests.
++
++**Checkpoint**: User Story 1 is fully functional — `create` builds correct, deterministic, metadata-normalised archives that `list` and `extract` read back exactly. This is a shippable MVP.
++
++---
++
++## Phase 4: User Story 2 - Never clobber an existing archive by accident (Priority: P2)
++
++**Goal**: An existing archive is never silently destroyed. `create` refuses with exit 3 and leaves
++the file byte-for-byte unchanged; `--overwrite` replaces it; anything at the archive path that is
++not a regular file is exit 2, not 3.
++
++**Independent Test**: create an archive, record its bytes, run `create` again at the same path, and
++confirm exit status 3, nothing on stdout, and the file's bytes unchanged; then repeat with
++`--overwrite` and confirm the archive is replaced and the command succeeds.
++
++### Tests for User Story 2 ⚠️
++
++> **Write these tests FIRST and confirm they FAIL before implementing T021–T023.**
++
++- [ ] T020 [P] [US2] Create `tests/test_create_overwrite.py` with each identifier in a test name or docstring: FR-114 (a regular file at ARCHIVE without `--overwrite` → no archive written, the archive path named on stderr, stdout empty, exit **3**, and the existing file byte-for-byte unchanged via the `snapshot_bytes` fixture); FR-115 (the same command **with** `--overwrite` → the archive is replaced with one describing the current tree, the success line is printed, exit 0, and the new bytes differ from the old); FR-116 (a directory, a symbolic link, a FIFO, and — where creatable — a device or socket at ARCHIVE → stderr names the path and what it is, the entry is untouched, exit **2 not 3**, with and without `--overwrite`; a symlinked ARCHIVE is never followed, verified by asserting the link target is unmodified; a missing parent directory such as `nosuchdir/x.tar` → exit 2 with no directory created); FR-121 (exit 3 is produced **solely** by the pre-existing-regular-file-without-`--overwrite` case and by nothing else — assert 2 for every other failure in this file, and that no command of the tool produces any status outside 0, 2, 3).
++
++### Implementation for User Story 2
++
++- [ ] T021 [US2] Implement `classify_target(archive, overwrite) -> ArchiveTarget` in `src/tarx/create.py` using a single `os.lstat` — never `os.stat`, so a symlinked ARCHIVE is seen as a link rather than as its target (data-model.md rule 3, research R-105). Branches: absent with an existing parent directory → proceed; absent with a missing parent or a parent that is not a directory → `TarxError` exit 2 (FR-116, and `create` never creates parent directories for its own output); regular file with `--overwrite` → proceed with `replacing=True` (FR-115); regular file without `--overwrite` → raise `OverwriteConflict` naming the archive path, exit **3** (FR-114) — this must be the single raise site so FR-121's "solely" is checkable by reading one branch; directory, symlink, FIFO, device, or socket → `TarxError` naming the path and what it is, exit 2, with or without `--overwrite` (FR-116). Messages escape the path with `escape_name` (SR-110).
++- [ ] T022 [US2] Wire `classify_target` into `create_archive` in `src/tarx/create.py` as the first step, before `plan_members`, so the archive path is classified before any traversal, and pass the resulting `ArchiveTarget` to `write_archive` (data-model.md rules 1–3 order; FR-118). Depends on T018, T021.
++- [ ] T023 [US2] Add the pre-rename re-confirmation to `write_archive` in `src/tarx/create.py`: immediately before `os.rename`, repeat the `os.lstat` classification of the archive path; a regular file that appeared in the meantime without `--overwrite` raises the same `OverwriteConflict` (exit 3), and any non-regular-file state raises `TarxError` (exit 2). The temporary file is unlinked by the existing `try/finally`, so a refusal here still leaves the path exactly as it was (data-model.md rule 11, FR-114, FR-119, research R-105). Depends on T017, T021.
++- [ ] T024 [US2] Run `python3 -m pytest -q tests/test_create_overwrite.py` plus the full suite and confirm User Stories 1 and 2 both pass and the 001 tests still pass unmodified.
++
++**Checkpoint**: User Stories 1 and 2 both work independently — archives are created correctly and an existing archive can only be replaced on purpose.
++
++---
++
++## Phase 5: User Story 3 - Fail clearly, and leave nothing half-made (Priority: P3)
++
++**Goal**: Every rejection names exactly what was refused and why, writes no archive at all, leaves
++any pre-existing archive untouched, and leaves no temporary file anywhere. There is never a
++truncated archive to mistake for a good one.
++
++**Independent Test**: run `create` against a non-existent path, against a tree containing a
++symbolic link, and against a tree exceeding the resource bounds, confirming each time that exit
++status is 2, the message names the offending path or member, and no file appears at the archive
++path.
++
++### Tests for User Story 3 ⚠️
++
++> **Write these tests FIRST and confirm they FAIL before implementing T029–T034.**
++
++- [ ] T025 [P] [US3] Create `tests/test_create_failures.py` with each identifier in a test name or docstring: FR-117 (a non-existent PATH → stderr names that PATH, no archive at ARCHIVE, exit 2 — including when other named PATHs do exist, asserting the existing PATHs were *not* archived); FR-118 (validation completes before any content is written — with several PATHs of which the last is missing, no file and no temporary file ever appears in the archive's directory); FR-119 and SC-106 (for each failure mode in this file: the archive path is absent if it was absent before and byte-for-byte identical if a regular file was there before, and `os.listdir` of the archive's directory contains no `.tarx-*` entry afterwards — including the pre-existing-archive-plus-failing-`--overwrite` case); FR-120 (a file that shrinks between enumeration and reading, and one that grows, each fail with exit 2 and no archive, with the member named — drive it with a file replaced between the two passes); FR-122 (nothing outside ARCHIVE is created, modified, or deleted — snapshot the whole source tree with the `snapshot_tree` fixture before and after both a succeeding and a failing run and assert equality, including mtimes).
++- [ ] T026 [P] [US3] Create `tests/test_create_security.py` as the SC-105 adversarial corpus, with each identifier in a test name or docstring: SR-101 (an absolute PATH `/etc`, a PATH containing `..`, a PATH of `.` and of `..`, a `C:`-style drive prefix, a `\\server\share` UNC form, and a leading-backslash path → each refused naming the PATH as given, nothing created, exit 2 — and asserted to be *rejected*, never repaired); SR-102 (a symbolic link, a hard link, a FIFO, and where creatable a device or socket, both named directly as a PATH and found beneath a directory PATH → refused naming the member **and its kind**, no archive, exit 2; assert the entry is neither silently skipped nor followed, by confirming the link target's contents appear nowhere); SR-103 (a symlinked subdirectory pointing outside the tree is refused rather than descended into, so no file outside the named trees is ever read); SR-104 (the same PATH twice, two spellings normalising to the same location such as `photos` and `./photos/`, and one PATH nested inside a directory PATH such as `photos` plus `photos/a.jpg` → refused naming the duplicated member, no archive, exit 2); SR-109 (`create photos/out.tar photos` succeeds and `list` shows no `out.tar` member, including on a rerun with `--overwrite` where the file already exists; `create out.tar out.tar` naming ARCHIVE directly as a PATH is refused with exit 2 — research R-109); SR-110 (an archive name and a member name containing a newline, carriage return, tab, and an escape character are printed in visible escaped form on both stdout and stderr, producing exactly one line, while a purely printable non-ASCII name is printed unchanged); SR-111 (no stderr output for any failure in this file contains a traceback, a `File "` frame line, file contents, or an environment variable value — including for a tree deeper than `sys.getrecursionlimit()`, which must not surface a `RecursionError`); SR-107 (the temporary file, observed mid-run or inferred from its absence afterwards, carries mode `0o600` and never setuid/setgid/sticky).
++- [ ] T027 [P] [US3] Create `tests/test_create_limits.py` for SR-105, naming the identifier in each test name or docstring: a tree of more than `MAX_MEMBERS` (10,000) entries → exit 2 naming the bound and the member, no archive; a single file larger than `MAX_MEMBER_BYTES` (1 GiB, built sparsely) → exit 2, no archive; a tree whose total exceeds `MAX_TOTAL_BYTES` (1 GiB) → exit 2, no archive; a tree that grows past a bound between enumeration and writing → exit 2 and still no archive, proving the write-pass check exists (research R-111); and an assertion that `src/tarx/create.py` imports these constants from `tarx.archive` rather than defining its own, so SR-105's "the same bounds as the existing commands" cannot drift (assert by `tarx.create.MAX_MEMBERS is tarx.archive.MAX_MEMBERS` or by source inspection that no `MAX_` assignment appears in `create.py`). Every bound must be an error, never a truncated best-effort archive.
++- [ ] T028 [P] [US3] Add the "unreadable input" cases to `tests/test_create_failures.py`: a directory with mode `0o000` beneath a PATH fails at `os.scandir` and an unreadable regular file fails at `os.open`, each with exit 2, a message naming the path, and no archive — never an archive missing that member (spec Edge Cases, research R-116). Skip the tests when running as root, where the modes are not enforced. Depends on T025.
++
++### Implementation for User Story 3
++
++- [ ] T029 [US3] Add explicit unsupported-kind refusal to `plan_members` in `src/tarx/create.py`: any entry that is neither a regular file nor a directory — symbolic link, hard link, device, FIFO, or socket — whether named directly as a PATH or found beneath a directory PATH, raises `TarxError` naming the member **and its kind** (derived from `stat.S_IFMT`), exit 2. It must never be silently skipped and a symbolic link must never be followed or have its target's contents archived (SR-102, SR-103, data-model.md rule 4). Depends on T014.
++- [ ] T030 [US3] Add duplicate and nesting detection to `plan_members` in `src/tarx/create.py` as an ordered `dict` from member name to the originating PATH: inserting a name already present raises `TarxError` naming the duplicated member and both origins, exit 2. This single check covers all three SR-104 cases — the same PATH twice, two PATHs normalising to the same location, and one PATH nested inside a directory PATH — and guarantees `extract` cannot reject the archive for duplicate members (research R-108, data-model.md rule 7). Depends on T014.
++- [ ] T031 [US3] Add archive self-exclusion to `plan_members` in `src/tarx/create.py` (SR-109, research R-109): compare the normalised ARCHIVE path against every candidate member; a match **discovered by traversal** is omitted from the member list silently and is not counted in N, so `create photos/out.tar photos` works on rerun with `--overwrite`; a match where ARCHIVE is **named directly as a PATH** raises `TarxError` naming it, exit 2, because Principle II forbids quietly omitting something the user explicitly typed. The temporary file needs no exclusion rule because T017 creates it only after enumeration ends. Depends on T014.
++- [ ] T032 [US3] Add the enumeration-time resource bounds to `plan_members` in `src/tarx/create.py` using the constants imported in T006: member count ≤ `MAX_MEMBERS` (10,000), each file's `size` ≤ `MAX_MEMBER_BYTES` (1 GiB), and the running total ≤ `MAX_TOTAL_BYTES` (1 GiB) — checked as each member is appended so the cap fires before the whole tree is walked. An exceeded bound raises `TarxError` naming the bound and the member, exit 2, never a truncated archive (SR-105, data-model.md rule 6, research R-111). Depends on T014.
++- [ ] T033 [US3] Add the write-pass size and bound checks to `write_archive` in `src/tarx/create.py` (FR-107, FR-120, SR-105, research R-110, R-111, data-model.md rules 9–10): open each regular file once with `os.open(path, os.O_RDONLY | os.O_NOFOLLOW)` so a file swapped for a symlink between the passes fails with `ELOOP` rather than being followed; take the declared header size from `os.fstat` **on that descriptor**; stream through a reader object that fills every `read()` request exactly and raises `TarxError` naming the member if the descriptor reaches EOF before the declared size is delivered — `tarfile.copyfileobj` treats a short read as a bare `OSError` naming no file, which would breach FR-113; after `addfile` returns, one extra `os.read(fd, 1)` must come back empty, and a non-empty result means the file grew and raises `TarxError` naming the member; and count the bytes actually streamed against `MAX_MEMBER_BYTES` and `MAX_TOTAL_BYTES`. Every failure here is exit 2 and, because the target is a temporary file, leaves no archive. Depends on T017.
++- [ ] T034 [US3] Review every `raise` in `src/tarx/create.py` and `src/tarx/paths.py::validate_source_path` for SR-110 and SR-111 compliance: every path, PATH, and member name in a message goes through `paths.escape_name`; no message contains file contents, an environment value, or any data beyond the paths and reasons FR-113 requires; there is no bare `except` and the broadest catch is `except OSError`; and no code path can raise `RecursionError` (the T014 traversal is iterative, research R-106). Confirm `main()` in `src/tarx/cli.py` still needs no new handler.
++- [ ] T035 [US3] Run `python3 -m pytest -q tests/test_create_failures.py tests/test_create_security.py tests/test_create_limits.py` plus the full suite and confirm all three user stories pass and the 144 inherited 001 tests still pass unmodified.
++
++**Checkpoint**: all three user stories are independently functional — archives are created correctly, never clobbered by accident, and every failure leaves nothing half-made.
++
++---
++
++## Phase 6: Polish & Cross-Cutting Concerns
++
++**Purpose**: The cross-cutting success criteria that span stories — performance, the traceability
++gate, and end-to-end validation against the quickstart.
++
++- [ ] T036 [P] Add the SC-108 create benchmark to `tests/test_performance.py` (addition only — do not modify the existing three tests): archiving a 1,000-file, 50 MB tree completes in under 5 seconds, following the shape of the existing `test_list_and_extract_a_1000_member_50mb_archive_within_budget`, with `SC-108` in the test name or docstring.
++- [ ] T037 Run `python3 -m pytest -q tests/test_traceability.py` and confirm it now **passes** — every `FR-1xx` and `SR-1xx` identifier in `specs/002-create-archive-command/spec.md` is referenced by at least one test name or docstring, and no test claims an identifier the spec does not define (SC-110, constitution Principle III, research R-118). Clear any gap by adding the missing test, never by changing the gate.
++- [ ] T038 Run the full suite `python3 -m pytest -q` from `/root/sdd-study/runs/R010` and confirm every test passes with zero failures, including the 144 tests inherited from `001-tarx-cli` which must pass **unmodified** (MC-102, SC-109). Verify with `git diff --stat` that no pre-existing test file was changed except by addition (`tests/helpers.py`, `tests/conftest.py`, `tests/test_performance.py`) and that `src/tarx/archive.py`, `src/tarx/extract.py`, `src/tarx/__main__.py`, and `src/tarx/__init__.py` are untouched (plan.md Project Structure).
++- [ ] T039 Walk the four scenarios in [quickstart.md](./quickstart.md) by hand from a scratch directory and confirm each **Expected** block, including the manual checks in "Things to check by hand after implementing": `stat -c %a` on a fresh archive reports `600`; `create 'odd name.tar' $'weird\tdir'` prints escaped names on exactly one line; `create out.tar photos | head -0` exits 2 with nothing on stderr and a complete `out.tar`; and `list`/`extract` still behave exactly as `specs/001-tarx-cli/contracts/cli.md` describes (FR-101).
++- [ ] T040 Re-read [contracts/create-cli.md](./contracts/create-cli.md) "Invariants a conforming implementation must uphold" (items 1–11) and confirm each holds against the implementation, plus the 14-row failure table — every row's status and named subject. Record any divergence as a defect to fix, not as a contract amendment.
++- [ ] T041 Final read-through of `src/tarx/create.py` against constitution Principle IV: no abstraction layer, no configuration option, no new exception class, no new constant, no concurrency, no caching; the Pass 1 / Pass 2 boundary visible in `create_archive()`; and the module shaped like `src/tarx/extract.py` so a reader who knows one knows the other (plan.md Structure Decision).
++
++---
++
++## Dependencies & Execution Order
++
++### Phase Dependencies
++
++- **Setup (Phase 1)**: no dependencies — start immediately.
++- **Foundational (Phase 2)**: depends on Setup. **Blocks all user stories.**
++- **User Story 1 (Phase 3)**: depends on Foundational. No dependency on US2 or US3.
++- **User Story 2 (Phase 4)**: depends on Foundational. T022 and T023 touch `create_archive`/`write_archive`, so they land after T018/T017; the US2 *tests* (T020) need no US1 code beyond a working `create`.
++- **User Story 3 (Phase 5)**: depends on Foundational. T029–T033 refine `plan_members`/`write_archive`, so they land after T014/T017.
++- **Polish (Phase 6)**: depends on all three stories being complete. T037 and T038 are the project's acceptance gates.
++
++### User Story Dependencies
++
++- **US1 (P1)**: independent. Delivers the whole of the feature's value on its own.
++- **US2 (P2)**: independent in behaviour and testable alone; shares `create_archive` with US1, so its two wiring tasks (T022, T023) are sequenced after US1's T017/T018 rather than being conceptually dependent on them.
++- **US3 (P3)**: independent in behaviour and testable alone; its implementation tasks add checks *inside* the functions US1 writes, so they are sequenced after T014/T017 for the same reason.
++
++> Because all three stories add code to the same two functions (`plan_members`, `write_archive`),
++> a single developer should work the phases in order. The stories remain independently
++> *testable* and independently *deliverable* — each phase's checkpoint is a shippable state.
++
++### Within Each User Story
++
++- Tests are written first and must FAIL before implementation begins.
++- `SourcePath`/`PlannedMember` construction before `CreationPlan` assembly; the complete plan before any writing (FR-118).
++- Header building before streaming; streaming before the rename.
++- Story complete and checkpointed before moving to the next priority.
++
++### Parallel Opportunities
++
++- **Setup**: T002 then T003 (T003 uses T002's builders); T001 runs independently of both.
++- **Foundational**: T004, T005, T006 touch three different files and can run in parallel. T007 → T008 → T009 are all in `src/tarx/cli.py` and must be sequential.
++- **US1 tests**: T010, T011, T013 are three different files/concerns and can run in parallel; T012 shares a file with T011.
++- **US3 tests**: T025, T026, T027 are three different files and can run fully in parallel.
++- **US3 implementation**: T029, T030, T031, T032 all modify `plan_members` in the same file — run them **sequentially** despite being conceptually independent. T033 modifies `write_archive` and can proceed in parallel with the `plan_members` group.
++- **Polish**: T036 is independent of T037–T041.
++- Different user stories can be worked in parallel by different people only with coordination on `src/tarx/create.py`.
++
++---
++
++## Parallel Example: User Story 1 tests
++
++```bash
++# Launch the three independent US1 test files together:
++Task: "Create tests/test_create.py covering the command surface and reporting (T010)"
++Task: "Create tests/test_create_roundtrip.py covering FR-107/FR-109 over the acceptance corpus (T011)"
++Task: "Add SR-106 and SR-107 tests to tests/test_create.py (T013)"
++```
++
++## Parallel Example: User Story 3 tests
++
++```bash
++# Three separate files, no shared state:
++Task: "Create tests/test_create_failures.py (T025)"
++Task: "Create tests/test_create_security.py (T026)"
++Task: "Create tests/test_create_limits.py (T027)"
++```
++
++---
++
++## Implementation Strategy
++
++### MVP First (User Story 1 only)
++
++1. Phase 1 Setup (T001–T003) — baseline recorded, fixtures ready.
++2. Phase 2 Foundational (T004–T009) — `create` parses and dispatches. **Blocks everything.**
++3. Phase 3 User Story 1 (T010–T019).
++4. **STOP and VALIDATE**: quickstart Scenario 1 — `create` → `list` → `extract` round-trips a
++   known tree exactly, reports the right count, exits 0, and the 001 suite still passes.
++5. This is already a usable tool: archives can be created and read back.
++
++### Incremental Delivery
++
++1. Setup + Foundational → `create` exists as a command surface.
++2. + US1 → archives are created and round-trip correctly (**MVP**, quickstart Scenario 1).
++3. + US2 → an existing archive can only be replaced on purpose (quickstart Scenario 2).
++4. + US3 → every failure is clean, named, and leaves nothing behind (quickstart Scenarios 3–4).
++5. + Polish → performance budget met, traceability gate green, contract invariants confirmed.
++
++Each step adds value without changing anything the previous step promised — and at every step
++`list` and `extract` behave exactly as they do today (FR-101).
++
++---
++
++## Notes
++
++- `[P]` tasks touch different files and have no dependency on an incomplete task.
++- `[Story]` labels map tasks to spec.md user stories for traceability.
++- **Every test function must carry its requirement identifiers in its name or docstring** —
++  `tests/test_traceability.py` is a gate, not a convention (constitution Principle III, SC-110).
++- **Never modify an existing test to make it pass.** MC-102 and SC-109 require the 144 inherited
++  001 tests to pass unmodified; `tests/helpers.py`, `tests/conftest.py`, and
++  `tests/test_performance.py` are extended by **addition only**.
++- `tests/test_traceability.py` is expected to fail from T001 until T037 — that is the gate working
++  as designed (research R-118).
++- No runtime module may import anything outside the standard library; the only new runtime import
++  this feature adds is `tempfile` (constitution Principle I, MC-101).
++- Resource-bound constants are **imported** from `tarx.archive`, never redefined (SR-105).
++- Commit after each task or logical group. Stop at any checkpoint to validate a story on its own.

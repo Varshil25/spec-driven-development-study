@@ -1,0 +1,3800 @@
+diff --git a/.gitignore b/.gitignore
+index 75c6182..5b1e651 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,3 +1,23 @@
+ __pycache__/
+ *.pyc
++*.pyo
+ .pytest_cache/
++.venv/
++venv/
++build/
++dist/
++*.egg-info/
++.coverage
++htmlcov/
++
++# Local data directories produced by the quickstart walkthrough
++pastes-data/
++brand-new/
++
++# Universal
++.DS_Store
++Thumbs.db
++*.tmp
++*.swp
++.vscode/
++.idea/
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..ddb1e47
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,104 @@
++# pastebin
++
++A loopback-only HTTP service for sharing text snippets. Create a paste by POSTing
++JSON, read it back as structured data or as plain text, and revoke it with a secret
++issued at creation. Pastes may carry a lifetime and survive restarts.
++
++Python 3.11+, **no runtime dependencies** — standard library only.
++
++## Run it
++
++```bash
++PYTHONPATH=src python -m pastebin serve --port 8080 --data ./pastes-data
++```
++
++The data directory is created if absent (parents included, mode `0700`), and stdout
++carries exactly one line:
++
++```text
++listening on 127.0.0.1:8080
++```
++
++Use `--port 0` to let the kernel pick a free port — the line reports the port
++actually bound. The bind address is always `127.0.0.1`; there is deliberately no
++`--host` flag. Any startup failure prints to stderr, exits non-zero, and prints no
++readiness line. `Ctrl-C` stops the service and exits `0`.
++
++Full argument, exit-status, and failure-message contract:
++[`specs/001-pastebin-service/contracts/cli.md`](specs/001-pastebin-service/contracts/cli.md).
++
++## Routes
++
++| Method | Path | Operation | Success |
++|---|---|---|---|
++| `POST` | `/pastes` | Create a paste | `201` |
++| `GET` | `/pastes/<id>` | Read metadata and content | `200` |
++| `GET` | `/pastes/<id>/raw` | Read the content as plain text | `200` |
++| `DELETE` | `/pastes/<id>` | Revoke, via the `X-Delete-Token` header | `204` |
++
++Every other request — unknown path, unsupported method on a known path, unknown
++sub-resource, trailing slash — is `404`. There is no `405` and no `Allow` header.
++Errors are always JSON: `{"error": "<message>"}`.
++
++```bash
++curl -s -X POST http://127.0.0.1:8080/pastes -d '{"content": "hello", "expires_in": 3600}'
++# {"id": "...", "delete_token": "...", "url": "/pastes/..."}
++
++curl -s http://127.0.0.1:8080/pastes/$ID        # {"id", "content", "created_at", "expires_at"}
++curl -s http://127.0.0.1:8080/pastes/$ID/raw    # hello
++curl -s -X DELETE -H "X-Delete-Token: $TOKEN" http://127.0.0.1:8080/pastes/$ID
++```
++
++`content` is required, must be a string, and may not exceed 65 536 UTF-8 bytes
++(`413` if it does). `expires_in` is optional and must be a whole number of seconds
++from 1 to 2 592 000; absent means the paste never expires. Other fields are ignored.
++The `delete_token` is returned exactly once, in the `201` — no read ever discloses it.
++
++Full request and response contract, including every error message and the precedence
++rules between statuses:
++[`specs/001-pastebin-service/contracts/http-api.md`](specs/001-pastebin-service/contracts/http-api.md).
++
++## Tests
++
++```bash
++PYTHONPATH=src pytest -q
++```
++
++The suite must pass with zero failures, skips, and `xfail`s. It drives a real server
++over real HTTP and runs `python -m pastebin` as a subprocess for the startup cases;
++like the runtime, it uses only the standard library plus `pytest`.
++
++`tests/test_requirement_coverage.py` is the gate that keeps the requirement-to-test
++mapping honest: it fails if any requirement id (`FR-001` … `FR-029`, `SR-001` …
++`SR-012`) is referenced by no test name or docstring.
++
++## Layout
++
++```text
++src/pastebin/
++├── __main__.py   # python -m pastebin → cli.main()
++├── cli.py        # arguments, data-directory setup, bind, readiness line, exit codes
++├── server.py     # ThreadingHTTPServer + handler: routing, framing, errors
++├── store.py      # PasteStore: atomic writes, path containment, revocation
++└── models.py     # record shape, validation rules, timestamps, id generation
++```
++
++Design documents live under `specs/001-pastebin-service/`: the specification, the
++plan and its research decisions, the data model, the two contracts above, and a
++runnable `quickstart.md`.
++
++## Storage and security notes
++
++Each paste is one UTF-8 JSON record at `<data_dir>/<id>.json`, written to an
++`O_EXCL` temporary file with mode `0600` set at creation, `fsync`ed, then moved into
++place with `os.replace` — so a concurrent reader sees the complete record or none of
++it, and the file is never momentarily readable by other users. The directory is
++`0700`.
++
++Identifiers (22 chars, 128 bits) and revocation secrets (43 chars, 256 bits) come
++from `secrets`; the secret is compared with `hmac.compare_digest` inside the same
++lock as the removal. An identifier from a request is matched against
++`[A-Za-z0-9_-]{22}` before it is joined to a path, and the resolved path is confirmed
++to lie inside the data directory. Expiry is computed per request against the current
++clock — there is no sweeper and no startup scan. Nothing the service returns contains
++a revocation secret, a filesystem path, or a stack trace.
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..80da716
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,24 @@
++[build-system]
++requires = ["setuptools>=68"]
++build-backend = "setuptools.build_meta"
++
++[project]
++name = "pastebin"
++version = "1.0.0"
++description = "Loopback-only HTTP service for sharing text snippets"
++requires-python = ">=3.11"
++# Constitution Principle I — Standard Library Only: this list MUST stay empty.
++dependencies = []
++
++[project.optional-dependencies]
++dev = ["pytest"]
++
++[tool.setuptools]
++package-dir = {"" = "src"}
++
++[tool.setuptools.packages.find]
++where = ["src"]
++
++[tool.pytest.ini_options]
++pythonpath = ["src"]
++testpaths = ["tests"]
+diff --git a/specs/001-pastebin-service/plan.md b/specs/001-pastebin-service/plan.md
+index d4f0656..5c7da46 100644
+--- a/specs/001-pastebin-service/plan.md
++++ b/specs/001-pastebin-service/plan.md
+@@ -263,6 +263,8 @@ which Security Baseline items apply."* `R-nn` references are decisions in
+ | Threaded server (`ThreadingHTTPServer`) rather than single-threaded | SR-007 requires the secret check and removal to be atomic *with respect to concurrent requests*, and two Edge Cases ("Concurrent revocation", "Concurrent reads during revocation") specify behaviour that only exists under concurrency | A single-threaded `HTTPServer` cannot exhibit — and therefore cannot be tested for — the concurrency requirements the spec states. The requirement would be unverifiable, which Principle III treats as unimplemented |
+ | A `threading.Lock` around check-and-remove | SR-007's atomicity requirement. Without it, two threads can both read a record, one fail its token check, and interleaving can still produce a removal not justified by a successful check | Lock-free "unlink and inspect the result" was rejected: `unlink` returns nothing, so the token check cannot be made to precede removal atomically. A per-identifier lock registry was rejected as strictly more machinery (a dict plus an eviction policy) for a service whose stated concurrency is "a handful of simultaneous requests" |
+ | Temp-file + `fsync` + `os.replace` instead of a direct write | SR-007 (a concurrent read must never observe a partially written record) and FR-023 (durability across restart) | A direct `open(path, "w")` leaves a window in which a reader sees a truncated file, and leaves the record's bytes in the page cache when the process stops. Both are failures the spec names explicitly |
++| An in-flight request counter, waited on (bounded) during shutdown | contracts/cli.md "Shutdown": *"In-flight requests are allowed to complete."* Handler threads are daemons (R-01), so without this the interpreter stops them mid-response | Closing the sockets immediately was rejected because it breaks the stated shutdown clause. Making the threads non-daemonic was rejected because a wedged request would then prevent the process from exiting at all — the opposite failure. The counter is two integers and a `Condition`, and the wait is bounded |
++| A 30-second socket timeout on the request handler | SR-005 ("bound the time and memory any single input may consume"): a client that opens a connection and never writes otherwise holds a handler thread forever | Leaving `timeout = None` (the stdlib default) was rejected because it makes thread exhaustion reachable by a caller that sends nothing at all — a resource limit the Security Baseline requires and that no other control covers |
+ 
+ **Not complexity, recorded to pre-empt the question**: the four-module split (`cli`, `server`,
+ `store`, `models`) is not a layered architecture — each module is one file along a real seam, with
+diff --git a/specs/001-pastebin-service/tasks.md b/specs/001-pastebin-service/tasks.md
+index 3f98f9f..5a4ef9d 100644
+--- a/specs/001-pastebin-service/tasks.md
++++ b/specs/001-pastebin-service/tasks.md
+@@ -40,9 +40,9 @@ Single project, `src/` layout (spec Constraints, plan "Structure Decision"):
+ 
+ **Purpose**: Project skeleton and packaging with zero runtime dependencies.
+ 
+-- [ ] T001 Create the directory skeleton `src/pastebin/` and `tests/` at the repository root, with an empty `src/pastebin/__init__.py`; do **not** create `tests/__init__.py` (tests are collected by `pytest` rootdir discovery)
+-- [ ] T002 Create `pyproject.toml` at the repository root: project name `pastebin`, `requires-python = ">=3.11"`, an **empty** `dependencies = []` list (Constitution Principle I — zero runtime dependencies), `[project.optional-dependencies] dev = ["pytest"]`, setuptools backend configured for the `src/` layout, and `[tool.pytest.ini_options]` with `pythonpath = ["src"]` and `testpaths = ["tests"]`
+-- [ ] T003 [P] Add the module docstring and `__version__` constant to `src/pastebin/__init__.py` (package marker only — no imports of sibling modules, so that `python -m pastebin` import order stays trivial)
++- [X] T001 Create the directory skeleton `src/pastebin/` and `tests/` at the repository root, with an empty `src/pastebin/__init__.py`; do **not** create `tests/__init__.py` (tests are collected by `pytest` rootdir discovery)
++- [X] T002 Create `pyproject.toml` at the repository root: project name `pastebin`, `requires-python = ">=3.11"`, an **empty** `dependencies = []` list (Constitution Principle I — zero runtime dependencies), `[project.optional-dependencies] dev = ["pytest"]`, setuptools backend configured for the `src/` layout, and `[tool.pytest.ini_options]` with `pythonpath = ["src"]` and `testpaths = ["tests"]`
++- [X] T003 [P] Add the module docstring and `__version__` constant to `src/pastebin/__init__.py` (package marker only — no imports of sibling modules, so that `python -m pastebin` import order stays trivial)
+ 
+ ---
+ 
+@@ -54,19 +54,19 @@ test fixtures. Every user story builds on these.
+ 
+ **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
+ 
+-- [ ] T004 [P] Create `src/pastebin/models.py` with the module constants and primitives: `MAX_CONTENT_BYTES = 65536`, `MAX_BODY_BYTES = 66560` (65 536 + 1 024 envelope slack, R-06), `MIN_EXPIRES_IN = 1`, `MAX_EXPIRES_IN = 2_592_000`, `TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"`, `ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{22}")`; plus `now_utc()` returning `datetime.datetime.now(datetime.UTC).replace(microsecond=0)` (R-08), `format_timestamp(dt)` using `strftime(TIMESTAMP_FORMAT)` (never `isoformat()` — it emits `+00:00`, not `Z`), `parse_timestamp(s)` using `strptime` with `tzinfo=UTC`, `new_id()` returning `secrets.token_urlsafe(16)` (22 chars, 128 bits — SR-001, FR-011), `new_delete_token()` returning `secrets.token_urlsafe(32)` (43 chars, 256 bits), and `is_valid_id(s)` using `ID_PATTERN.fullmatch`
+-- [ ] T005 [P] Create `src/pastebin/store.py` with `PasteStore.__init__(self, data_dir)` resolving and caching `os.path.realpath(data_dir)`, and `_record_path(self, paste_id)` implementing the two-layer containment of SR-003/R-07: first reject anything failing `models.is_valid_id` (returns `None`, never touches the filesystem), then build `os.path.join(self._dir, paste_id + ".json")` and confirm `os.path.realpath(candidate)` starts with `os.path.realpath(self._dir) + os.sep` (post-symlink-resolution check; returns `None` if not contained)
+-- [ ] T006 Create `write_record(self, record)` in `src/pastebin/store.py`: generate the id via `models.new_id()`, open a temp file in the **same directory** with `os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)` — mode set at creation, never `chmod` afterwards (SR-008) — write `json.dumps(record, ensure_ascii=False).encode("utf-8")`, `os.fsync`, close, then `os.replace(tmp, final)` (R-03); on `FileExistsError` for the final path regenerate the id and retry, bounded to 5 attempts, then raise (fail closed, SR-010); remove the temp file on any failure path (depends on T005)
+-- [ ] T007 Create `read_record(self, paste_id)` in `src/pastebin/store.py`: resolve via `_record_path`, return `None` for an invalid/uncontained id, open the file, decode UTF-8, `json.loads`, and return the record dict; `FileNotFoundError` returns `None` (full corruption tolerance is hardened in T037) (depends on T005)
+-- [ ] T008 [P] Create `src/pastebin/server.py` with `PastebinHandler(http.server.BaseHTTPRequestHandler)` carrying only the response and redaction plumbing (R-11, SR-009): `protocol_version = "HTTP/1.1"`, `version_string()` overridden to return the fixed string `"pastebin"` (suppresses the `BaseHTTP/x.y Python/z` banner), `log_message()` and `log_request()` overridden to write nothing, `send_error()` overridden to route through the JSON error helper so no stdlib HTML error page can escape, `_send_json(status, payload)` writing `application/json; charset=utf-8` with an explicit `Content-Length`, `_send_bytes(status, content_type, body, extra_headers=None)`, and `_send_json_error(status, message)` writing exactly `{"error": "<message>"}` (FR-025)
+-- [ ] T009 Add request parsing and the closed route table to `src/pastebin/server.py` (R-07, R-12, FR-028): `urllib.parse.urlsplit(self.path).path` to discard the query string, split on `/`, then `urllib.parse.unquote` **each segment individually** (never the whole path — whole-path unquoting lets `%2F` manufacture new segments); dispatch on `(method, segment shape)` against exactly four rows — `POST /pastes`, `GET /pastes/<id>`, `GET /pastes/<id>/raw`, `DELETE /pastes/<id>`; every other combination (unknown path, `GET /pastes`, `POST /pastes/<id>`, `PUT`/`PATCH`/`HEAD`, `/pastes/<id>/anything`, trailing slash `/pastes/<id>/`) returns `404` with `{"error": "not found"}` and **no** `405` and no `Allow` header; define `do_GET`/`do_POST`/`do_DELETE` all funnelling into the one dispatcher, wrapped in `try: ... except Exception: self._send_json_error(500, "internal error")` (SR-010; never a bare `except:`) (depends on T008)
+-- [ ] T010 Add `PastebinHTTPServer(http.server.ThreadingHTTPServer)` to `src/pastebin/server.py` with `daemon_threads = True`, holding the `PasteStore` instance so handlers reach it via `self.server.store` (R-01); confirm the inherited `allow_reuse_address` does not permit a second listener on an already-bound `127.0.0.1:PORT` (FR-004 depends on the bind failing) (depends on T009)
+-- [ ] T011 [P] Create `src/pastebin/cli.py` with `main(argv=None)`: `argparse` parser with a single `serve` subcommand, required `--port` (`type=int`) and required `--data`; range-check `0 <= port <= 65535` after parsing with the message `error: --port must be between 0 and 65535`; define `HOST = "127.0.0.1"` as a module constant with **no** `--host` flag and no way to override it (SR-011); create the data directory with `os.makedirs(path, mode=0o700, exist_ok=True)` followed by an explicit `os.chmod(path, 0o700)` (handles a pre-existing looser directory, SR-008, FR-002), then verify writability — each failure prints `error: cannot create data directory: <reason>` or `error: data directory is not writable` to **stderr** and exits non-zero (FR-004, per `contracts/cli.md`)
+-- [ ] T012 Complete the startup sequence in `src/pastebin/cli.py` in the exact order of `contracts/cli.md`: construct `PastebinHTTPServer` (which binds and listens), then `print(f"listening on {HOST}:{server.server_address[1]}", flush=True)` — the **bound** port, so `--port 0` reports the ephemeral port (FR-003, R-02) — then `serve_forever()`; a bind `OSError` prints `error: cannot bind 127.0.0.1:<port>: <reason>` to stderr and exits non-zero **without** printing the readiness line (FR-004); `KeyboardInterrupt` shuts down cleanly and returns exit status `0`; no fallback port and no fallback directory (Constitution Principle II) (depends on T010, T011)
+-- [ ] T013 Create `src/pastebin/__main__.py` containing only `from .cli import main` and `raise SystemExit(main())` so that `PYTHONPATH=src python -m pastebin serve --port PORT --data DIR` is the entry point (spec Constraints) (depends on T012)
+-- [ ] T014 Create `tests/conftest.py` with the shared fixtures (R-15): a `server` fixture that builds a `PasteStore` on `tmp_path`, starts a real `PastebinHTTPServer` on `--port 0` in a background thread, yields an object exposing the base URL and the data directory, and calls `shutdown()` + `server_close()` on teardown; a `restart_server` helper that stops the server and starts a fresh one against the **same** `tmp_path` (needed by FR-018 and FR-023); and stdlib-only HTTP helpers built on `urllib.request` / `http.client` — `post_json`, `get`, `delete`, and a raw-socket/`http.client` helper able to send a deliberately wrong or absent `Content-Length` and chunked framing (no third-party client — R-15) (depends on T010)
+-- [ ] T015 [P] Create `tests/test_routing.py` covering FR-028 as a table test over `/`, `/nope`, `/pastes/`, `GET /pastes`, `POST /pastes/<id>`, `PUT`/`PATCH`/`HEAD` on `/pastes/<id>`, `/pastes/<id>/other`, and `/pastes/<id>/` — asserting `404` for every row, a JSON body of exactly `{"error": "not found"}`, and the absence of any `Allow` header; each test name or docstring references `FR-028` (depends on T014)
+-- [ ] T016 [P] Create `tests/test_security.py` covering SR-003 and SC-010: a table test over the id segments `../../etc/passwd`, `..%2F..%2Fetc%2Fpasswd`, `%2Fetc%2Fpasswd`, `/etc/passwd`, `a/../b`, the empty string, a 21-char id, and a 23-char id — each must return `404` on `GET /pastes/<id>`, `GET /pastes/<id>/raw`, and `DELETE /pastes/<id>`; plus a test that plants a symlink named `<valid-22-char-id>.json` inside the data directory pointing at a file **outside** it and asserts the read returns `404` and the target's contents never appear in the response; plus an assertion that nothing outside the data directory is created, modified, or removed; each test references `SR-003` (depends on T014)
++- [X] T004 [P] Create `src/pastebin/models.py` with the module constants and primitives: `MAX_CONTENT_BYTES = 65536`, `MAX_BODY_BYTES = 66560` (65 536 + 1 024 envelope slack, R-06), `MIN_EXPIRES_IN = 1`, `MAX_EXPIRES_IN = 2_592_000`, `TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"`, `ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{22}")`; plus `now_utc()` returning `datetime.datetime.now(datetime.UTC).replace(microsecond=0)` (R-08), `format_timestamp(dt)` using `strftime(TIMESTAMP_FORMAT)` (never `isoformat()` — it emits `+00:00`, not `Z`), `parse_timestamp(s)` using `strptime` with `tzinfo=UTC`, `new_id()` returning `secrets.token_urlsafe(16)` (22 chars, 128 bits — SR-001, FR-011), `new_delete_token()` returning `secrets.token_urlsafe(32)` (43 chars, 256 bits), and `is_valid_id(s)` using `ID_PATTERN.fullmatch`
++- [X] T005 [P] Create `src/pastebin/store.py` with `PasteStore.__init__(self, data_dir)` resolving and caching `os.path.realpath(data_dir)`, and `_record_path(self, paste_id)` implementing the two-layer containment of SR-003/R-07: first reject anything failing `models.is_valid_id` (returns `None`, never touches the filesystem), then build `os.path.join(self._dir, paste_id + ".json")` and confirm `os.path.realpath(candidate)` starts with `os.path.realpath(self._dir) + os.sep` (post-symlink-resolution check; returns `None` if not contained)
++- [X] T006 Create `write_record(self, record)` in `src/pastebin/store.py`: generate the id via `models.new_id()`, open a temp file in the **same directory** with `os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)` — mode set at creation, never `chmod` afterwards (SR-008) — write `json.dumps(record, ensure_ascii=False).encode("utf-8")`, `os.fsync`, close, then `os.replace(tmp, final)` (R-03); on `FileExistsError` for the final path regenerate the id and retry, bounded to 5 attempts, then raise (fail closed, SR-010); remove the temp file on any failure path (depends on T005)
++- [X] T007 Create `read_record(self, paste_id)` in `src/pastebin/store.py`: resolve via `_record_path`, return `None` for an invalid/uncontained id, open the file, decode UTF-8, `json.loads`, and return the record dict; `FileNotFoundError` returns `None` (full corruption tolerance is hardened in T037) (depends on T005)
++- [X] T008 [P] Create `src/pastebin/server.py` with `PastebinHandler(http.server.BaseHTTPRequestHandler)` carrying only the response and redaction plumbing (R-11, SR-009): `protocol_version = "HTTP/1.1"`, `version_string()` overridden to return the fixed string `"pastebin"` (suppresses the `BaseHTTP/x.y Python/z` banner), `log_message()` and `log_request()` overridden to write nothing, `send_error()` overridden to route through the JSON error helper so no stdlib HTML error page can escape, `_send_json(status, payload)` writing `application/json; charset=utf-8` with an explicit `Content-Length`, `_send_bytes(status, content_type, body, extra_headers=None)`, and `_send_json_error(status, message)` writing exactly `{"error": "<message>"}` (FR-025)
++- [X] T009 Add request parsing and the closed route table to `src/pastebin/server.py` (R-07, R-12, FR-028): `urllib.parse.urlsplit(self.path).path` to discard the query string, split on `/`, then `urllib.parse.unquote` **each segment individually** (never the whole path — whole-path unquoting lets `%2F` manufacture new segments); dispatch on `(method, segment shape)` against exactly four rows — `POST /pastes`, `GET /pastes/<id>`, `GET /pastes/<id>/raw`, `DELETE /pastes/<id>`; every other combination (unknown path, `GET /pastes`, `POST /pastes/<id>`, `PUT`/`PATCH`/`HEAD`, `/pastes/<id>/anything`, trailing slash `/pastes/<id>/`) returns `404` with `{"error": "not found"}` and **no** `405` and no `Allow` header; define `do_GET`/`do_POST`/`do_DELETE` all funnelling into the one dispatcher, wrapped in `try: ... except Exception: self._send_json_error(500, "internal error")` (SR-010; never a bare `except:`) (depends on T008)
++- [X] T010 Add `PastebinHTTPServer(http.server.ThreadingHTTPServer)` to `src/pastebin/server.py` with `daemon_threads = True`, holding the `PasteStore` instance so handlers reach it via `self.server.store` (R-01); confirm the inherited `allow_reuse_address` does not permit a second listener on an already-bound `127.0.0.1:PORT` (FR-004 depends on the bind failing) (depends on T009)
++- [X] T011 [P] Create `src/pastebin/cli.py` with `main(argv=None)`: `argparse` parser with a single `serve` subcommand, required `--port` (`type=int`) and required `--data`; range-check `0 <= port <= 65535` after parsing with the message `error: --port must be between 0 and 65535`; define `HOST = "127.0.0.1"` as a module constant with **no** `--host` flag and no way to override it (SR-011); create the data directory with `os.makedirs(path, mode=0o700, exist_ok=True)` followed by an explicit `os.chmod(path, 0o700)` (handles a pre-existing looser directory, SR-008, FR-002), then verify writability — each failure prints `error: cannot create data directory: <reason>` or `error: data directory is not writable` to **stderr** and exits non-zero (FR-004, per `contracts/cli.md`)
++- [X] T012 Complete the startup sequence in `src/pastebin/cli.py` in the exact order of `contracts/cli.md`: construct `PastebinHTTPServer` (which binds and listens), then `print(f"listening on {HOST}:{server.server_address[1]}", flush=True)` — the **bound** port, so `--port 0` reports the ephemeral port (FR-003, R-02) — then `serve_forever()`; a bind `OSError` prints `error: cannot bind 127.0.0.1:<port>: <reason>` to stderr and exits non-zero **without** printing the readiness line (FR-004); `KeyboardInterrupt` shuts down cleanly and returns exit status `0`; no fallback port and no fallback directory (Constitution Principle II) (depends on T010, T011)
++- [X] T013 Create `src/pastebin/__main__.py` containing only `from .cli import main` and `raise SystemExit(main())` so that `PYTHONPATH=src python -m pastebin serve --port PORT --data DIR` is the entry point (spec Constraints) (depends on T012)
++- [X] T014 Create `tests/conftest.py` with the shared fixtures (R-15): a `server` fixture that builds a `PasteStore` on `tmp_path`, starts a real `PastebinHTTPServer` on `--port 0` in a background thread, yields an object exposing the base URL and the data directory, and calls `shutdown()` + `server_close()` on teardown; a `restart_server` helper that stops the server and starts a fresh one against the **same** `tmp_path` (needed by FR-018 and FR-023); and stdlib-only HTTP helpers built on `urllib.request` / `http.client` — `post_json`, `get`, `delete`, and a raw-socket/`http.client` helper able to send a deliberately wrong or absent `Content-Length` and chunked framing (no third-party client — R-15) (depends on T010)
++- [X] T015 [P] Create `tests/test_routing.py` covering FR-028 as a table test over `/`, `/nope`, `/pastes/`, `GET /pastes`, `POST /pastes/<id>`, `PUT`/`PATCH`/`HEAD` on `/pastes/<id>`, `/pastes/<id>/other`, and `/pastes/<id>/` — asserting `404` for every row, a JSON body of exactly `{"error": "not found"}`, and the absence of any `Allow` header; each test name or docstring references `FR-028` (depends on T014)
++- [X] T016 [P] Create `tests/test_security.py` covering SR-003 and SC-010: a table test over the id segments `../../etc/passwd`, `..%2F..%2Fetc%2Fpasswd`, `%2Fetc%2Fpasswd`, `/etc/passwd`, `a/../b`, the empty string, a 21-char id, and a 23-char id — each must return `404` on `GET /pastes/<id>`, `GET /pastes/<id>/raw`, and `DELETE /pastes/<id>`; plus a test that plants a symlink named `<valid-22-char-id>.json` inside the data directory pointing at a file **outside** it and asserts the read returns `404` and the target's contents never appear in the response; plus an assertion that nothing outside the data directory is created, modified, or removed; each test references `SR-003` (depends on T014)
+ 
+ **Checkpoint**: The service starts, prints the readiness line, answers `404` for every route, and
+ never leaks a path, a banner, or a traceback. User story work can now begin.
+@@ -87,18 +87,18 @@ or restart behaviour required.
+ 
+ > Write these first and confirm they fail before implementing T021–T025.
+ 
+-- [ ] T017 [P] [US1] Create `tests/test_create.py` covering creation and body validation: `POST` with `content` only returns `201` (FR-005); `content` missing → `400`, `content: 5` → `400`, `content: ""` → `201` and stored as empty (FR-006); unknown extra fields are ignored and absent from the read (FR-009); the `201` body has exactly `id`, `delete_token`, and `url == "/pastes/<id>"` (FR-010); a table test over an empty body, invalid JSON, a bare list, a bare number, a bare string, `null`, and `true` → all `400` with nothing created (FR-026, SR-004); and an assertion that every rejection leaves the data directory byte-for-byte unchanged (SR-004). Each test references its FR/SR ids
+-- [ ] T018 [US1] Add the size and framing tests to `tests/test_create.py`: `content` encoding to exactly 65 536 bytes → `201` and 65 537 bytes → `413`, including a multi-byte case where the character count is far below the byte count (FR-007, FR-027); a body that is oversized *and* otherwise valid returns `413`, confirming precedence over `400`/`201` (FR-027); a missing `Content-Length` → `400`; `Transfer-Encoding: chunked` → `400`; a `Content-Length` larger than the bytes actually delivered → `400` with no hang (SR-005); and a 50 MB declared body → `413` while the server process's RSS does not grow by the payload size (FR-029, SC-007) (same file as T017 — sequential)
+-- [ ] T019 [P] [US1] Create `tests/test_read.py`: `GET /pastes/<id>` returns `200` with `id`, `content`, `created_at`, `expires_at` at their exact values (FR-012); `delete_token` is absent from the body **and** from every response header (FR-013); `GET /pastes/<id>/raw` returns `200`, `Content-Type: text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`, and a body byte-equal to the input with no trailing newline and no BOM (FR-014, SR-012); an empty paste returns `200` with `Content-Length: 0`; a fixture containing non-ASCII, emoji, `\n`, `\t`, quotes, and leading/trailing whitespace round-trips byte-identically through both read forms (FR-016, SC-001); storing `<script>alert(1)</script>` and `<html>…` returns them as inert `text/plain`, never `text/html` (SR-012); an id that was never issued returns `404` (FR-028)
+-- [ ] T020 [P] [US1] Add the generation and permission tests to `tests/test_security.py`: create 1 000 pastes and assert all ids and tokens are unique, that ids are 22 chars and tokens 43 chars from `[A-Za-z0-9_-]`, that ids need no URL encoding (FR-011, SR-001), and that identical content created at different times yields unrelated ids and tokens (SR-001's "not derived from content, time, or a counter"); `os.stat` the data directory and assert mode `0o700` and every record file `0o600`, re-running the creation under a permissive umask of `0o000` to catch a write-then-`chmod` implementation (SR-008)
++- [X] T017 [P] [US1] Create `tests/test_create.py` covering creation and body validation: `POST` with `content` only returns `201` (FR-005); `content` missing → `400`, `content: 5` → `400`, `content: ""` → `201` and stored as empty (FR-006); unknown extra fields are ignored and absent from the read (FR-009); the `201` body has exactly `id`, `delete_token`, and `url == "/pastes/<id>"` (FR-010); a table test over an empty body, invalid JSON, a bare list, a bare number, a bare string, `null`, and `true` → all `400` with nothing created (FR-026, SR-004); and an assertion that every rejection leaves the data directory byte-for-byte unchanged (SR-004). Each test references its FR/SR ids
++- [X] T018 [US1] Add the size and framing tests to `tests/test_create.py`: `content` encoding to exactly 65 536 bytes → `201` and 65 537 bytes → `413`, including a multi-byte case where the character count is far below the byte count (FR-007, FR-027); a body that is oversized *and* otherwise valid returns `413`, confirming precedence over `400`/`201` (FR-027); a missing `Content-Length` → `400`; `Transfer-Encoding: chunked` → `400`; a `Content-Length` larger than the bytes actually delivered → `400` with no hang (SR-005); and a 50 MB declared body → `413` while the server process's RSS does not grow by the payload size (FR-029, SC-007) (same file as T017 — sequential)
++- [X] T019 [P] [US1] Create `tests/test_read.py`: `GET /pastes/<id>` returns `200` with `id`, `content`, `created_at`, `expires_at` at their exact values (FR-012); `delete_token` is absent from the body **and** from every response header (FR-013); `GET /pastes/<id>/raw` returns `200`, `Content-Type: text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`, and a body byte-equal to the input with no trailing newline and no BOM (FR-014, SR-012); an empty paste returns `200` with `Content-Length: 0`; a fixture containing non-ASCII, emoji, `\n`, `\t`, quotes, and leading/trailing whitespace round-trips byte-identically through both read forms (FR-016, SC-001); storing `<script>alert(1)</script>` and `<html>…` returns them as inert `text/plain`, never `text/html` (SR-012); an id that was never issued returns `404` (FR-028)
++- [X] T020 [P] [US1] Add the generation and permission tests to `tests/test_security.py`: create 1 000 pastes and assert all ids and tokens are unique, that ids are 22 chars and tokens 43 chars from `[A-Za-z0-9_-]`, that ids need no URL encoding (FR-011, SR-001), and that identical content created at different times yields unrelated ids and tokens (SR-001's "not derived from content, time, or a counter"); `os.stat` the data directory and assert mode `0o700` and every record file `0o600`, re-running the creation under a permissive umask of `0o000` to catch a write-then-`chmod` implementation (SR-008)
+ 
+ ### Implementation for User Story 1
+ 
+-- [ ] T021 [US1] Add `validate_create_payload(payload)` to `src/pastebin/models.py` implementing rules 4–8 and 11 of the data-model validation table in the exact documented order, each returning a specific message: body decodes as UTF-8 → else `400` `"request body must be valid UTF-8"`; parses as JSON → else `400` `"request body must be a JSON object"`; the parsed value is a `dict` (a list, number, string, `null`, or bool is rejected) → else `400` `"request body must be a JSON object"`; the `content` key is present → else `400` `"content is required"`; `type(payload["content"]) is str` — **`type(...) is str`, never `isinstance`**, so `str` subclasses are rejected → else `400` `"content must be a string"`; and finally `len(content.encode("utf-8")) <= 65536` → else `413` `"content exceeds the maximum size of 65536 bytes"`. Keys other than `content` and `expires_in` are never inspected (FR-009)
+-- [ ] T022 [US1] Add the pre-body framing guard to the `POST /pastes` path in `src/pastebin/server.py`, applied **before any body byte is read** (R-06, SR-005, FR-029): `Content-Length` must be present and a non-negative integer → else `400` `"request must declare a valid Content-Length"`; `Transfer-Encoding: chunked` → `400` with the same message; `Content-Length > MAX_BODY_BYTES` (66 560) → `413` `"content exceeds the maximum size of 65536 bytes"` with the body left unread, a `Connection: close` header, and `self.close_connection = True` (an unread body on a reused connection is a request-smuggling hazard); then `self.rfile.read(content_length)` with the validated length, and a short read → `400` `"request body was shorter than the declared Content-Length"`
+-- [ ] T023 [US1] Implement the `POST /pastes` handler in `src/pastebin/server.py`: call `models.validate_create_payload`, then build the record `{"id", "content", "created_at", "expires_at", "delete_token"}` with `created_at = models.format_timestamp(models.now_utc())`, `expires_at = None` (lifetimes arrive in US2), and `delete_token = models.new_delete_token()`; persist via `store.write_record`; respond `201` with exactly `{"id": ..., "delete_token": ..., "url": f"/pastes/{id}"}` (FR-010, FR-011) (depends on T021, T022)
+-- [ ] T024 [US1] Implement the `GET /pastes/<id>` handler in `src/pastebin/server.py`: look the record up via `store.read_record`, respond `404` `{"error": "not found"}` when it is `None`, otherwise `200` with exactly `{"id", "content", "created_at", "expires_at"}` — `delete_token` is **never** included in the body or any header (FR-012, FR-013, FR-015, SR-009) (depends on T023)
+-- [ ] T025 [US1] Implement the `GET /pastes/<id>/raw` handler in `src/pastebin/server.py`: respond `200` with the body `content.encode("utf-8")` written verbatim — no trailing newline, no BOM, no JSON wrapper — `Content-Type: text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`, and `Content-Length` computed from the **encoded byte count** never `len(str)` (FR-014, FR-016, SR-012, R-13); failures use the JSON error body even though the success body is plain text (depends on T024)
++- [X] T021 [US1] Add `validate_create_payload(payload)` to `src/pastebin/models.py` implementing rules 4–8 and 11 of the data-model validation table in the exact documented order, each returning a specific message: body decodes as UTF-8 → else `400` `"request body must be valid UTF-8"`; parses as JSON → else `400` `"request body must be a JSON object"`; the parsed value is a `dict` (a list, number, string, `null`, or bool is rejected) → else `400` `"request body must be a JSON object"`; the `content` key is present → else `400` `"content is required"`; `type(payload["content"]) is str` — **`type(...) is str`, never `isinstance`**, so `str` subclasses are rejected → else `400` `"content must be a string"`; and finally `len(content.encode("utf-8")) <= 65536` → else `413` `"content exceeds the maximum size of 65536 bytes"`. Keys other than `content` and `expires_in` are never inspected (FR-009)
++- [X] T022 [US1] Add the pre-body framing guard to the `POST /pastes` path in `src/pastebin/server.py`, applied **before any body byte is read** (R-06, SR-005, FR-029): `Content-Length` must be present and a non-negative integer → else `400` `"request must declare a valid Content-Length"`; `Transfer-Encoding: chunked` → `400` with the same message; `Content-Length > MAX_BODY_BYTES` (66 560) → `413` `"content exceeds the maximum size of 65536 bytes"` with the body left unread, a `Connection: close` header, and `self.close_connection = True` (an unread body on a reused connection is a request-smuggling hazard); then `self.rfile.read(content_length)` with the validated length, and a short read → `400` `"request body was shorter than the declared Content-Length"`
++- [X] T023 [US1] Implement the `POST /pastes` handler in `src/pastebin/server.py`: call `models.validate_create_payload`, then build the record `{"id", "content", "created_at", "expires_at", "delete_token"}` with `created_at = models.format_timestamp(models.now_utc())`, `expires_at = None` (lifetimes arrive in US2), and `delete_token = models.new_delete_token()`; persist via `store.write_record`; respond `201` with exactly `{"id": ..., "delete_token": ..., "url": f"/pastes/{id}"}` (FR-010, FR-011) (depends on T021, T022)
++- [X] T024 [US1] Implement the `GET /pastes/<id>` handler in `src/pastebin/server.py`: look the record up via `store.read_record`, respond `404` `{"error": "not found"}` when it is `None`, otherwise `200` with exactly `{"id", "content", "created_at", "expires_at"}` — `delete_token` is **never** included in the body or any header (FR-012, FR-013, FR-015, SR-009) (depends on T023)
++- [X] T025 [US1] Implement the `GET /pastes/<id>/raw` handler in `src/pastebin/server.py`: respond `200` with the body `content.encode("utf-8")` written verbatim — no trailing newline, no BOM, no JSON wrapper — `Content-Type: text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`, and `Content-Length` computed from the **encoded byte count** never `len(str)` (FR-014, FR-016, SR-012, R-13); failures use the JSON error body even though the success body is plain text (depends on T024)
+ 
+ **Checkpoint**: User Story 1 is fully functional and independently testable — the MVP. Run
+ `PYTHONPATH=src pytest -q tests/test_create.py tests/test_read.py tests/test_security.py` and
+@@ -118,14 +118,14 @@ durability work.
+ 
+ ### Tests for User Story 2
+ 
+-- [ ] T026 [P] [US2] Create `tests/test_expiry.py`: a table test over `expires_in` values `1` and `2592000` (accepted, `201`) and `0`, `-1`, `2592001`, `3600.0`, `"3600"`, `true`, `false`, `null` (rejected, `400`, nothing created) — `true` in particular must **not** be read as a 1-second lifetime (FR-008, spec Edge Case "True/false as a lifetime"); absence of `expires_in` yields `expires_at: null` (FR-008, FR-015); a one-hour lifetime reads back with `expires_at` exactly 3 600 seconds after `created_at`; both timestamps match `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$` (FR-015); after expiry, `GET /pastes/<id>`, `GET /pastes/<id>/raw`, and `DELETE /pastes/<id>` all return `404` (FR-017); and a paste is readable up to **and including** its expiry instant and not after (Edge Case "Expiry exactly now", inclusive `<=`)
+-- [ ] T027 [US2] Add the restart-expiry test to `tests/test_expiry.py` using the `restart_server` helper from `tests/conftest.py`: create a paste with `expires_in: 1`, stop the server, sleep past the expiry instant, restart against the same data directory, and assert `404` — proving expiry is evaluated per request against the current clock with no startup scan (FR-018) (same file as T026 — sequential)
++- [X] T026 [P] [US2] Create `tests/test_expiry.py`: a table test over `expires_in` values `1` and `2592000` (accepted, `201`) and `0`, `-1`, `2592001`, `3600.0`, `"3600"`, `true`, `false`, `null` (rejected, `400`, nothing created) — `true` in particular must **not** be read as a 1-second lifetime (FR-008, spec Edge Case "True/false as a lifetime"); absence of `expires_in` yields `expires_at: null` (FR-008, FR-015); a one-hour lifetime reads back with `expires_at` exactly 3 600 seconds after `created_at`; both timestamps match `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$` (FR-015); after expiry, `GET /pastes/<id>`, `GET /pastes/<id>/raw`, and `DELETE /pastes/<id>` all return `404` (FR-017); and a paste is readable up to **and including** its expiry instant and not after (Edge Case "Expiry exactly now", inclusive `<=`)
++- [X] T027 [US2] Add the restart-expiry test to `tests/test_expiry.py` using the `restart_server` helper from `tests/conftest.py`: create a paste with `expires_in: 1`, stop the server, sleep past the expiry instant, restart against the same data directory, and assert `404` — proving expiry is evaluated per request against the current clock with no startup scan (FR-018) (same file as T026 — sequential)
+ 
+ ### Implementation for User Story 2
+ 
+-- [ ] T028 [US2] Extend `validate_create_payload` in `src/pastebin/models.py` with rules 9 and 10, inserted **before** the size check so an oversized-and-otherwise-valid body still yields `413`: if `expires_in` is present, `type(expires_in) is int` — **`type(...) is int`, never `isinstance`, because `bool` is a subclass of `int` in Python and `isinstance(True, int)` is `True`** (R-10) — and `1 <= expires_in <= 2_592_000`; either failure is `400` `"expires_in must be an integer between 1 and 2592000"`. Absence means "never expires"; an explicit `null` is rejected rather than treated as absence (Principle II forbids inventing an equivalence the spec did not state). Add `compute_expires_at(created_at, expires_in)` returning `created_at + timedelta(seconds=expires_in)` formatted with `format_timestamp`, or `None` when `expires_in` was absent — microseconds are truncated **before** adding so the stored and reported instants are identical (R-08)
+-- [ ] T029 [US2] Add `is_live(record, now)` to `src/pastebin/store.py` implementing the liveness predicate verbatim — `record exists ∧ record parses ∧ (expires_at is null ∨ now <= expires_at)`, with the comparison **inclusive** — and apply it inside `read_record` so an expired record returns `None`; the record is never rewritten or deleted on expiry, so an expired file is permitted to linger on disk (spec Assumption "Expired records may remain on disk") (depends on T028)
+-- [ ] T030 [US2] Wire `expires_in` through the `POST /pastes` handler in `src/pastebin/server.py`: pass the validated value to `models.compute_expires_at` and store the resulting `expires_at` string (or JSON `null`) in the record, so the on-disk timestamp strings are the same strings returned on the wire with nothing re-derived on read (R-08, FR-023) (depends on T028, T029)
++- [X] T028 [US2] Extend `validate_create_payload` in `src/pastebin/models.py` with rules 9 and 10, inserted **before** the size check so an oversized-and-otherwise-valid body still yields `413`: if `expires_in` is present, `type(expires_in) is int` — **`type(...) is int`, never `isinstance`, because `bool` is a subclass of `int` in Python and `isinstance(True, int)` is `True`** (R-10) — and `1 <= expires_in <= 2_592_000`; either failure is `400` `"expires_in must be an integer between 1 and 2592000"`. Absence means "never expires"; an explicit `null` is rejected rather than treated as absence (Principle II forbids inventing an equivalence the spec did not state). Add `compute_expires_at(created_at, expires_in)` returning `created_at + timedelta(seconds=expires_in)` formatted with `format_timestamp`, or `None` when `expires_in` was absent — microseconds are truncated **before** adding so the stored and reported instants are identical (R-08)
++- [X] T029 [US2] Add `is_live(record, now)` to `src/pastebin/store.py` implementing the liveness predicate verbatim — `record exists ∧ record parses ∧ (expires_at is null ∨ now <= expires_at)`, with the comparison **inclusive** — and apply it inside `read_record` so an expired record returns `None`; the record is never rewritten or deleted on expiry, so an expired file is permitted to linger on disk (spec Assumption "Expired records may remain on disk") (depends on T028)
++- [X] T030 [US2] Wire `expires_in` through the `POST /pastes` handler in `src/pastebin/server.py`: pass the validated value to `models.compute_expires_at` and store the resulting `expires_at` string (or JSON `null`) in the record, so the on-disk timestamp strings are the same strings returned on the wire with nothing re-derived on read (R-08, FR-023) (depends on T028, T029)
+ 
+ **Checkpoint**: User Stories 1 and 2 both work independently. Run quickstart Scenario 2.
+ 
+@@ -142,13 +142,13 @@ return `403` and leave the snippet readable with unchanged content.
+ 
+ ### Tests for User Story 3
+ 
+-- [ ] T031 [P] [US3] Create `tests/test_revoke.py`: `DELETE` with the correct token → `204` with an empty body (FR-019); `DELETE` with no `X-Delete-Token` and with a wrong token → `403` `{"error": "invalid delete token"}`, and a subsequent `GET` returns the unchanged content (FR-020, SC-004); a token differing only in its **last character** is rejected (SR-002); `DELETE` of an unknown id and of an expired id, each with a wrong token and with no token — all four return `404` `{"error": "not found"}`, never `403` (FR-021, Edge Case "Both wrong"); after a successful `DELETE`, `GET`, `GET /raw`, and a repeat `DELETE` with the same correct token all return `404` (FR-022); and the token is re-read from the stored record on every request, so no earlier successful read or any client-supplied claim other than the token itself can satisfy the check (SR-006)
+-- [ ] T032 [P] [US3] Add the concurrency tests to `tests/test_security.py` for SR-007: spawn N threads issuing the **same** correct `DELETE` and assert exactly one `204`, the rest `404`, and no `403` and no `500` (Edge Case "Concurrent revocation"); spawn concurrent `GET`s while a `DELETE` is in flight and assert every response is either the complete paste or `404`, never truncated or partial (Edge Case "Concurrent reads during revocation"); and add a source-level assertion that `hmac.compare_digest` is used and that no `==` comparison of the delete token exists in `src/pastebin/` (SR-002)
++- [X] T031 [P] [US3] Create `tests/test_revoke.py`: `DELETE` with the correct token → `204` with an empty body (FR-019); `DELETE` with no `X-Delete-Token` and with a wrong token → `403` `{"error": "invalid delete token"}`, and a subsequent `GET` returns the unchanged content (FR-020, SC-004); a token differing only in its **last character** is rejected (SR-002); `DELETE` of an unknown id and of an expired id, each with a wrong token and with no token — all four return `404` `{"error": "not found"}`, never `403` (FR-021, Edge Case "Both wrong"); after a successful `DELETE`, `GET`, `GET /raw`, and a repeat `DELETE` with the same correct token all return `404` (FR-022); and the token is re-read from the stored record on every request, so no earlier successful read or any client-supplied claim other than the token itself can satisfy the check (SR-006)
++- [X] T032 [P] [US3] Add the concurrency tests to `tests/test_security.py` for SR-007: spawn N threads issuing the **same** correct `DELETE` and assert exactly one `204`, the rest `404`, and no `403` and no `500` (Edge Case "Concurrent revocation"); spawn concurrent `GET`s while a `DELETE` is in flight and assert every response is either the complete paste or `404`, never truncated or partial (Edge Case "Concurrent reads during revocation"); and add a source-level assertion that `hmac.compare_digest` is used and that no `==` comparison of the delete token exists in `src/pastebin/` (SR-002)
+ 
+ ### Implementation for User Story 3
+ 
+-- [ ] T033 [US3] Add a module-level `threading.Lock` and `delete_record(self, paste_id, token)` to `src/pastebin/store.py`, holding the lock across the **entire** read-record → liveness-check → token-compare → `os.unlink` sequence (SR-007, R-09), and returning a three-valued outcome (`NOT_FOUND` / `FORBIDDEN` / `DELETED`); evaluation order is load-bearing — existence and liveness are checked **before** the token, so an unknown or expired id is `NOT_FOUND` regardless of the token supplied (FR-021); the comparison is `hmac.compare_digest(supplied, stored)`, never `==` (SR-002); `FileNotFoundError` from either the read or the `unlink` maps to `NOT_FOUND`; reads deliberately take no lock — `os.replace` and a single `unlink` already give readers all-or-nothing (R-09)
+-- [ ] T034 [US3] Implement the `DELETE /pastes/<id>` handler in `src/pastebin/server.py`: read the `X-Delete-Token` header, validate its characters are ASCII before comparing (pre-empting `compare_digest`'s `TypeError` on non-ASCII `str`, SR-004), treat an absent header as an empty token, call `store.delete_record`, and map the outcome to `204` with an empty body and `Content-Length: 0`, `403` `{"error": "invalid delete token"}`, or `404` `{"error": "not found"}` (FR-019, FR-020, FR-021) (depends on T033)
++- [X] T033 [US3] Add a module-level `threading.Lock` and `delete_record(self, paste_id, token)` to `src/pastebin/store.py`, holding the lock across the **entire** read-record → liveness-check → token-compare → `os.unlink` sequence (SR-007, R-09), and returning a three-valued outcome (`NOT_FOUND` / `FORBIDDEN` / `DELETED`); evaluation order is load-bearing — existence and liveness are checked **before** the token, so an unknown or expired id is `NOT_FOUND` regardless of the token supplied (FR-021); the comparison is `hmac.compare_digest(supplied, stored)`, never `==` (SR-002); `FileNotFoundError` from either the read or the `unlink` maps to `NOT_FOUND`; reads deliberately take no lock — `os.replace` and a single `unlink` already give readers all-or-nothing (R-09)
++- [X] T034 [US3] Implement the `DELETE /pastes/<id>` handler in `src/pastebin/server.py`: read the `X-Delete-Token` header, validate its characters are ASCII before comparing (pre-empting `compare_digest`'s `TypeError` on non-ASCII `str`, SR-004), treat an absent header as an empty token, call `store.delete_record`, and map the outcome to `204` with an empty body and `Content-Length: 0`, `403` `{"error": "invalid delete token"}`, or `404` `{"error": "not found"}` (FR-019, FR-020, FR-021) (depends on T033)
+ 
+ **Checkpoint**: User Stories 1, 2, and 3 are each independently functional. Run quickstart
+ Scenario 3.
+@@ -167,13 +167,13 @@ secrets still work.
+ 
+ ### Tests for User Story 4
+ 
+-- [ ] T035 [P] [US4] Create `tests/test_persistence.py`: create several pastes (with and without lifetimes), stop the server, restart against the same data directory, and assert identical `content`, `created_at`, and `expires_at` for each, and that an original `delete_token` still revokes (FR-023, SC-005); plant a truncated record, a non-JSON record, a JSON array, a record that is not valid UTF-8, and a record missing `content`, then assert each of those ids reads `404`, that the service still starts, and that unrelated pastes still read correctly (FR-024, Edge Case "Foreign files in the data directory")
+-- [ ] T036 [P] [US4] Create `tests/test_startup.py` driving `python -m pastebin serve` as a **real subprocess** (R-15): assert a connection to `127.0.0.1:PORT` succeeds and that no other interface is bound (FR-001, SR-011); start with a nested non-existent `--data` path and assert the tree is created with mode `0o700` and the service becomes ready (FR-002); capture stdout and assert it is **exactly** `listening on 127.0.0.1:<bound port>` and nothing else, with `--port 0` reporting the ephemeral port rather than `0` (FR-003); three failure cases — invalid arguments, a port already in use, and an unwritable data directory — each asserting a non-zero exit status, a message on **stderr**, and the **absence** of the readiness line on stdout (FR-004); assert `--host` is rejected as an unknown argument and that a connection to the host's non-loopback address is refused (SR-011); and connect immediately after reading the readiness line across many iterations, asserting the request is served rather than refused (SC-006)
++- [X] T035 [P] [US4] Create `tests/test_persistence.py`: create several pastes (with and without lifetimes), stop the server, restart against the same data directory, and assert identical `content`, `created_at`, and `expires_at` for each, and that an original `delete_token` still revokes (FR-023, SC-005); plant a truncated record, a non-JSON record, a JSON array, a record that is not valid UTF-8, and a record missing `content`, then assert each of those ids reads `404`, that the service still starts, and that unrelated pastes still read correctly (FR-024, Edge Case "Foreign files in the data directory")
++- [X] T036 [P] [US4] Create `tests/test_startup.py` driving `python -m pastebin serve` as a **real subprocess** (R-15): assert a connection to `127.0.0.1:PORT` succeeds and that no other interface is bound (FR-001, SR-011); start with a nested non-existent `--data` path and assert the tree is created with mode `0o700` and the service becomes ready (FR-002); capture stdout and assert it is **exactly** `listening on 127.0.0.1:<bound port>` and nothing else, with `--port 0` reporting the ephemeral port rather than `0` (FR-003); three failure cases — invalid arguments, a port already in use, and an unwritable data directory — each asserting a non-zero exit status, a message on **stderr**, and the **absence** of the readiness line on stdout (FR-004); assert `--host` is rejected as an unknown argument and that a connection to the host's non-loopback address is refused (SR-011); and connect immediately after reading the readiness line across many iterations, asserting the request is served rather than refused (SC-006)
+ 
+ ### Implementation for User Story 4
+ 
+-- [ ] T037 [US4] Harden `read_record` in `src/pastebin/store.py` for FR-024: catch `OSError`, `UnicodeDecodeError`, and `json.JSONDecodeError`, and reject a parsed value that is not a `dict` or that lacks any of `id`, `content`, `created_at`, `expires_at`, `delete_token` — every such case returns `None`, i.e. the paste is treated as not existing, and never raises, never prevents startup, and never affects any other paste; the store looks records up by exact key only and never enumerates the directory, so foreign files are structurally invisible (depends on T029)
+-- [ ] T038 [US4] Reconcile `src/pastebin/cli.py` against the failure table in `contracts/cli.md`: confirm each startup failure emits its exact documented stderr message and a non-zero exit, that the readiness line is printed only **after** the socket is bound and listening (so a client connecting the instant it sees the line is queued, not refused — SC-006), that `print(..., flush=True)` is used because stdout is block-buffered when piped, that `SIGINT` exits `0` with in-flight requests allowed to complete, and that no request logging, banner, or diagnostic is ever written to stdout (FR-003, FR-004, SR-009) (depends on T012, T036)
++- [X] T037 [US4] Harden `read_record` in `src/pastebin/store.py` for FR-024: catch `OSError`, `UnicodeDecodeError`, and `json.JSONDecodeError`, and reject a parsed value that is not a `dict` or that lacks any of `id`, `content`, `created_at`, `expires_at`, `delete_token` — every such case returns `None`, i.e. the paste is treated as not existing, and never raises, never prevents startup, and never affects any other paste; the store looks records up by exact key only and never enumerates the directory, so foreign files are structurally invisible (depends on T029)
++- [X] T038 [US4] Reconcile `src/pastebin/cli.py` against the failure table in `contracts/cli.md`: confirm each startup failure emits its exact documented stderr message and a non-zero exit, that the readiness line is printed only **after** the socket is bound and listening (so a client connecting the instant it sees the line is queued, not refused — SC-006), that `print(..., flush=True)` is used because stdout is block-buffered when piped, that `SIGINT` exits `0` with in-flight requests allowed to complete, and that no request logging, banner, or diagnostic is ever written to stdout (FR-003, FR-004, SR-009) (depends on T012, T036)
+ 
+ **Checkpoint**: All four user stories are independently functional. Run quickstart Scenario 4.
+ 
+@@ -183,12 +183,12 @@ secrets still work.
+ 
+ **Purpose**: The suite-wide gates that no single story owns.
+ 
+-- [ ] T039 [P] Create `tests/test_requirement_coverage.py` implementing the SC-008 gate: scan every test name and docstring under `tests/` for requirement ids and fail if any of `FR-001` … `FR-029` or `SR-001` … `SR-012` is unreferenced, naming the missing ids in the failure message (Constitution Principle III — the mapping must be explicit and discoverable)
+-- [ ] T040 [P] Add the suite-wide leakage and fail-closed tests to `tests/test_security.py`: scan every response body and header produced across the whole suite for any paste's `delete_token`, for any absolute filesystem path, for `Traceback`, and for a Python version string, asserting none appear and that the `Server` header is exactly `pastebin` (SR-009, SC-009); and inject an internal failure (monkeypatch the store to raise) asserting the response is `500` with the standard `{"error": ...}` shape, no content, no partial content, and no diagnostics (SR-010)
+-- [ ] T041 Run `PYTHONPATH=src pytest -q` over `tests/` and fix failures in `src/pastebin/` until the full suite passes with **zero** failures, skips, and `xfail`s — tests must not be weakened, marked `xfail`, or deleted to make the run green (Constitution: Development Workflow & Quality Gates) (depends on T039, T040)
+-- [ ] T042 Execute all five scenarios in `specs/001-pastebin-service/quickstart.md` against a freshly started service and confirm each behaves as documented, including the `0700`/`0600` permission check and the flat-RSS check during the 50 MB submission (depends on T041)
+-- [ ] T043 [P] Create `README.md` at the repository root documenting the run command, the four routes, and the `pytest` invocation, deriving content from `contracts/cli.md` and `contracts/http-api.md` without restating them in full
+-- [ ] T044 Final constitution compliance review across `src/pastebin/` and `pyproject.toml`: confirm `dependencies` is empty and `pytest` appears only under the dev extra (Principle I); confirm no bare `except:` and no `except Exception: pass` exists and that the single broad `except Exception` in `server.py` emits a loud `500` rather than swallowing (Principle II); confirm every FR and SR has a named test (Principle III); confirm no abstraction layer, cache, sweeper, startup scan, or configuration option was added beyond the three elements justified in the plan's Complexity Tracking (Principle IV); and confirm the Security Baseline items listed in the plan's Constitution Check remain implemented (Principle V) (depends on T041)
++- [X] T039 [P] Create `tests/test_requirement_coverage.py` implementing the SC-008 gate: scan every test name and docstring under `tests/` for requirement ids and fail if any of `FR-001` … `FR-029` or `SR-001` … `SR-012` is unreferenced, naming the missing ids in the failure message (Constitution Principle III — the mapping must be explicit and discoverable)
++- [X] T040 [P] Add the suite-wide leakage and fail-closed tests to `tests/test_security.py`: scan every response body and header produced across the whole suite for any paste's `delete_token`, for any absolute filesystem path, for `Traceback`, and for a Python version string, asserting none appear and that the `Server` header is exactly `pastebin` (SR-009, SC-009); and inject an internal failure (monkeypatch the store to raise) asserting the response is `500` with the standard `{"error": ...}` shape, no content, no partial content, and no diagnostics (SR-010)
++- [X] T041 Run `PYTHONPATH=src pytest -q` over `tests/` and fix failures in `src/pastebin/` until the full suite passes with **zero** failures, skips, and `xfail`s — tests must not be weakened, marked `xfail`, or deleted to make the run green (Constitution: Development Workflow & Quality Gates) (depends on T039, T040)
++- [X] T042 Execute all five scenarios in `specs/001-pastebin-service/quickstart.md` against a freshly started service and confirm each behaves as documented, including the `0700`/`0600` permission check and the flat-RSS check during the 50 MB submission (depends on T041)
++- [X] T043 [P] Create `README.md` at the repository root documenting the run command, the four routes, and the `pytest` invocation, deriving content from `contracts/cli.md` and `contracts/http-api.md` without restating them in full
++- [X] T044 Final constitution compliance review across `src/pastebin/` and `pyproject.toml`: confirm `dependencies` is empty and `pytest` appears only under the dev extra (Principle I); confirm no bare `except:` and no `except Exception: pass` exists and that the single broad `except Exception` in `server.py` emits a loud `500` rather than swallowing (Principle II); confirm every FR and SR has a named test (Principle III); confirm no abstraction layer, cache, sweeper, startup scan, or configuration option was added beyond the three elements justified in the plan's Complexity Tracking (Principle IV); and confirm the Security Baseline items listed in the plan's Constitution Check remain implemented (Principle V) (depends on T041)
+ 
+ ---
+ 
+diff --git a/src/pastebin/__init__.py b/src/pastebin/__init__.py
+new file mode 100644
+index 0000000..932268a
+--- /dev/null
++++ b/src/pastebin/__init__.py
+@@ -0,0 +1,11 @@
++"""Pastebin service — a loopback-only HTTP service for sharing text snippets.
++
++Run as::
++
++    PYTHONPATH=src python -m pastebin serve --port PORT --data DIR
++
++This module is a package marker only. It deliberately imports no sibling module so
++that ``python -m pastebin`` has a trivial import order.
++"""
++
++__version__ = "1.0.0"
+diff --git a/src/pastebin/__main__.py b/src/pastebin/__main__.py
+new file mode 100644
+index 0000000..55561c7
+--- /dev/null
++++ b/src/pastebin/__main__.py
+@@ -0,0 +1,5 @@
++"""Entry point for ``PYTHONPATH=src python -m pastebin serve --port PORT --data DIR``."""
++
++from .cli import main
++
++raise SystemExit(main())
+diff --git a/src/pastebin/cli.py b/src/pastebin/cli.py
+new file mode 100644
+index 0000000..d0bd5c7
+--- /dev/null
++++ b/src/pastebin/cli.py
+@@ -0,0 +1,103 @@
++"""Operator-facing command line: argument parsing, data-directory setup, startup.
++
++Failures are fatal — there is no fallback port, no fallback directory, and no
++best-guess coercion of an invalid argument (Constitution Principle II,
++contracts/cli.md "Startup failures").
++"""
++
++from __future__ import annotations
++
++import argparse
++import os
++import sys
++
++from .server import HOST, make_server
++
++#: The bind address is a module constant with no flag and no way to override it
++#: (SR-011). Re-exported from ``server`` so there is exactly one definition.
++__all__ = ["HOST", "main"]
++
++MIN_PORT = 0
++MAX_PORT = 65535
++
++#: How long shutdown waits for requests already being processed to finish.
++SHUTDOWN_GRACE_SECONDS = 10.0
++
++
++def _build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        prog="pastebin", description="Share text snippets over loopback HTTP."
++    )
++    subparsers = parser.add_subparsers(dest="command", required=True)
++    serve = subparsers.add_parser("serve", help="run the service")
++    serve.add_argument("--port", type=int, required=True, help="0 to 65535; 0 picks a free port")
++    serve.add_argument("--data", required=True, help="directory holding stored pastes")
++    # Deliberately no --host: the bind address is not configurable (SR-011).
++    return parser
++
++
++def _fail(message: str) -> int:
++    print(message, file=sys.stderr, flush=True)
++    return 1
++
++
++def _prepare_data_dir(path: str) -> str | None:
++    """Create and permission-check the data directory; returns an error message or None.
++
++    The directory is created with ``mode=0o700`` including missing parents (FR-002),
++    then ``0700`` is enforced explicitly so that a pre-existing, looser directory is
++    tightened rather than accepted (SR-008).
++    """
++    try:
++        os.makedirs(path, mode=0o700, exist_ok=True)
++    except OSError as error:
++        return f"error: cannot create data directory: {error.strerror or error}"
++
++    try:
++        os.chmod(path, 0o700)
++    except OSError as error:
++        return f"error: cannot create data directory: {error.strerror or error}"
++
++    if not os.path.isdir(path) or not os.access(path, os.W_OK | os.X_OK):
++        return "error: data directory is not writable"
++    return None
++
++
++def main(argv: list[str] | None = None) -> int:
++    """Entry point. Returns the process exit status (0 only on clean shutdown)."""
++    args = _build_parser().parse_args(argv)
++
++    if not (MIN_PORT <= args.port <= MAX_PORT):
++        return _fail(f"error: --port must be between {MIN_PORT} and {MAX_PORT}")
++
++    problem = _prepare_data_dir(args.data)
++    if problem is not None:
++        return _fail(problem)
++
++    # Bind and listen *before* announcing readiness, so a client that connects the
++    # instant it sees the line is queued by the listen backlog rather than refused
++    # (SC-006, contracts/cli.md "Startup sequence").
++    try:
++        server = make_server(args.port, args.data)
++    except OSError as error:
++        return _fail(
++            f"error: cannot bind {HOST}:{args.port}: {error.strerror or error}"
++        )
++
++    # Exactly one line on stdout, and nothing else ever (FR-003, SR-009). The bound
++    # port is reported, so --port 0 shows the ephemeral port rather than 0.
++    # ``flush=True`` matters: stdout is block-buffered when piped.
++    print(f"listening on {HOST}:{server.server_address[1]}", flush=True)
++
++    try:
++        server.serve_forever()
++    except KeyboardInterrupt:
++        # A clean stop, not a failure: exit status 0 (contracts/cli.md "Shutdown").
++        pass
++    finally:
++        server.shutdown()
++        # In-flight requests are allowed to complete before the sockets are closed.
++        server.await_idle(SHUTDOWN_GRACE_SECONDS)
++        server.server_close()
++    # No cleanup of the data directory: pastes are durable by design (FR-023).
++    return 0
+diff --git a/src/pastebin/models.py b/src/pastebin/models.py
+new file mode 100644
+index 0000000..f8f6b50
+--- /dev/null
++++ b/src/pastebin/models.py
+@@ -0,0 +1,179 @@
++"""Paste record shape, validation rules, timestamp formatting, and identifier generation.
++
++Constants, primitives, and the creation-payload validator. This module touches no
++filesystem and no socket; everything here is pure.
++"""
++
++from __future__ import annotations
++
++import datetime
++import json
++import re
++import secrets
++
++# --- Limits (spec Constraints, data-model.md "Validation rules") ------------------
++
++#: Maximum encoded size of ``content`` in bytes (FR-007).
++MAX_CONTENT_BYTES = 65536
++
++#: Maximum declared ``Content-Length`` accepted before the body is read: the content
++#: cap plus 1 024 bytes of JSON envelope slack (R-06, data-model.md rule 2).
++MAX_BODY_BYTES = 66560
++
++#: Inclusive bounds for ``expires_in``, in seconds (FR-008).
++MIN_EXPIRES_IN = 1
++MAX_EXPIRES_IN = 2_592_000
++
++#: ISO 8601 UTC, whole-second precision, ``Z`` suffix (FR-015).
++TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
++
++#: Allowlist every identifier segment must match before it is joined to a path
++#: (SR-003, FR-011). 22 characters is the length of ``token_urlsafe(16)``.
++ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{22}")
++
++#: Fields every stored record must carry to be recognisable as a paste (FR-024).
++RECORD_FIELDS = ("id", "content", "created_at", "expires_at", "delete_token")
++
++
++# --- Error messages ---------------------------------------------------------------
++# Each names the rule that was broken and never echoes an input or stored value
++# (SR-009, contracts/http-api.md "Failure cases").
++
++MSG_BAD_FRAMING = "request must declare a valid Content-Length"
++MSG_SHORT_BODY = "request body was shorter than the declared Content-Length"
++MSG_BAD_UTF8 = "request body must be valid UTF-8"
++MSG_NOT_OBJECT = "request body must be a JSON object"
++MSG_CONTENT_REQUIRED = "content is required"
++MSG_CONTENT_TYPE = "content must be a string"
++MSG_EXPIRES_IN = "expires_in must be an integer between 1 and 2592000"
++MSG_TOO_LARGE = f"content exceeds the maximum size of {MAX_CONTENT_BYTES} bytes"
++MSG_NOT_FOUND = "not found"
++MSG_BAD_TOKEN = "invalid delete token"
++MSG_INTERNAL = "internal error"
++
++
++# --- Time -------------------------------------------------------------------------
++
++
++def now_utc() -> datetime.datetime:
++    """Current UTC instant truncated to whole seconds (R-08).
++
++    Microseconds are dropped *before* any arithmetic so that the stored and reported
++    instants are identical, with no rounding gap.
++    """
++    return datetime.datetime.now(datetime.UTC).replace(microsecond=0)
++
++
++def format_timestamp(value: datetime.datetime) -> str:
++    """Render an aware UTC datetime as ``YYYY-MM-DDTHH:MM:SSZ`` (FR-015).
++
++    ``strftime`` is used rather than ``isoformat()``, which would emit ``+00:00``.
++    """
++    return value.strftime(TIMESTAMP_FORMAT)
++
++
++def parse_timestamp(value: str) -> datetime.datetime:
++    """Parse a ``YYYY-MM-DDTHH:MM:SSZ`` string back to an aware UTC datetime."""
++    return datetime.datetime.strptime(value, TIMESTAMP_FORMAT).replace(
++        tzinfo=datetime.UTC
++    )
++
++
++def compute_expires_at(created_at: datetime.datetime, expires_in: int | None) -> str | None:
++    """Expiry instant for a paste, or ``None`` when it never expires (FR-008, R-08).
++
++    ``created_at`` is already microsecond-truncated, so the sum is exact.
++    """
++    if expires_in is None:
++        return None
++    return format_timestamp(created_at + datetime.timedelta(seconds=expires_in))
++
++
++# --- Identifiers and secrets ------------------------------------------------------
++
++
++def new_id() -> str:
++    """A fresh 22-character, 128-bit URL-safe identifier (FR-011, SR-001).
++
++    Drawn from ``secrets``; not derived from content, time, or a counter.
++    """
++    return secrets.token_urlsafe(16)
++
++
++def new_delete_token() -> str:
++    """A fresh 43-character, 256-bit URL-safe revocation secret (SR-001)."""
++    return secrets.token_urlsafe(32)
++
++
++def is_valid_id(value: str) -> bool:
++    """True when ``value`` matches the identifier allowlist exactly (SR-003)."""
++    return ID_PATTERN.fullmatch(value) is not None
++
++
++# --- Creation payload validation --------------------------------------------------
++
++
++class ValidationError(Exception):
++    """A creation payload was rejected. Carries the HTTP status and the message."""
++
++    def __init__(self, status: int, message: str) -> None:
++        super().__init__(message)
++        self.status = status
++        self.message = message
++
++
++def validate_create_payload(body: bytes) -> tuple[str, int | None]:
++    """Validate a ``POST /pastes`` body and return ``(content, expires_in)``.
++
++    Implements rules 4-11 of the data-model validation table in the documented order;
++    framing rules 1-3 are enforced in ``server`` before any body byte is read.
++    Raises :class:`ValidationError` on the first rule that fails.
++    """
++    # Rule 4 — body decodes as UTF-8.
++    try:
++        text = body.decode("utf-8")
++    except UnicodeDecodeError:
++        raise ValidationError(400, MSG_BAD_UTF8) from None
++
++    # Rule 5 — body parses as JSON.
++    try:
++        payload = json.loads(text)
++    except ValueError:
++        raise ValidationError(400, MSG_NOT_OBJECT) from None
++
++    # Rule 6 — the parsed value is a JSON object, not a list, number, string,
++    # ``null``, or bool.
++    if type(payload) is not dict:
++        raise ValidationError(400, MSG_NOT_OBJECT)
++
++    # Rule 7 — ``content`` is present.
++    if "content" not in payload:
++        raise ValidationError(400, MSG_CONTENT_REQUIRED)
++
++    # Rule 8 — ``content`` is exactly a ``str``. ``type(...) is str`` rather than
++    # ``isinstance`` so that ``str`` subclasses are rejected too.
++    content = payload["content"]
++    if type(content) is not str:
++        raise ValidationError(400, MSG_CONTENT_TYPE)
++
++    # Rules 9 and 10 — ``expires_in``, when present, is an in-range integer.
++    # ``type(...) is int`` rather than ``isinstance``: ``bool`` subclasses ``int`` in
++    # Python, so ``isinstance(True, int)`` is ``True`` and would silently accept
++    # ``true`` as a one-second lifetime (R-10, FR-008). An explicit ``null`` is
++    # rejected rather than treated as absence.
++    expires_in: int | None = None
++    if "expires_in" in payload:
++        candidate = payload["expires_in"]
++        if type(candidate) is not int:
++            raise ValidationError(400, MSG_EXPIRES_IN)
++        if not (MIN_EXPIRES_IN <= candidate <= MAX_EXPIRES_IN):
++            raise ValidationError(400, MSG_EXPIRES_IN)
++        expires_in = candidate
++
++    # Rule 11 — encoded size. Last, so that an oversized-but-otherwise-valid body
++    # still yields 413 rather than 400 (FR-027).
++    if len(content.encode("utf-8")) > MAX_CONTENT_BYTES:
++        raise ValidationError(413, MSG_TOO_LARGE)
++
++    # Keys other than ``content`` and ``expires_in`` are never inspected (FR-009).
++    return content, expires_in
+diff --git a/src/pastebin/server.py b/src/pastebin/server.py
+new file mode 100644
+index 0000000..6716757
+--- /dev/null
++++ b/src/pastebin/server.py
+@@ -0,0 +1,394 @@
++"""HTTP surface: a threading server over a closed four-route table.
++
++Every stdlib default that would leak internals — the ``Server`` banner, the request
++log, the HTML error pages — is overridden here rather than left to chance (R-11,
++SR-009).
++"""
++
++from __future__ import annotations
++
++import http.server
++import json
++import os
++import threading
++import urllib.parse
++
++from . import models, store
++
++#: The only address this service ever binds (SR-011). There is no option to change it.
++HOST = "127.0.0.1"
++
++_JSON_CONTENT_TYPE = "application/json; charset=utf-8"
++_TEXT_CONTENT_TYPE = "text/plain; charset=utf-8"
++
++
++class PastebinHandler(http.server.BaseHTTPRequestHandler):
++    """Request handler: framing guard, closed routing table, JSON-only errors."""
++
++    protocol_version = "HTTP/1.1"
++
++    #: An idle keep-alive connection is closed after this many seconds. Without it a
++    #: client that opens a connection and never writes holds a thread indefinitely
++    #: (SR-005: bound what a single input may consume).
++    timeout = 30
++
++    # --- Redaction overrides (SR-009, R-11) ---------------------------------
++
++    def version_string(self) -> str:
++        """Fixed ``Server`` header — suppresses the ``BaseHTTP/x.y Python/z`` banner."""
++        return "pastebin"
++
++    def log_message(self, format: str, *args) -> None:  # noqa: A002 - stdlib signature
++        """Request logging is suppressed entirely: identifiers are capability URLs."""
++
++    def log_request(self, code="-", size="-") -> None:
++        """Request logging is suppressed entirely (FR-003, SR-009)."""
++
++    def log_error(self, format: str, *args) -> None:  # noqa: A002 - stdlib signature
++        """Error logging is suppressed entirely (SR-009)."""
++
++    def send_error(self, code, message=None, explain=None) -> None:
++        """Route every stdlib-originated error through the JSON error body.
++
++        Without this override, an unsupported method or a malformed request line
++        would produce the stock HTML error page, which carries the Python version and
++        the request path (SR-009), and a ``501`` rather than the ``404`` FR-028
++        requires. The connection is closed because an unsupported method may have
++        left an unread body on it, and a reused connection would misparse those bytes
++        as the next request.
++        """
++        self._send_json_error(404, models.MSG_NOT_FOUND, {"Connection": "close"})
++
++    # --- Response helpers ---------------------------------------------------
++
++    def _send_bytes(
++        self,
++        status: int,
++        content_type: str | None,
++        body: bytes,
++        extra_headers: dict[str, str] | None = None,
++    ) -> None:
++        extra = dict(extra_headers or {})
++        if self.close_connection and not any(
++            name.lower() == "connection" for name in extra
++        ):
++            # The caller decided this connection must not be reused; tell the client
++            # so, rather than closing under it.
++            extra["Connection"] = "close"
++
++        self.send_response(status)
++        if content_type is not None:
++            self.send_header("Content-Type", content_type)
++        self.send_header("Content-Length", str(len(body)))
++        for name, value in extra.items():
++            self.send_header(name, value)
++        self.end_headers()
++        if body:
++            self.wfile.write(body)
++
++    def _send_json(
++        self, status: int, payload: dict, extra_headers: dict[str, str] | None = None
++    ) -> None:
++        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
++        self._send_bytes(status, _JSON_CONTENT_TYPE, body, extra_headers)
++
++    def _send_json_error(
++        self, status: int, message: str, extra_headers: dict[str, str] | None = None
++    ) -> None:
++        """Every non-2xx response carries exactly ``{"error": "<message>"}`` (FR-025).
++
++        The message names the rule that was broken; it never echoes an input value, a
++        stored value, a path, or internal state (SR-009).
++        """
++        self._send_json(status, {"error": message}, extra_headers)
++
++    # --- Routing ------------------------------------------------------------
++
++    def _segments(self) -> list[str]:
++        """Path segments, each percent-decoded individually (R-07).
++
++        The query string is discarded first. Each segment is unquoted *separately* —
++        unquoting the whole path would let ``%2F`` manufacture new segments and
++        re-enter routing.
++        """
++        path = urllib.parse.urlsplit(self.path).path
++        return [urllib.parse.unquote(part) for part in path.split("/")[1:]]
++
++    def _declares_body(self) -> bool:
++        """True when the request announces a body, however it is framed."""
++        if self.headers.get("Transfer-Encoding"):
++            return True
++        raw = self.headers.get("Content-Length")
++        if raw is None:
++            return False
++        try:
++            return int(raw) > 0
++        except ValueError:
++            return True
++
++    def _dispatch(self, method: str, segments: list[str]) -> None:
++        """The closed route table: exactly four rows, everything else is 404.
++
++        There is no ``405`` and no ``Allow`` header — an unrecognised action on a
++        known address is reported as not found (FR-028).
++        """
++        if method == "POST" and segments == ["pastes"]:
++            self._handle_create()
++            return
++        if len(segments) == 2 and segments[0] == "pastes":
++            paste_id = segments[1]
++            if method == "GET":
++                self._handle_read(paste_id)
++                return
++            if method == "DELETE":
++                self._handle_delete(paste_id)
++                return
++        if (
++            method == "GET"
++            and len(segments) == 3
++            and segments[0] == "pastes"
++            and segments[2] == "raw"
++        ):
++            self._handle_raw(segments[1])
++            return
++
++        self._send_json_error(404, models.MSG_NOT_FOUND)
++
++    def _handle(self, method: str) -> None:
++        self.server.enter_request()
++        try:
++            self._handle_inner(method)
++        finally:
++            self.server.leave_request()
++
++    def _handle_inner(self, method: str) -> None:
++        try:
++            segments = self._segments()
++            if self._declares_body() and not (
++                method == "POST" and segments == ["pastes"]
++            ):
++                # ``POST /pastes`` is the only route that reads a body. If any other
++                # request declares one, the connection must not be reused: the unread
++                # bytes would be misparsed as the next request (request smuggling).
++                self.close_connection = True
++            self._dispatch(method, segments)
++        except Exception:
++            # Fail closed and loud: a generic 500 in the standard shape, with no
++            # content, no partial content, and no diagnostics (SR-010). This is not a
++            # swallowed exception — the failure is reported, never masked as success.
++            try:
++                self._send_json_error(500, models.MSG_INTERNAL)
++            except Exception:
++                self.close_connection = True
++
++    def do_GET(self) -> None:
++        self._handle("GET")
++
++    def do_POST(self) -> None:
++        self._handle("POST")
++
++    def do_DELETE(self) -> None:
++        self._handle("DELETE")
++
++    def do_HEAD(self) -> None:
++        """``HEAD`` is not in the route table, so it is always ``404`` (FR-028).
++
++        It is handled explicitly rather than falling through to ``send_error`` only
++        so that no content is written: RFC 9110 forbids content in a response to
++        ``HEAD``. The status line and headers are exactly those of the corresponding
++        ``GET`` error, including the absence of any ``Allow`` header.
++        """
++        if self._declares_body():
++            self.close_connection = True
++        body = json.dumps({"error": models.MSG_NOT_FOUND}, ensure_ascii=False).encode(
++            "utf-8"
++        )
++        self.send_response(404)
++        self.send_header("Content-Type", _JSON_CONTENT_TYPE)
++        # The length the corresponding GET would send, with no content written.
++        self.send_header("Content-Length", str(len(body)))
++        if self.close_connection:
++            self.send_header("Connection", "close")
++        self.end_headers()
++
++    # --- Handlers -----------------------------------------------------------
++
++    @property
++    def _store(self) -> store.PasteStore:
++        return self.server.store
++
++    def _read_body(self) -> bytes | None:
++        """Framing guard, applied before any body byte is read (R-06, SR-005, FR-029).
++
++        Returns the body, or ``None`` after having already sent the error response.
++        """
++        def reject_framing():
++            # The body's extent is unknown or untrusted, so whatever bytes follow
++            # cannot be skipped safely; the connection must not be reused.
++            self.close_connection = True
++            self._send_json_error(400, models.MSG_BAD_FRAMING)
++            return None
++
++        if self.headers.get("Transfer-Encoding"):
++            return reject_framing()
++
++        raw_length = self.headers.get("Content-Length")
++        if raw_length is None:
++            return reject_framing()
++        try:
++            length = int(raw_length)
++        except ValueError:
++            return reject_framing()
++        if length < 0:
++            return reject_framing()
++
++        if length > models.MAX_BODY_BYTES:
++            # Refuse without reading a single byte, so memory stays bounded however
++            # much the caller attempts to send (FR-029, SC-007). Closing the
++            # connection is mandatory: an unread body on a reused connection could be
++            # misparsed as the next request.
++            self.close_connection = True
++            self._send_json_error(
++                413, models.MSG_TOO_LARGE, {"Connection": "close"}
++            )
++            return None
++
++        body = self.rfile.read(length)
++        if len(body) != length:
++            self.close_connection = True
++            self._send_json_error(400, models.MSG_SHORT_BODY)
++            return None
++        return body
++
++    def _handle_create(self) -> None:
++        body = self._read_body()
++        if body is None:
++            return
++
++        try:
++            content, expires_in = models.validate_create_payload(body)
++        except models.ValidationError as error:
++            self._send_json_error(error.status, error.message)
++            return
++
++        created = models.now_utc()
++        record = {
++            "id": "",  # replaced by the store with the identifier it allocates
++            "content": content,
++            "created_at": models.format_timestamp(created),
++            "expires_at": models.compute_expires_at(created, expires_in),
++            "delete_token": models.new_delete_token(),
++        }
++        paste_id = self._store.write_record(record)
++        self._send_json(
++            201,
++            {
++                "id": paste_id,
++                "delete_token": record["delete_token"],
++                "url": f"/pastes/{paste_id}",
++            },
++        )
++
++    def _handle_read(self, paste_id: str) -> None:
++        record = self._store.read_record(paste_id)
++        if record is None:
++            self._send_json_error(404, models.MSG_NOT_FOUND)
++            return
++        # Exactly four fields. ``delete_token`` is never included in the body or in
++        # any header (FR-012, FR-013, SR-009).
++        self._send_json(
++            200,
++            {
++                "id": record["id"],
++                "content": record["content"],
++                "created_at": record["created_at"],
++                "expires_at": record["expires_at"],
++            },
++        )
++
++    def _handle_raw(self, paste_id: str) -> None:
++        record = self._store.read_record(paste_id)
++        if record is None:
++            # The error shape stays JSON even though the success shape is plain text.
++            self._send_json_error(404, models.MSG_NOT_FOUND)
++            return
++        # Verbatim bytes: no trailing newline, no BOM, no JSON wrapper. The length is
++        # the encoded byte count, never ``len(str)`` (FR-014, FR-016, R-13).
++        body = record["content"].encode("utf-8")
++        self._send_bytes(
++            200,
++            _TEXT_CONTENT_TYPE,
++            body,
++            {"X-Content-Type-Options": "nosniff"},
++        )
++
++    def _handle_delete(self, paste_id: str) -> None:
++        token=[REDACTED:assigned_secret]("X-Delete-Token") or ""
++        # ``compare_digest`` raises TypeError on a non-ASCII ``str``; reject those
++        # characters up front rather than letting the guard itself fail (SR-004).
++        if not token.isascii():
++            token = ""
++
++        outcome = self._store.delete_record(paste_id, token)
++        if outcome == store.DELETED:
++            self._send_bytes(204, None, b"")
++        elif outcome == store.FORBIDDEN:
++            self._send_json_error(403, models.MSG_BAD_TOKEN)
++        else:
++            self._send_json_error(404, models.MSG_NOT_FOUND)
++
++
++class PastebinHTTPServer(http.server.ThreadingHTTPServer):
++    """One thread per request, holding the store handlers reach via ``self.server``."""
++
++    daemon_threads = True
++    # ``allow_reuse_address`` is inherited from ``HTTPServer`` (it sets ``SO_REUSEADDR``,
++    # which only permits rebinding a port left in TIME_WAIT). It does not permit a
++    # second *listener* on an address another process is actively bound to, so a
++    # start against a port already in use still fails — which FR-004 depends on.
++    # ``SO_REUSEPORT``, which would permit that, is never set.
++
++    def __init__(self, port: int, data_dir: str) -> None:
++        self.store = store.PasteStore(data_dir)
++        self._in_flight = 0
++        self._idle = threading.Condition()
++        super().__init__((HOST, port), PastebinHandler)
++
++    # -- shutdown: in-flight requests are allowed to complete (contracts/cli.md) --
++
++    def enter_request(self) -> None:
++        with self._idle:
++            self._in_flight += 1
++
++    def leave_request(self) -> None:
++        with self._idle:
++            self._in_flight -= 1
++            if self._in_flight == 0:
++                self._idle.notify_all()
++
++    def await_idle(self, timeout: float) -> bool:
++        """Block until no request is being processed, or ``timeout`` elapses.
++
++        Handler threads are daemons, so the interpreter would otherwise stop them
++        mid-response. Waiting here is what lets an in-flight request finish. The wait
++        is bounded so a wedged request cannot prevent the process from exiting.
++        """
++        with self._idle:
++            return self._idle.wait_for(lambda: self._in_flight == 0, timeout)
++
++    def handle_error(self, request, client_address) -> None:
++        """Report nothing — this service has no log channel (SR-009, FR-003).
++
++        ``socketserver``'s default writes the peer address and a full traceback to
++        stderr; both are disclosures SR-009 forbids, and FR-003 permits exactly one
++        line of process output in total. Nothing is being swallowed here: a request
++        that failed while a response could still be sent has already been answered
++        with a generic ``500`` by the handler (SR-010), and the caller closes the
++        connection either way. This hook exists only to suppress the stdlib's
++        reporting of what has already been handled.
++        """
++
++
++def make_server(port: int, data_dir: str) -> PastebinHTTPServer:
++    """Bind and listen on ``127.0.0.1:port``; raises ``OSError`` if it cannot."""
++    return PastebinHTTPServer(port, os.path.realpath(data_dir))
+diff --git a/src/pastebin/store.py b/src/pastebin/store.py
+new file mode 100644
+index 0000000..7eb2ee2
+--- /dev/null
++++ b/src/pastebin/store.py
+@@ -0,0 +1,207 @@
++"""Durable paste storage: one UTF-8 JSON record per paste under the data directory.
++
++The store is keyed by exact identifier only — it never enumerates the directory, so
++foreign files are structurally invisible (data-model.md "Integrity and containment
++rules").
++"""
++
++from __future__ import annotations
++
++import datetime
++import hmac
++import json
++import os
++import secrets
++import threading
++
++from . import models
++
++#: Outcomes of :meth:`PasteStore.delete_record`.
++NOT_FOUND = "not_found"
++FORBIDDEN = "forbidden"
++DELETED = "deleted"
++
++#: Bound on identifier-collision retries before failing closed (SR-010).
++_MAX_ID_ATTEMPTS = 5
++
++
++class PasteStore:
++    """Filesystem-backed collection of pastes under a single data directory."""
++
++    def __init__(self, data_dir: str) -> None:
++        self._dir = os.path.realpath(data_dir)
++        # One lock guards the whole check-and-remove sequence (SR-007, R-09).
++        # Reads deliberately take no lock: ``os.replace`` and a single ``unlink``
++        # already give readers all-or-nothing.
++        self._lock = threading.Lock()
++
++    @property
++    def data_dir(self) -> str:
++        return self._dir
++
++    # --- Path containment ---------------------------------------------------
++
++    def _record_path(self, paste_id: str) -> str | None:
++        """Resolve a paste identifier to its record path, or ``None`` (SR-003, R-07).
++
++        Two layers, in this order:
++
++        1. The identifier must match the allowlist. Anything else returns ``None``
++           without touching the filesystem at all.
++        2. The joined path, once symlinks are resolved, must still lie inside the
++           data directory. On a legitimate request this can never fire — it is
++           defence in depth against a validly-named record that is a symlink out of
++           the directory.
++        """
++        if not isinstance(paste_id, str) or not models.is_valid_id(paste_id):
++            return None
++        candidate = os.path.join(self._dir, paste_id + ".json")
++        resolved = os.path.realpath(candidate)
++        if not resolved.startswith(self._dir + os.sep):
++            return None
++        return candidate
++
++    # --- Write --------------------------------------------------------------
++
++    def write_record(self, record: dict) -> str:
++        """Persist a new paste, assigning it a fresh identifier; returns that id.
++
++        The record is written to an ``O_EXCL`` temp file in the *same* directory with
++        mode ``0600`` set at creation — never ``chmod`` afterwards, which would leave
++        the permissive window SR-008 forbids — then ``fsync``ed and moved into place
++        with ``os.replace`` so a concurrent reader sees the complete file or no file
++        (R-03, SR-007, FR-023).
++        """
++        for _ in range(_MAX_ID_ATTEMPTS):
++            paste_id = models.new_id()
++            final = os.path.join(self._dir, paste_id + ".json")
++            if os.path.exists(final):
++                continue
++
++            stored = dict(record)
++            stored["id"] = paste_id
++            payload = json.dumps(stored, ensure_ascii=False).encode("utf-8")
++
++            tmp = os.path.join(
++                self._dir, f".{paste_id}.json.{secrets.token_hex(8)}.tmp"
++            )
++            try:
++                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
++            except FileExistsError:
++                continue
++            try:
++                with os.fdopen(fd, "wb") as handle:
++                    handle.write(payload)
++                    handle.flush()
++                    os.fsync(handle.fileno())
++                os.replace(tmp, final)
++            except BaseException:
++                # Never leave a temp file behind on any failure path.
++                try:
++                    os.unlink(tmp)
++                except FileNotFoundError:
++                    pass
++                raise
++            return paste_id
++
++        # Fail closed rather than return a paste the caller cannot address (SR-010).
++        raise RuntimeError("could not allocate a unique paste identifier")
++
++    # --- Read ---------------------------------------------------------------
++
++    def _load(self, paste_id: str) -> dict | None:
++        """Read and parse a record, or ``None`` if it is absent or unusable.
++
++        A record that is unreadable, not valid UTF-8, not valid JSON, not a JSON
++        object, or missing any required field is treated as a paste that does not
++        exist: it never raises, never prevents startup, and never affects any other
++        paste (FR-024).
++        """
++        path = self._record_path(paste_id)
++        if path is None:
++            return None
++        try:
++            with open(path, "rb") as handle:
++                raw = handle.read()
++        except (OSError, ValueError):
++            return None
++        try:
++            record = json.loads(raw.decode("utf-8"))
++        except (UnicodeDecodeError, ValueError):
++            return None
++        if type(record) is not dict:
++            return None
++        if any(field not in record for field in models.RECORD_FIELDS):
++            return None
++        return record
++
++    def read_record(self, paste_id: str) -> dict | None:
++        """Return the live record for ``paste_id``, or ``None``.
++
++        ``None`` covers every way a paste can fail to exist: an identifier outside
++        the allowlist, an absent file, a corrupt record, and an expired one.
++        """
++        record = self._load(paste_id)
++        if record is None:
++            return None
++        if not is_live(record, models.now_utc()):
++            return None
++        return record
++
++    # --- Delete -------------------------------------------------------------
++
++    def delete_record(self, paste_id: str, token: str) -> str:
++        """Revoke a paste; returns ``NOT_FOUND``, ``FORBIDDEN``, or ``DELETED``.
++
++        The whole read → liveness-check → token-compare → ``unlink`` sequence is held
++        under one lock so the check and the removal are atomic with respect to
++        concurrent requests (SR-007, R-09).
++
++        Evaluation order is load-bearing: existence and liveness are checked *before*
++        the token, so an unknown or expired identifier is ``NOT_FOUND`` regardless of
++        the token supplied — non-existence is reported in preference to a permission
++        failure (FR-021).
++        """
++        with self._lock:
++            record = self.read_record(paste_id)
++            if record is None:
++                return NOT_FOUND
++
++            stored = record.get("delete_token")
++            if type(stored) is not str:
++                return NOT_FOUND
++            # Constant-time comparison, never ``==`` (SR-002).
++            if not hmac.compare_digest(token, stored):
++                return FORBIDDEN
++
++            path = self._record_path(paste_id)
++            if path is None:
++                return NOT_FOUND
++            try:
++                os.unlink(path)
++            except FileNotFoundError:
++                return NOT_FOUND
++            return DELETED
++
++
++def is_live(record: dict, now: datetime.datetime) -> bool:
++    """The liveness predicate (data-model.md), evaluated against the current clock.
++
++    ``live ⟺ record exists ∧ record parses ∧ (expires_at is null ∨ now <= expires_at)``
++
++    The bound is **inclusive**: a paste is readable up to and including its expiry
++    instant, and not after (FR-017, Edge Case "Expiry exactly now"). Nothing is
++    rewritten or deleted on expiry — an expired record is permitted to linger on disk
++    and simply stops passing this predicate, which is what makes FR-018's restart
++    clause automatic with no startup scan.
++    """
++    expires_at = record.get("expires_at")
++    if expires_at is None:
++        return True
++    if type(expires_at) is not str:
++        return False
++    try:
++        deadline = models.parse_timestamp(expires_at)
++    except ValueError:
++        return False
++    return now <= deadline
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000..64c838a
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,301 @@
++"""Shared fixtures and stdlib-only HTTP helpers.
++
++Tests drive a *real* server bound to an ephemeral port over real HTTP. The client is
++built on ``http.client`` and raw sockets — no third-party HTTP client is used, because
++the runtime has no third-party dependencies and the test suite should not need one
++either (R-15, Constitution Principle I).
++
++Every response produced through these helpers is scanned as it arrives for the
++leakage SR-009 forbids, so the suite-wide guarantee holds no matter which subset of
++tests is run (SC-009).
++"""
++
++from __future__ import annotations
++
++import http.client
++import json
++import os
++import re
++import resource
++import socket
++import sys
++import threading
++
++import pytest
++
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
++
++from pastebin import cli, server as server_module  # noqa: E402
++
++# --- Suite-wide leakage scanning (SR-009, SC-009) ---------------------------------
++
++#: Every ``delete_token`` the suite has ever been issued. A token may appear in the
++#: single ``201`` that creates it and nowhere else.
++ISSUED_TOKENS: set[str] = set()
++
++_PYTHON_VERSION_RE = re.compile(r"[Pp]ython/?\d", re.ASCII)
++_ABSOLUTE_PATH_RE = re.compile(r"/(?:tmp|root|home|etc|var|usr|private)/[A-Za-z0-9_.-]")
++
++
++class Response:
++    """A captured HTTP response: status, headers, and the exact body bytes."""
++
++    def __init__(self, status: int, headers: list[tuple[str, str]], body: bytes) -> None:
++        self.status = status
++        self.headers = headers
++        self.body = body
++
++    def header(self, name: str) -> str | None:
++        lowered = name.lower()
++        for key, value in self.headers:
++            if key.lower() == lowered:
++                return value
++        return None
++
++    def has_header(self, name: str) -> bool:
++        return self.header(name) is not None
++
++    def json(self):
++        return json.loads(self.body.decode("utf-8"))
++
++    @property
++    def header_text(self) -> str:
++        return "\n".join(f"{key}: {value}" for key, value in self.headers)
++
++    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
++        return f"<Response {self.status} {self.body[:60]!r}>"
++
++
++def scan_response(response: Response) -> Response:
++    """Assert a single response leaks nothing SR-009 forbids.
++
++    Called on every response the helpers below produce, which is what makes the
++    leakage guarantee suite-wide rather than a single test's observation.
++    """
++    body_text = response.body.decode("utf-8", errors="replace")
++    combined = response.header_text + "\n" + body_text
++
++    assert response.header("Server") == "pastebin", (
++        "SR-009: the Server header must be the fixed string 'pastebin', "
++        f"got {response.header('Server')!r}"
++    )
++    assert "Traceback" not in combined, "SR-009: a traceback escaped to the caller"
++    assert not _PYTHON_VERSION_RE.search(combined), (
++        "SR-009: a Python version string escaped to the caller"
++    )
++    assert not _ABSOLUTE_PATH_RE.search(combined), (
++        "SR-009: a filesystem path escaped to the caller"
++    )
++
++    if response.status == 201:
++        try:
++            ISSUED_TOKENS.add(response.json()["delete_token"])
++        except (ValueError, KeyError, TypeError):  # pragma: no cover - defensive
++            pass
++    else:
++        for token in ISSUED_TOKENS:
++            assert token not in combined, (
++                "SR-009/FR-013: a delete_token appeared outside the 201 that issued it"
++            )
++    return response
++
++
++# --- The running service ----------------------------------------------------------
++
++
++class Service:
++    """A real ``PastebinHTTPServer`` on an ephemeral loopback port."""
++
++    def __init__(self, data_dir: str) -> None:
++        self.data_dir = data_dir
++        self._server: server_module.PastebinHTTPServer | None = None
++        self._thread: threading.Thread | None = None
++
++    # -- lifecycle --
++
++    def start(self) -> None:
++        assert self._server is None, "service is already running"
++        # Use the production data-directory setup, so the fixture exercises the same
++        # creation and permission code the CLI does (FR-002, SR-008).
++        problem = cli._prepare_data_dir(self.data_dir)
++        assert problem is None, problem
++        self._server = server_module.make_server(0, self.data_dir)
++        self._thread = threading.Thread(
++            target=self._server.serve_forever, daemon=True
++        )
++        self._thread.start()
++
++    def stop(self) -> None:
++        if self._server is None:
++            return
++        self._server.shutdown()
++        # Mirror the CLI: let in-flight requests finish before closing the sockets.
++        self._server.await_idle(10.0)
++        self._server.server_close()
++        assert self._thread is not None
++        self._thread.join(timeout=10)
++        self._server = None
++        self._thread = None
++
++    def restart(self) -> None:
++        """Stop the server and start a fresh one against the *same* data directory."""
++        self.stop()
++        self.start()
++
++    # -- address --
++
++    @property
++    def port(self) -> int:
++        assert self._server is not None, "service is not running"
++        return self._server.server_address[1]
++
++    @property
++    def base_url(self) -> str:
++        return f"http://127.0.0.1:{self.port}"
++
++    @property
++    def store(self):
++        """The live ``PasteStore``, so a test can inject a failure into it (SR-010)."""
++        assert self._server is not None, "service is not running"
++        return self._server.store
++
++    def _connect(self, timeout: float = 10.0) -> http.client.HTTPConnection:
++        return http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
++
++    # -- generic request --
++
++    def request(
++        self,
++        method: str,
++        path: str,
++        body: bytes | None = None,
++        headers: dict[str, str] | None = None,
++        timeout: float = 10.0,
++    ) -> Response:
++        connection = self._connect(timeout)
++        try:
++            connection.putrequest(method, path, skip_host=False, skip_accept_encoding=True)
++            sent = {key.lower() for key in (headers or {})}
++            if body is not None and "content-length" not in sent:
++                connection.putheader("Content-Length", str(len(body)))
++            for key, value in (headers or {}).items():
++                connection.putheader(key, value)
++            connection.endheaders()
++            if body:
++                connection.send(body)
++            raw = connection.getresponse()
++            return scan_response(
++                Response(raw.status, raw.getheaders(), raw.read())
++            )
++        finally:
++            connection.close()
++
++    # -- convenience --
++
++    def post_json(self, payload, path: str = "/pastes") -> Response:
++        body = json.dumps(payload).encode("utf-8")
++        return self.request("POST", path, body, {"Content-Type": "application/json"})
++
++    def post_raw(
++        self, body: bytes, headers: dict[str, str] | None = None, path: str = "/pastes"
++    ) -> Response:
++        return self.request("POST", path, body, headers)
++
++    def get(self, path: str) -> Response:
++        return self.request("GET", path)
++
++    def delete(self, path: str, token: str | None = None) -> Response:
++        headers = {} if token is None else {"X-Delete-Token": token}
++        return self.request("DELETE", path, None, headers)
++
++    def create(self, content: str = "hello", **extra) -> dict:
++        """Create a paste and return the parsed ``201`` body. Fails loudly otherwise."""
++        payload = {"content": content}
++        payload.update(extra)
++        response = self.post_json(payload)
++        assert response.status == 201, (response.status, response.body)
++        return response.json()
++
++    # -- raw framing control (SR-005) --
++
++    def send_raw(
++        self,
++        head: bytes,
++        body: bytes = b"",
++        half_close: bool = True,
++        timeout: float = 10.0,
++    ) -> Response:
++        """Send a hand-built request and parse the response.
++
++        Lets a test declare a ``Content-Length`` that disagrees with the bytes it
++        actually delivers, or use chunked framing — neither of which ``http.client``
++        will do willingly.
++        """
++        with socket.create_connection(("127.0.0.1", self.port), timeout=timeout) as sock:
++            sock.sendall(head)
++            if body:
++                sock.sendall(body)
++            if half_close:
++                try:
++                    sock.shutdown(socket.SHUT_WR)
++                except OSError:  # pragma: no cover - platform dependent
++                    pass
++            chunks = []
++            while True:
++                try:
++                    data = sock.recv(65536)
++                except socket.timeout:  # pragma: no cover - failure diagnostics
++                    break
++                if not data:
++                    break
++                chunks.append(data)
++        return scan_response(parse_raw_response(b"".join(chunks)))
++
++
++def parse_raw_response(raw: bytes) -> Response:
++    """Parse raw response bytes into a :class:`Response`."""
++    assert raw, "the server sent no response at all"
++    head, _, body = raw.partition(b"\r\n\r\n")
++    lines = head.decode("latin-1").split("\r\n")
++    status = int(lines[0].split()[1])
++    headers = []
++    for line in lines[1:]:
++        if not line:
++            continue
++        key, _, value = line.partition(":")
++        headers.append((key.strip(), value.strip()))
++    return Response(status, headers, body)
++
++
++def build_head(
++    method: str, path: str, port: int, headers: dict[str, str] | None = None
++) -> bytes:
++    """Build a raw HTTP/1.1 request head with exactly the headers given."""
++    lines = [f"{method} {path} HTTP/1.1", f"Host: 127.0.0.1:{port}"]
++    for key, value in (headers or {}).items():
++        lines.append(f"{key}: {value}")
++    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
++
++
++def max_rss_bytes() -> int:
++    """High-water-mark resident set size of this process, in bytes.
++
++    A high-water mark is exactly the right measure for "did the server ever buffer
++    this": a transient 50 MB allocation shows up here even after it is freed (SC-007).
++    """
++    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
++    return value if sys.platform == "darwin" else value * 1024
++
++
++# --- Fixtures ---------------------------------------------------------------------
++
++
++@pytest.fixture
++def server(tmp_path) -> Service:
++    """A running service with a fresh data directory, torn down after the test."""
++    service = Service(str(tmp_path / "data"))
++    service.start()
++    try:
++        yield service
++    finally:
++        service.stop()
+diff --git a/tests/test_create.py b/tests/test_create.py
+new file mode 100644
+index 0000000..954c25a
+--- /dev/null
++++ b/tests/test_create.py
+@@ -0,0 +1,317 @@
++"""Creation, body validation, framing, and size limits.
++
++Covers FR-005, FR-006, FR-007, FR-009, FR-010, FR-026, FR-027, FR-029, SR-004, SR-005.
++"""
++
++from __future__ import annotations
++
++import json
++import time
++
++import pytest
++
++from conftest import build_head, max_rss_bytes
++from test_security import directory_snapshot
++
++CONTENT_CAP = 65536
++BODY_CAP = 66560
++
++
++def encode(payload) -> bytes:
++    """Compact UTF-8 JSON — ``ensure_ascii=False`` so multi-byte text stays multi-byte."""
++    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
++
++
++def post_compact(server, payload):
++    return server.post_raw(encode(payload), {"Content-Type": "application/json"})
++
++
++# --- FR-005, FR-006, FR-010: the accepted shape -----------------------------------
++
++
++def test_FR_005_content_only_is_accepted(server):
++    """FR-005: an object carrying only ``content`` creates a paste."""
++    response = server.post_json({"content": "hello"})
++
++    assert response.status == 201
++    assert response.header("Content-Type") == "application/json; charset=utf-8"
++
++
++def test_FR_005_content_with_expires_in_is_accepted(server):
++    """FR-005: ``content`` plus a valid ``expires_in`` creates a paste."""
++    assert server.post_json({"content": "hello", "expires_in": 3600}).status == 201
++
++
++def test_FR_010_created_response_has_exactly_id_token_and_url(server):
++    """FR-010, FR-011: the 201 body is exactly ``id``, ``delete_token``, and ``url``."""
++    body = server.post_json({"content": "hello"}).json()
++
++    assert set(body) == {"id", "delete_token", "url"}
++    assert body["url"] == f"/pastes/{body['id']}"
++    assert len(body["id"]) == 22
++    assert len(body["delete_token"]) == 43
++
++
++def test_FR_006_missing_content_is_rejected(server):
++    """FR-006, FR-026: ``content`` is required."""
++    response = server.post_json({"expires_in": 60})
++
++    assert response.status == 400
++    assert response.json() == {"error": "content is required"}
++
++
++@pytest.mark.parametrize("value", [5, 5.0, True, False, None, [], {}, ["a"]])
++def test_FR_006_non_string_content_is_rejected(server, value):
++    """FR-006, FR-026: ``content`` must be a text value, not a number or structure."""
++    response = server.post_json({"content": value})
++
++    assert response.status == 400
++    assert response.json() == {"error": "content must be a string"}
++
++
++def test_FR_006_empty_content_is_accepted_and_stored_as_empty(server):
++    """FR-006: the empty string is valid content, not a missing value."""
++    created = server.create("")
++
++    read = server.get(f"/pastes/{created['id']}")
++    assert read.status == 200
++    assert read.json()["content"] == ""
++
++    raw = server.get(f"/pastes/{created['id']}/raw")
++    assert raw.status == 200
++    assert raw.body == b""
++    assert raw.header("Content-Length") == "0"
++
++
++def test_FR_009_unknown_fields_are_ignored_and_never_stored(server):
++    """FR-009: fields other than ``content`` and ``expires_in`` are ignored."""
++    created = server.create(
++        "hello",
++        colour="green",
++        id="attacker-chosen-id",
++        delete_token="attacker-chosen-token",
++        created_at="1999-01-01T00:00:00Z",
++        expires_at="1999-01-01T00:00:00Z",
++    )
++
++    assert created["id"] != "attacker-chosen-id"
++    assert created["delete_token"] != "attacker-chosen-token"
++
++    read = server.get(f"/pastes/{created['id']}").json()
++    assert set(read) == {"id", "content", "created_at", "expires_at"}
++    assert "colour" not in read
++    assert read["id"] == created["id"]
++    assert read["created_at"] != "1999-01-01T00:00:00Z"
++    assert read["expires_at"] is None
++
++
++# --- FR-026, SR-004: malformed bodies ---------------------------------------------
++
++MALFORMED_BODIES = [
++    (b"", "empty body"),
++    (b"not json at all", "plain text"),
++    (b"{", "truncated object"),
++    (b'{"content": "x",}', "trailing comma"),
++    (b'["content"]', "bare list"),
++    (b"42", "bare number"),
++    (b'"a string"', "bare string"),
++    (b"null", "bare null"),
++    (b"true", "bare true"),
++    (b"false", "bare false"),
++    (b"[]", "empty list"),
++    (b"\xff\xfe\x00bad utf-8", "invalid UTF-8"),
++]
++
++
++@pytest.mark.parametrize("body,label", MALFORMED_BODIES, ids=[l for _, l in MALFORMED_BODIES])
++def test_FR_026_malformed_body_is_400_and_creates_nothing(server, body, label):
++    """FR-026, SR-004: a body that is not a JSON object is 400 and stores nothing."""
++    before = directory_snapshot(server.data_dir)
++
++    response = server.post_raw(body, {"Content-Type": "application/json"})
++
++    assert response.status == 400, (label, response.status)
++    assert set(response.json()) == {"error"}
++    assert response.json()["error"]
++    assert directory_snapshot(server.data_dir) == before, (
++        "SR-004: a rejected body must leave the data directory byte-for-byte unchanged"
++    )
++
++
++def test_FR_026_invalid_utf8_body_names_the_encoding_rule(server):
++    """FR-026: a body that is not valid UTF-8 is rejected before it is parsed."""
++    response = server.post_raw(b'{"content": "\xff\xfe"}')
++
++    assert response.status == 400
++    assert response.json() == {"error": "request body must be valid UTF-8"}
++
++
++def test_FR_026_every_rejection_leaves_the_store_unchanged(server):
++    """SR-004: no rejected creation leaves a temp file or a partial record behind."""
++    server.create("baseline")
++    before = directory_snapshot(server.data_dir)
++
++    for body, _ in MALFORMED_BODIES:
++        server.post_raw(body)
++    server.post_json({"content": 5})
++    server.post_json({"expires_in": 60})
++    server.post_json({"content": "x", "expires_in": 0})
++
++    assert directory_snapshot(server.data_dir) == before
++
++
++# --- FR-007, FR-027: size limits --------------------------------------------------
++
++
++def test_FR_007_content_of_exactly_the_cap_is_accepted(server):
++    """FR-007: content encoding to exactly 65 536 bytes is accepted."""
++    content = "a" * CONTENT_CAP
++    assert len(content.encode("utf-8")) == CONTENT_CAP
++
++    response = post_compact(server, {"content": content})
++
++    assert response.status == 201
++    read = server.get(f"/pastes/{response.json()['id']}/raw")
++    assert read.body == content.encode("utf-8")
++
++
++def test_FR_007_content_one_byte_over_the_cap_is_413(server):
++    """FR-007, FR-027: content encoding to 65 537 bytes is rejected with 413."""
++    response = post_compact(server, {"content": "a" * (CONTENT_CAP + 1)})
++
++    assert response.status == 413
++    assert response.json() == {
++        "error": "content exceeds the maximum size of 65536 bytes"
++    }
++
++
++def test_FR_007_limit_is_encoded_bytes_not_characters(server):
++    """FR-007: the cap counts UTF-8 bytes — a 16 384-character body can still be 64 KiB."""
++    # Each of these characters encodes to four bytes.
++    at_cap = "\U0001f30d" * (CONTENT_CAP // 4)
++    assert len(at_cap) == 16384
++    assert len(at_cap.encode("utf-8")) == CONTENT_CAP
++
++    accepted = post_compact(server, {"content": at_cap})
++    assert accepted.status == 201, "a 16 384-character body within the byte cap"
++
++    over_cap = "\U0001f30d" * (CONTENT_CAP // 4 + 1)
++    assert len(over_cap) == 16385
++    assert len(over_cap.encode("utf-8")) == CONTENT_CAP + 4
++
++    rejected = post_compact(server, {"content": over_cap})
++    assert rejected.status == 413, "16 385 characters is 65 540 bytes — over the cap"
++
++
++def test_FR_027_oversized_but_otherwise_valid_body_is_413_not_400_or_201(server):
++    """FR-027: 413 takes precedence over every other outcome for an oversized body."""
++    before = directory_snapshot(server.data_dir)
++
++    response = post_compact(
++        server, {"content": "a" * (CONTENT_CAP + 1), "expires_in": 3600, "extra": "ok"}
++    )
++
++    assert response.status == 413
++    assert directory_snapshot(server.data_dir) == before
++
++
++# --- SR-005, FR-029: framing and bounded memory -----------------------------------
++
++
++def test_SR_005_missing_content_length_is_400(server):
++    """SR-005: a request that declares no body length is rejected."""
++    response = server.send_raw(build_head("POST", "/pastes", server.port))
++
++    assert response.status == 400
++    assert response.json() == {
++        "error": "request must declare a valid Content-Length"
++    }
++
++
++@pytest.mark.parametrize("value", ["", "abc", "-1", "1 2", "12,13"])
++def test_SR_005_malformed_content_length_is_400(server, value):
++    """SR-005: a ``Content-Length`` that is not a non-negative integer is rejected."""
++    response = server.send_raw(
++        build_head("POST", "/pastes", server.port, {"Content-Length": value})
++    )
++
++    assert response.status == 400
++    assert response.json()["error"] == "request must declare a valid Content-Length"
++
++
++def test_SR_005_chunked_transfer_encoding_is_400(server):
++    """SR-005: chunked framing is rejected rather than streamed."""
++    response = server.send_raw(
++        build_head(
++            "POST", "/pastes", server.port, {"Transfer-Encoding": "chunked"}
++        ),
++        b"5\r\nhello\r\n0\r\n\r\n",
++    )
++
++    assert response.status == 400
++    assert response.json()["error"] == "request must declare a valid Content-Length"
++
++
++def test_SR_005_short_body_is_400_and_does_not_hang(server):
++    """SR-005: a ``Content-Length`` larger than the bytes delivered is 400, not a hang."""
++    started = time.monotonic()
++    response = server.send_raw(
++        build_head("POST", "/pastes", server.port, {"Content-Length": "4096"}),
++        b'{"content": "short"}',
++        timeout=20,
++    )
++    elapsed = time.monotonic() - started
++
++    assert response.status == 400
++    assert response.json() == {
++        "error": "request body was shorter than the declared Content-Length"
++    }
++    assert elapsed < 15, "SR-005: the server must not wait indefinitely for the rest"
++
++
++def test_FR_029_oversized_declaration_is_refused_without_reading_the_body(server):
++    """FR-029, SC-007, SR-005: a 50 MB declaration is 413 with memory left flat.
++
++    Not one byte of the declared body is sent, yet the 413 still arrives — which is
++    direct proof that the server never waited for, nor buffered, the payload.
++    """
++    before = max_rss_bytes()
++
++    response = server.send_raw(
++        build_head("POST", "/pastes", server.port, {"Content-Length": "50000000"})
++    )
++
++    after = max_rss_bytes()
++
++    assert response.status == 413
++    assert response.json() == {
++        "error": "content exceeds the maximum size of 65536 bytes"
++    }
++    assert response.header("Connection") == "close", (
++        "SR-005: an unread body makes connection reuse a smuggling hazard"
++    )
++    assert after - before < 5 * 1024 * 1024, (
++        f"SC-007: resident memory grew by {after - before} bytes"
++    )
++
++
++def test_FR_029_declaration_just_over_the_envelope_cap_is_413(server):
++    """FR-029: the pre-body cap is the content limit plus envelope slack."""
++    assert (
++        server.send_raw(
++            build_head(
++                "POST", "/pastes", server.port, {"Content-Length": str(BODY_CAP + 1)}
++            )
++        ).status
++        == 413
++    )
++
++
++def test_FR_029_service_still_serves_after_an_oversized_submission(server):
++    """FR-029: refusing a huge submission does not disturb the service."""
++    server.send_raw(
++        build_head("POST", "/pastes", server.port, {"Content-Length": "50000000"})
++    )
++
++    created = server.create("still working")
++    assert server.get(f"/pastes/{created['id']}").status == 200
+diff --git a/tests/test_expiry.py b/tests/test_expiry.py
+new file mode 100644
+index 0000000..31e21fe
+--- /dev/null
++++ b/tests/test_expiry.py
+@@ -0,0 +1,198 @@
++"""Lifetimes and expiry.
++
++Covers FR-008, FR-015, FR-017, FR-018.
++"""
++
++from __future__ import annotations
++
++import datetime
++import re
++import time
++
++import pytest
++
++from pastebin import models, store as store_module
++from test_security import directory_snapshot
++
++TIMESTAMP_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
++
++ACCEPTED_LIFETIMES = [1, 2, 60, 3600, 86400, 2_592_000]
++
++#: Each must be rejected with 400. ``True``/``False`` in particular must not be read
++#: as 1-second and 0-second lifetimes: ``bool`` subclasses ``int`` in Python, so an
++#: ``isinstance`` check would silently accept them (spec Edge Case
++#: "True/false as a lifetime").
++REJECTED_LIFETIMES = [
++    0,
++    -1,
++    -3600,
++    2_592_001,
++    3600.0,
++    0.5,
++    "3600",
++    "",
++    True,
++    False,
++    None,
++    [],
++    {},
++    [3600],
++]
++
++
++@pytest.mark.parametrize("value", ACCEPTED_LIFETIMES, ids=repr)
++def test_FR_008_in_range_integer_lifetimes_are_accepted(server, value):
++    """FR-008: a whole number of seconds from 1 to 2 592 000 is accepted."""
++    response = server.post_json({"content": "x", "expires_in": value})
++
++    assert response.status == 201, (value, response.body)
++    body = server.get(f"/pastes/{response.json()['id']}").json()
++    assert TIMESTAMP_RE.match(body["expires_at"])
++
++
++@pytest.mark.parametrize("value", REJECTED_LIFETIMES, ids=repr)
++def test_FR_008_out_of_range_or_wrongly_typed_lifetimes_are_rejected(server, value):
++    """FR-008: anything that is not an in-range integer is 400 and creates nothing."""
++    before = directory_snapshot(server.data_dir)
++
++    response = server.post_json({"content": "x", "expires_in": value})
++
++    assert response.status == 400, (value, response.status)
++    assert response.json() == {
++        "error": "expires_in must be an integer between 1 and 2592000"
++    }
++    assert directory_snapshot(server.data_dir) == before
++
++
++def test_FR_008_boolean_true_is_not_a_one_second_lifetime(server):
++    """FR-008: ``true`` is rejected outright, never coerced to ``expires_in: 1``."""
++    assert server.post_json({"content": "x", "expires_in": True}).status == 400
++    assert server.post_json({"content": "x", "expires_in": False}).status == 400
++
++
++def test_FR_008_explicit_null_is_rejected_not_treated_as_absence(server):
++    """FR-008: an explicit ``null`` is a wrongly-typed value, not "no lifetime"."""
++    assert server.post_json({"content": "x", "expires_in": None}).status == 400
++
++
++def test_FR_008_absent_lifetime_means_never_expires(server):
++    """FR-008, FR-015: with no ``expires_in``, ``expires_at`` is null."""
++    created = server.create("forever")
++
++    body = server.get(f"/pastes/{created['id']}").json()
++
++    assert body["expires_at"] is None
++    time.sleep(1.2)
++    assert server.get(f"/pastes/{created['id']}").status == 200
++
++
++def test_FR_015_expires_at_is_exactly_the_lifetime_after_created_at(server):
++    """FR-015: ``expires_at`` is ``created_at`` plus the lifetime, to the second."""
++    created = server.create("one hour", expires_in=3600)
++
++    body = server.get(f"/pastes/{created['id']}").json()
++
++    assert TIMESTAMP_RE.match(body["created_at"])
++    assert TIMESTAMP_RE.match(body["expires_at"])
++    start = models.parse_timestamp(body["created_at"])
++    end = models.parse_timestamp(body["expires_at"])
++    assert end - start == datetime.timedelta(seconds=3600)
++
++
++def test_FR_017_expired_paste_is_404_on_every_id_bearing_route(server):
++    """FR-017: after expiry, read, raw read, and revoke all report not found."""
++    created = server.create("temporary", expires_in=1)
++    paste_id = created["id"]
++
++    assert server.get(f"/pastes/{paste_id}").status == 200
++    assert server.get(f"/pastes/{paste_id}/raw").status == 200
++
++    time.sleep(2.2)
++
++    for response in (
++        server.get(f"/pastes/{paste_id}"),
++        server.get(f"/pastes/{paste_id}/raw"),
++        server.delete(f"/pastes/{paste_id}", created["delete_token"]),
++    ):
++        assert response.status == 404
++        assert response.json() == {"error": "not found"}
++
++
++def test_FR_017_expiry_bound_is_inclusive_at_the_expiry_instant():
++    """FR-017: a paste is live up to *and including* ``expires_at``, not after.
++
++    The instant itself cannot be hit reliably over the network, so the liveness
++    predicate is exercised directly at the boundary (spec Edge Case
++    "Expiry exactly now").
++    """
++    created = models.now_utc()
++    expires_at = models.compute_expires_at(created, 60)
++    record = {
++        "id": "A" * 22,
++        "content": "x",
++        "created_at": models.format_timestamp(created),
++        "expires_at": expires_at,
++        "delete_token": "t",
++    }
++    deadline = models.parse_timestamp(expires_at)
++
++    assert store_module.is_live(record, deadline - datetime.timedelta(seconds=1))
++    assert store_module.is_live(record, deadline), "the expiry instant is still live"
++    assert not store_module.is_live(
++        record, deadline + datetime.timedelta(seconds=1)
++    ), "one second past the expiry instant is not live"
++
++
++def test_FR_017_a_paste_with_no_expiry_is_always_live():
++    """FR-017: ``expires_at: null`` passes the liveness predicate at any time."""
++    record = {
++        "id": "A" * 22,
++        "content": "x",
++        "created_at": "2020-01-01T00:00:00Z",
++        "expires_at": None,
++        "delete_token": "t",
++    }
++    far_future = datetime.datetime(2099, 1, 1, tzinfo=datetime.UTC)
++
++    assert store_module.is_live(record, far_future)
++
++
++def test_FR_018_expiry_is_evaluated_per_request_across_a_restart(server):
++    """FR-018: a paste that expires while the service is stopped is 404 after restart.
++
++    Nothing sweeps the directory and nothing scans it at startup — the record may
++    still be on disk; it simply stops passing the liveness predicate.
++    """
++    short = server.create("expires while stopped", expires_in=1)
++    survivor = server.create("outlives the restart")
++
++    assert server.get(f"/pastes/{short['id']}").status == 200
++
++    server.stop()
++    time.sleep(2.2)
++    server.start()
++
++    assert server.get(f"/pastes/{short['id']}").status == 404
++    assert server.get(f"/pastes/{short['id']}/raw").status == 404
++    assert (
++        server.delete(f"/pastes/{short['id']}", short["delete_token"]).status == 404
++    )
++    # The unexpired paste is untouched by the restart.
++    assert server.get(f"/pastes/{survivor['id']}").json()["content"] == (
++        "outlives the restart"
++    )
++
++
++def test_FR_018_restart_performs_no_startup_scan_or_sweep(server):
++    """FR-018: an expired record is permitted to linger on disk after a restart."""
++    created = server.create("lingering", expires_in=1)
++    record_file = f"{created['id']}.json"
++    assert record_file in directory_snapshot(server.data_dir)
++
++    time.sleep(2.2)
++    server.restart()
++
++    assert server.get(f"/pastes/{created['id']}").status == 404
++    assert record_file in directory_snapshot(server.data_dir), (
++        "FR-018: expiry must not rewrite or delete the record"
++    )
+diff --git a/tests/test_persistence.py b/tests/test_persistence.py
+new file mode 100644
+index 0000000..f48a136
+--- /dev/null
++++ b/tests/test_persistence.py
+@@ -0,0 +1,176 @@
++"""Durability across a restart, and tolerance of unusable records.
++
++Covers FR-023, FR-024, SC-005.
++"""
++
++from __future__ import annotations
++
++import json
++import os
++
++import pytest
++
++
++def record_path(server, paste_id: str) -> str:
++    return os.path.join(server.data_dir, f"{paste_id}.json")
++
++
++def test_FR_023_every_paste_survives_a_restart_unchanged(server):
++    """FR-023, SC-005: content and both timestamps are identical after a restart."""
++    created = [
++        server.create("no lifetime"),
++        server.create("hour-long lifetime", expires_in=3600),
++        server.create(""),
++        server.create("héllo 🌍\nmulti-line\ttabbed", expires_in=2_592_000),
++    ]
++    before = [server.get(f"/pastes/{c['id']}").json() for c in created]
++
++    server.restart()
++
++    after = [server.get(f"/pastes/{c['id']}").json() for c in created]
++    assert after == before, "FR-023: every field must read back identically"
++    for item in after:
++        assert set(item) == {"id", "content", "created_at", "expires_at"}
++
++
++def test_FR_023_raw_content_is_byte_identical_after_a_restart(server):
++    """FR-023: the raw read is byte-for-byte the same after a restart."""
++    content = "héllo 🌍\n\"quoted\"\ttabbed   "
++    created = server.create(content)
++    before = server.get(f"/pastes/{created['id']}/raw").body
++
++    server.restart()
++
++    after = server.get(f"/pastes/{created['id']}/raw")
++    assert after.body == before == content.encode("utf-8")
++    assert after.header("Content-Length") == str(len(content.encode("utf-8")))
++
++
++def test_FR_023_original_delete_token_still_revokes_after_a_restart(server):
++    """FR-023, SC-005: the secret issued before the restart still works after it."""
++    created = server.create("revocable across a restart")
++
++    server.restart()
++
++    assert server.delete(f"/pastes/{created['id']}", "wrong").status == 403
++    assert (
++        server.delete(f"/pastes/{created['id']}", created["delete_token"]).status == 204
++    )
++
++
++def test_FR_023_pastes_created_after_a_restart_coexist_with_older_ones(server):
++    """FR-023: a restarted service keeps writing into the same directory."""
++    older = server.create("written before")
++
++    server.restart()
++    newer = server.create("written after")
++
++    assert server.get(f"/pastes/{older['id']}").json()["content"] == "written before"
++    assert server.get(f"/pastes/{newer['id']}").json()["content"] == "written after"
++
++
++# --- FR-024: unusable records are absent, never fatal -----------------------------
++
++CORRUPT_RECORDS = {
++    "truncated": b'{"id": "AAAAAAAAAAAAAAAAAAAAAA", "content": "hel',
++    "not-json": b"not json at all",
++    "json-array": b'["id", "content"]',
++    "json-number": b"42",
++    "json-null": b"null",
++    "empty-file": b"",
++    "invalid-utf8": b'{"content": "\xff\xfe\x00"}',
++    "missing-content": b'{"id": "A", "created_at": "2026-01-01T00:00:00Z",'
++    b' "expires_at": null, "delete_token": "t"}',
++    "missing-delete-token": b'{"id": "A", "content": "x",'
++    b' "created_at": "2026-01-01T00:00:00Z", "expires_at": null}',
++    "missing-timestamps": b'{"id": "A", "content": "x", "delete_token": "t"}',
++    "bad-expires-at": b'{"id": "A", "content": "x",'
++    b' "created_at": "2026-01-01T00:00:00Z", "expires_at": "not a timestamp",'
++    b' "delete_token": "t"}',
++}
++
++
++def plant(server, name: str, payload: bytes) -> str:
++    """Write a corrupt record under a valid-looking identifier; return that id."""
++    paste_id = (name.replace("-", "x") + "A" * 22)[:22]
++    with open(record_path(server, paste_id), "wb") as handle:
++        handle.write(payload)
++    return paste_id
++
++
++@pytest.mark.parametrize("name", sorted(CORRUPT_RECORDS), ids=sorted(CORRUPT_RECORDS))
++def test_FR_024_unusable_record_reads_as_404_on_every_route(server, name):
++    """FR-024: a record that cannot be used is treated as a paste that does not exist."""
++    paste_id = plant(server, name, CORRUPT_RECORDS[name])
++
++    for response in (
++        server.get(f"/pastes/{paste_id}"),
++        server.get(f"/pastes/{paste_id}/raw"),
++        server.delete(f"/pastes/{paste_id}", "any token"),
++    ):
++        assert response.status == 404, (name, response.status)
++        assert response.json() == {"error": "not found"}
++
++
++def test_FR_024_unusable_records_do_not_affect_other_pastes_or_startup(server):
++    """FR-024: corrupt records neither prevent startup nor disturb healthy pastes."""
++    healthy = server.create("perfectly fine")
++    for name, payload in CORRUPT_RECORDS.items():
++        plant(server, name, payload)
++
++    # The service is still serving right now...
++    assert server.get(f"/pastes/{healthy['id']}").json()["content"] == "perfectly fine"
++
++    # ...and still starts and serves after a restart over the same directory.
++    server.restart()
++
++    assert server.get(f"/pastes/{healthy['id']}").json()["content"] == "perfectly fine"
++    assert server.create("created after the corruption")["id"]
++
++
++def test_FR_024_foreign_files_in_the_data_directory_are_ignored(server):
++    """FR-024, Edge Case "Foreign files": unrelated files are structurally invisible."""
++    healthy = server.create("unaffected")
++    directory = server.data_dir
++    for name in ("README.txt", "notes.md", ".hidden", "no-extension", "x.json"):
++        with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
++            handle.write("not a paste record")
++    os.mkdir(os.path.join(directory, "a-subdirectory"))
++
++    server.restart()
++
++    assert server.get(f"/pastes/{healthy['id']}").json()["content"] == "unaffected"
++    assert server.create("still creating")["id"]
++    # Nothing enumerates the directory, so the foreign files are simply still there.
++    assert "README.txt" in os.listdir(directory)
++
++
++def test_FR_024_record_whose_id_field_disagrees_with_its_filename_is_still_keyed_by_name(
++    server,
++):
++    """FR-024: lookup is by filename; a record is never trusted to rename itself."""
++    created = server.create("honest record")
++    path = record_path(server, created["id"])
++    with open(path, "r", encoding="utf-8") as handle:
++        record = json.load(handle)
++    record["id"] = "B" * 22
++    with open(path, "w", encoding="utf-8") as handle:
++        json.dump(record, handle)
++
++    # The impostor identifier resolves to nothing.
++    assert server.get("/pastes/" + "B" * 22).status == 404
++    # The real filename still resolves, reporting what the record claims.
++    assert server.get(f"/pastes/{created['id']}").status == 200
++
++
++def test_FR_023_atomic_write_leaves_no_temporary_files_behind(server):
++    """FR-023: the temp-file + replace write leaves the directory with records only."""
++    for index in range(20):
++        server.create(f"record {index}")
++
++    names = os.listdir(server.data_dir)
++    assert len(names) == 20
++    for name in names:
++        assert name.endswith(".json"), name
++        assert not name.startswith("."), f"a temporary file was left behind: {name}"
++        assert not name.endswith(".tmp"), name
+diff --git a/tests/test_read.py b/tests/test_read.py
+new file mode 100644
+index 0000000..f75a0fc
+--- /dev/null
++++ b/tests/test_read.py
+@@ -0,0 +1,187 @@
++"""Reading a paste as structured data and as plain text.
++
++Covers FR-012, FR-013, FR-014, FR-015, FR-016, FR-025, SR-012, SC-001.
++"""
++
++from __future__ import annotations
++
++import re
++
++import pytest
++
++TIMESTAMP_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
++
++#: Text exercising every category FR-016 names.
++AWKWARD_TEXT = (
++    "  héllo wörld 🌍🇯🇵\n"
++    "line two\twith a tab\n"
++    'she said "quoted" and \'single\' and \\backslash\\\n'
++    "emoji family 👩‍👩‍👧‍👦, combining é vs é, RTL אבג\n"
++    "null-ish \\u0000 literal, trailing spaces   "
++)
++
++
++def test_FR_012_structured_read_returns_exactly_four_fields(server):
++    """FR-012: a read returns 200 with id, content, created_at, and expires_at."""
++    created = server.create("hello", expires_in=3600)
++
++    response = server.get(f"/pastes/{created['id']}")
++
++    assert response.status == 200
++    assert response.header("Content-Type") == "application/json; charset=utf-8"
++    body = response.json()
++    assert set(body) == {"id", "content", "created_at", "expires_at"}
++    assert body["id"] == created["id"]
++    assert body["content"] == "hello"
++
++
++def test_FR_013_delete_token_is_absent_from_body_and_every_header(server):
++    """FR-013, SR-009: the revocation secret never appears in a read."""
++    created = server.create("secret-bearing")
++    token = created["delete_token"]
++
++    for path in (f"/pastes/{created['id']}", f"/pastes/{created['id']}/raw"):
++        response = server.get(path)
++        assert response.status == 200
++        assert "delete_token" not in response.body.decode("utf-8")
++        assert token not in response.body.decode("utf-8")
++        for name, value in response.headers:
++            assert token not in value, name
++            assert "delete_token" not in name.lower()
++
++
++def test_FR_014_raw_read_returns_verbatim_plain_text(server):
++    """FR-014, SR-012: /raw is text/plain with the exact bytes and nosniff."""
++    created = server.create("hello")
++
++    response = server.get(f"/pastes/{created['id']}/raw")
++
++    assert response.status == 200
++    assert response.header("Content-Type") == "text/plain; charset=utf-8"
++    assert response.header("X-Content-Type-Options") == "nosniff"
++    assert response.body == b"hello"
++    assert not response.body.endswith(b"\n"), "FR-014: no trailing newline is added"
++    assert not response.body.startswith(b"\xef\xbb\xbf"), "FR-014: no BOM is added"
++    assert response.header("Content-Length") == "5"
++
++
++def test_FR_015_timestamps_are_iso8601_utc_with_a_z_suffix(server):
++    """FR-015: both timestamps are whole-second UTC instants ending in Z."""
++    created = server.create("timestamped", expires_in=3600)
++
++    body = server.get(f"/pastes/{created['id']}").json()
++
++    assert TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
++    assert TIMESTAMP_RE.match(body["expires_at"]), body["expires_at"]
++    assert "+00:00" not in body["created_at"]
++    assert "." not in body["created_at"], "FR-015: second precision, no microseconds"
++
++
++def test_FR_015_expires_at_is_null_when_no_lifetime_was_given(server):
++    """FR-015, FR-008: a paste created without a lifetime reports ``expires_at: null``."""
++    created = server.create("forever")
++
++    assert server.get(f"/pastes/{created['id']}").json()["expires_at"] is None
++
++
++@pytest.mark.parametrize(
++    "content",
++    [
++        "hello",
++        "",
++        AWKWARD_TEXT,
++        "\n",
++        "   ",
++        "\t\t",
++        "a\r\nb",
++        "日本語テキスト",
++        "\u0000embedded null\u0000",
++        "0",
++        "null",
++        "{}",
++    ],
++    ids=lambda v: repr(v)[:40],
++)
++def test_FR_016_content_round_trips_byte_identically(server, content):
++    """FR-016, SC-001: text comes back byte-identical through both read forms."""
++    created = server.create(content)
++
++    structured = server.get(f"/pastes/{created['id']}")
++    assert structured.status == 200
++    assert structured.json()["content"] == content
++
++    raw = server.get(f"/pastes/{created['id']}/raw")
++    assert raw.status == 200
++    assert raw.body == content.encode("utf-8")
++    assert raw.header("Content-Length") == str(len(content.encode("utf-8")))
++
++
++def test_FR_016_raw_content_length_counts_encoded_bytes_not_characters(server):
++    """FR-016: ``Content-Length`` is the encoded byte count, never ``len(str)``."""
++    content = "🌍" * 10
++    created = server.create(content)
++
++    raw = server.get(f"/pastes/{created['id']}/raw")
++
++    assert len(content) == 10
++    assert raw.header("Content-Length") == "40"
++    assert raw.body == content.encode("utf-8")
++
++
++@pytest.mark.parametrize(
++    "payload",
++    [
++        "<script>alert(1)</script>",
++        "<html><body><h1>not markup here</h1></body></html>",
++        "<?xml version='1.0'?><root/>",
++        "<img src=x onerror=alert(1)>",
++    ],
++    ids=["script", "html", "xml", "img"],
++)
++def test_SR_012_markup_is_returned_inert_as_plain_text(server, payload):
++    """SR-012: stored markup is served as inert text/plain with nosniff, never HTML."""
++    created = server.create(payload)
++
++    raw = server.get(f"/pastes/{created['id']}/raw")
++
++    assert raw.status == 200
++    assert raw.header("Content-Type") == "text/plain; charset=utf-8"
++    assert "html" not in (raw.header("Content-Type") or "")
++    assert raw.header("X-Content-Type-Options") == "nosniff"
++    assert raw.body == payload.encode("utf-8")
++
++    structured = server.get(f"/pastes/{created['id']}")
++    assert structured.header("Content-Type") == "application/json; charset=utf-8"
++    assert structured.json()["content"] == payload
++
++
++def test_FR_012_unknown_identifier_is_404_on_both_read_forms(server):
++    """FR-012, FR-028: an identifier that was never issued is 404."""
++    never_issued = "A" * 22
++
++    for path in (f"/pastes/{never_issued}", f"/pastes/{never_issued}/raw"):
++        response = server.get(path)
++        assert response.status == 404
++        assert response.json() == {"error": "not found"}
++
++
++def test_FR_025_error_bodies_are_json_with_exactly_one_error_key(server):
++    """FR-025: every non-2xx response is JSON carrying exactly a non-empty ``error``."""
++    created = server.create("error shape probe")
++
++    responses = [
++        server.get("/nope"),
++        server.get("/pastes/" + "A" * 22),
++        server.get("/pastes/" + "A" * 22 + "/raw"),
++        server.post_json({"content": 5}),
++        server.post_json({"content": "x", "expires_in": 0}),
++        server.post_json({"content": "a" * 65600}),
++        server.delete(f"/pastes/{created['id']}", "wrong"),
++    ]
++
++    for response in responses:
++        assert response.status >= 400, response
++        assert response.header("Content-Type") == "application/json; charset=utf-8"
++        body = response.json()
++        assert set(body) == {"error"}, body
++        assert isinstance(body["error"], str) and body["error"]
+diff --git a/tests/test_requirement_coverage.py b/tests/test_requirement_coverage.py
+new file mode 100644
+index 0000000..f24f3ce
+--- /dev/null
++++ b/tests/test_requirement_coverage.py
+@@ -0,0 +1,82 @@
++"""SC-008: every requirement id is referenced by at least one test.
++
++Constitution Principle III requires the mapping from requirement identifier to test
++to be explicit and discoverable. This test turns that from a convention into an
++enforced gate: if a requirement id appears in no test name and no test docstring, the
++suite fails and names the missing ids.
++"""
++
++from __future__ import annotations
++
++import ast
++import pathlib
++import re
++
++TESTS = pathlib.Path(__file__).resolve().parent
++
++REQUIRED_IDS = [f"FR-{n:03d}" for n in range(1, 30)] + [
++    f"SR-{n:03d}" for n in range(1, 13)
++]
++
++#: Matches both the docstring form (``FR-001``) and the identifier form (``FR_001``),
++#: because a test *name* cannot contain a hyphen.
++ID_RE = re.compile(r"\b(FR|SR)[-_](\d{3})\b")
++
++
++def referenced_ids() -> dict[str, set[str]]:
++    """Requirement id → the test functions that reference it.
++
++    This module is excluded from its own scan: its docstrings necessarily name the
++    whole requirement range, and counting those would let the gate satisfy itself.
++    """
++    found: dict[str, set[str]] = {}
++    for module in sorted(TESTS.glob("test_*.py")):
++        if module.name == pathlib.Path(__file__).name:
++            continue
++        tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
++        for node in ast.walk(tree):
++            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
++                continue
++            if not node.name.startswith("test_"):
++                continue
++            haystack = node.name + "\n" + (ast.get_docstring(node) or "")
++            for prefix, number in ID_RE.findall(haystack):
++                found.setdefault(f"{prefix}-{number}", set()).add(
++                    f"{module.name}::{node.name}"
++                )
++    return found
++
++
++def test_SC_008_every_requirement_id_is_referenced_by_a_test():
++    """SC-008: no FR-001 … FR-029 or SR-001 … SR-012 may go unreferenced."""
++    found = referenced_ids()
++
++    missing = [identifier for identifier in REQUIRED_IDS if identifier not in found]
++
++    assert not missing, (
++        "SC-008 / Constitution Principle III: these requirements have no test "
++        "referencing them by id, and are therefore not implemented: "
++        + ", ".join(missing)
++    )
++
++
++def test_SC_008_no_test_references_an_identifier_that_does_not_exist():
++    """SC-008: the mapping is exact — a typo'd requirement id is caught too."""
++    found = referenced_ids()
++
++    unknown = sorted(set(found) - set(REQUIRED_IDS))
++
++    assert not unknown, (
++        "these ids are referenced by tests but are not requirements in spec.md: "
++        + ", ".join(f"{i} ({sorted(found[i])[0]})" for i in unknown)
++    )
++
++
++def test_SC_008_the_gate_itself_is_discoverable():
++    """SC-008: every requirement maps to a named test file, not an anonymous assert."""
++    found = referenced_ids()
++
++    for identifier in REQUIRED_IDS:
++        tests = found.get(identifier, set())
++        assert tests, identifier
++        assert all("::test_" in entry for entry in tests), (identifier, tests)
+diff --git a/tests/test_revoke.py b/tests/test_revoke.py
+new file mode 100644
+index 0000000..36c341b
+--- /dev/null
++++ b/tests/test_revoke.py
+@@ -0,0 +1,180 @@
++"""Revocation with the secret issued at creation.
++
++Covers FR-019, FR-020, FR-021, FR-022, SR-002, SR-006, SC-004.
++"""
++
++from __future__ import annotations
++
++import json
++import os
++import time
++
++import pytest
++
++
++def record_path(server, paste_id: str) -> str:
++    return os.path.join(server.data_dir, f"{paste_id}.json")
++
++
++def test_FR_019_correct_token_revokes_with_204_and_an_empty_body(server):
++    """FR-019: revocation with the correct secret returns 204 and no content."""
++    created = server.create("revoke me")
++
++    response = server.delete(f"/pastes/{created['id']}", created["delete_token"])
++
++    assert response.status == 204
++    assert response.body == b""
++    assert response.header("Content-Length") == "0"
++
++
++@pytest.mark.parametrize(
++    "token",
++    [None, "", "wrong", "x" * 43, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
++    ids=["absent", "empty", "short-wrong", "right-length-wrong", "all-A"],
++)
++def test_FR_020_missing_or_wrong_token_is_403_and_the_paste_survives(server, token):
++    """FR-020, SC-004: a failed revocation is 403 and leaves the paste unchanged."""
++    created = server.create("survives a bad token")
++    paste_id = created["id"]
++
++    response = server.delete(f"/pastes/{paste_id}", token)
++
++    assert response.status == 403
++    assert response.json() == {"error": "invalid delete token"}
++
++    read = server.get(f"/pastes/{paste_id}")
++    assert read.status == 200
++    assert read.json()["content"] == "survives a bad token"
++    assert server.get(f"/pastes/{paste_id}/raw").body == b"survives a bad token"
++
++
++def test_SR_002_token_differing_only_in_the_last_character_is_rejected(server):
++    """SR-002: a one-character miss is rejected, in constant time."""
++    created = server.create("near miss")
++    token = created["delete_token"]
++    near_miss = token[:-1] + ("A" if token[-1] != "A" else "B")
++    assert near_miss != token and len(near_miss) == len(token)
++
++    assert server.delete(f"/pastes/{created['id']}", near_miss).status == 403
++    assert server.get(f"/pastes/{created['id']}").status == 200
++    # And the real token still works afterwards.
++    assert server.delete(f"/pastes/{created['id']}", token).status == 204
++
++
++@pytest.mark.parametrize("token", [None, "wrong"], ids=["no-token", "wrong-token"])
++def test_FR_021_unknown_identifier_is_404_never_403(server, token):
++    """FR-021: an identifier that was never issued is 404 whatever token is supplied."""
++    response = server.delete("/pastes/" + "A" * 22, token)
++
++    assert response.status == 404
++    assert response.json() == {"error": "not found"}
++
++
++@pytest.mark.parametrize("use_correct_token", [True, False], ids=["correct", "wrong"])
++def test_FR_021_expired_paste_is_404_never_403(server, use_correct_token):
++    """FR-021: an expired paste reports non-existence in preference to a 403."""
++    created = server.create("expires soon", expires_in=1)
++    time.sleep(2.2)
++
++    token = created["delete_token"] if use_correct_token else "wrong"
++    response = server.delete(f"/pastes/{created['id']}", token)
++
++    assert response.status == 404
++    assert response.json() == {"error": "not found"}
++
++
++def test_FR_021_both_wrong_reports_non_existence(server):
++    """FR-021, Edge Case "Both wrong": an unknown id *and* a bad token is 404."""
++    for token in (None, "", "wrong", "x" * 43):
++        response = server.delete("/pastes/" + "B" * 22, token)
++        assert response.status == 404, token
++        assert response.json() == {"error": "not found"}
++
++
++def test_FR_022_revoked_paste_is_gone_from_every_route(server):
++    """FR-022: after revocation, read, raw read, and repeat revocation are all 404."""
++    created = server.create("transient")
++    paste_id = created["id"]
++    token = created["delete_token"]
++
++    assert server.delete(f"/pastes/{paste_id}", token).status == 204
++
++    assert server.get(f"/pastes/{paste_id}").status == 404
++    assert server.get(f"/pastes/{paste_id}/raw").status == 404
++
++    repeat = server.delete(f"/pastes/{paste_id}", token)
++    assert repeat.status == 404, "FR-022: a repeat revocation is 404, not 403 or 204"
++    assert repeat.json() == {"error": "not found"}
++
++    assert not os.path.exists(record_path(server, paste_id))
++
++
++def test_FR_022_revocation_does_not_affect_any_other_paste(server):
++    """FR-022: revoking one paste leaves every other paste readable."""
++    victim = server.create("goes away")
++    bystander = server.create("stays put")
++
++    assert server.delete(f"/pastes/{victim['id']}", victim["delete_token"]).status == 204
++
++    assert server.get(f"/pastes/{bystander['id']}").json()["content"] == "stays put"
++    assert (
++        server.delete(f"/pastes/{bystander['id']}", bystander["delete_token"]).status
++        == 204
++    )
++
++
++def test_SR_006_token_is_reread_from_the_stored_record_on_every_request(server):
++    """SR-006: the check consults the record on disk each time, never a cached value.
++
++    The stored secret is rewritten behind the server's back; the new value must start
++    working and the old one must stop, which can only happen if the record is re-read
++    on every revocation.
++    """
++    created = server.create("authority lives on disk")
++    paste_id = created["id"]
++    path = record_path(server, paste_id)
++
++    # A successful read first — it must confer no authority of any kind.
++    assert server.get(f"/pastes/{paste_id}").status == 200
++
++    with open(path, "r", encoding="utf-8") as handle:
++        record = json.load(handle)
++    rotated = "Z" * 43
++    record["delete_token"] = rotated
++    with open(path, "w", encoding="utf-8") as handle:
++        json.dump(record, handle)
++
++    assert server.delete(f"/pastes/{paste_id}", created["delete_token"]).status == 403
++    assert server.delete(f"/pastes/{paste_id}", rotated).status == 204
++
++
++def test_SR_006_no_client_supplied_claim_other_than_the_token_is_consulted(server):
++    """SR-006: cookies, auth headers, and spoofed fields confer no authority."""
++    created = server.create("claims are not credentials")
++    paste_id = created["id"]
++
++    spoofed = {
++        "Cookie": f"delete_token={created['delete_token']}; admin=1",
++        "Authorization": f"Bearer {created['delete_token']}",
++        "X-Delete-Token-Override": created["delete_token"],
++        "X-Forwarded-For": "127.0.0.1",
++        "X-Admin": "true",
++    }
++    response = server.request("DELETE", f"/pastes/{paste_id}", None, spoofed)
++
++    assert response.status == 403
++    assert response.json() == {"error": "invalid delete token"}
++    assert server.get(f"/pastes/{paste_id}").status == 200
++
++    # Only the header the contract names works.
++    assert server.delete(f"/pastes/{paste_id}", created["delete_token"]).status == 204
++
++
++def test_FR_019_revocation_survives_a_restart(server):
++    """FR-019, FR-023: a secret issued before a restart still revokes after it."""
++    created = server.create("revoked after restart")
++
++    server.restart()
++
++    assert server.delete(f"/pastes/{created['id']}", created["delete_token"]).status == 204
++    assert server.get(f"/pastes/{created['id']}").status == 404
+diff --git a/tests/test_routing.py b/tests/test_routing.py
+new file mode 100644
+index 0000000..c9fbd10
+--- /dev/null
++++ b/tests/test_routing.py
+@@ -0,0 +1,90 @@
++"""FR-028: the route table is closed — everything outside it is 404, never 405."""
++
++from __future__ import annotations
++
++import pytest
++
++# (method, path template) — ``{id}`` is substituted with a live paste's identifier.
++CLOSED_TABLE = [
++    ("GET", "/"),
++    ("GET", "/nope"),
++    ("GET", "/pastes"),
++    ("GET", "/pastes/"),
++    ("GET", "/Pastes/{id}"),
++    ("GET", "/pastes/{id}/other"),
++    ("GET", "/pastes/{id}/"),
++    ("GET", "/pastes/{id}/raw/more"),
++    ("POST", "/"),
++    ("POST", "/pastes/"),
++    ("POST", "/pastes/{id}"),
++    ("POST", "/pastes/{id}/raw"),
++    ("DELETE", "/pastes"),
++    ("DELETE", "/pastes/{id}/raw"),
++    ("PUT", "/pastes/{id}"),
++    ("PATCH", "/pastes/{id}"),
++    ("PUT", "/pastes"),
++    ("OPTIONS", "/pastes/{id}"),
++]
++
++
++@pytest.mark.parametrize("method,template", CLOSED_TABLE, ids=lambda v: str(v))
++def test_FR_028_unrouted_requests_are_404_with_no_allow_header(server, method, template):
++    """FR-028: every request outside the four-row table is 404, never 405."""
++    created = server.create("routing fixture")
++    path = template.format(id=created["id"])
++
++    response = server.request(method, path)
++
++    assert response.status == 404, (method, path, response.status)
++    assert response.json() == {"error": "not found"}
++    assert not response.has_header("Allow"), (
++        "FR-028: a 405-style Allow header must never be sent"
++    )
++    assert response.header("Content-Type") == "application/json; charset=utf-8"
++
++
++def test_FR_028_head_is_unrouted_and_carries_no_content(server):
++    """FR-028: HEAD is outside the table — 404, no Allow header, no content body."""
++    created = server.create("head fixture")
++
++    response = server.request("HEAD", f"/pastes/{created['id']}")
++
++    assert response.status == 404
++    assert not response.has_header("Allow")
++    # RFC 9110 forbids content in a response to HEAD; the declared length is still
++    # the length the corresponding GET would send.
++    assert response.body == b""
++    assert response.header("Content-Length") == str(len(b'{"error": "not found"}'))
++
++
++def test_FR_028_known_id_still_reachable_on_its_own_routes(server):
++    """FR-028: the four table rows themselves keep working alongside the 404s."""
++    created = server.create("still reachable")
++    paste_id = created["id"]
++
++    assert server.get(f"/pastes/{paste_id}").status == 200
++    assert server.get(f"/pastes/{paste_id}/raw").status == 200
++    assert server.delete(f"/pastes/{paste_id}", created["delete_token"]).status == 204
++
++
++def test_FR_028_query_string_is_discarded_before_routing(server):
++    """FR-028: a query string never changes which route matches."""
++    created = server.create("query fixture")
++    paste_id = created["id"]
++
++    assert server.get(f"/pastes/{paste_id}?x=1").status == 200
++    assert server.get(f"/pastes/{paste_id}/raw?x=1&y=2").status == 200
++    assert server.get(f"/pastes/{paste_id}/other?x=1").status == 404
++
++
++def test_FR_028_percent_encoded_separator_cannot_manufacture_a_route(server):
++    """FR-028: ``%2F`` is part of one segment, never a new segment boundary."""
++    created = server.create("encoding fixture")
++    paste_id = created["id"]
++
++    # If the whole path were unquoted before splitting, this would re-enter routing
++    # as ``/pastes/<id>/raw`` and return 200.
++    response = server.get(f"/pastes/{paste_id}%2Fraw")
++
++    assert response.status == 404
++    assert response.json() == {"error": "not found"}
+diff --git a/tests/test_security.py b/tests/test_security.py
+new file mode 100644
+index 0000000..498a7f6
+--- /dev/null
++++ b/tests/test_security.py
+@@ -0,0 +1,471 @@
++"""Negative security tests: SR-001 … SR-004, SR-007 … SR-010, SC-009, SC-010.
++
++Every test here proves a control *rejects* abuse, not merely that the happy path
++works (Constitution Principle V).
++"""
++
++from __future__ import annotations
++
++import hashlib
++import os
++import pathlib
++import re
++import threading
++import urllib.parse
++
++import pytest
++
++from conftest import ISSUED_TOKENS, build_head
++
++SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "pastebin"
++
++VALID_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{22}\Z")
++TOKEN_RE = re.compile(r"\A[A-Za-z0-9_-]{43}\Z")
++
++#: Identifier segments that must never reach the filesystem (SR-003, SC-010).
++TRAVERSAL_SEGMENTS = [
++    "../../etc/passwd",
++    "..%2F..%2Fetc%2Fpasswd",
++    "%2Fetc%2Fpasswd",
++    "/etc/passwd",
++    "a/../b",
++    "..",
++    ".",
++    "",
++    "A" * 21,
++    "A" * 23,
++    "AAAAAAAAAAAAAAAAAAAA.j",
++    "AAAAAAAAAAAAAAAAAA%00",
++    "....//....//etc/passwd",
++]
++
++
++def directory_snapshot(path: str) -> dict[str, str]:
++    """Name → content digest for every entry in a directory."""
++    snapshot = {}
++    for name in sorted(os.listdir(path)):
++        full = os.path.join(path, name)
++        if os.path.isfile(full):
++            with open(full, "rb") as handle:
++                snapshot[name] = hashlib.sha256(handle.read()).hexdigest()
++        else:  # pragma: no cover - the store creates no subdirectories
++            snapshot[name] = "<dir>"
++    return snapshot
++
++
++def tree_snapshot(root: pathlib.Path) -> dict[str, tuple[int, float, str]]:
++    """Path → (size, mtime, digest) for every file under ``root``."""
++    snapshot = {}
++    for path in sorted(root.rglob("*")):
++        if path.is_file() and not path.is_symlink():
++            stat = path.stat()
++            snapshot[str(path)] = (
++                stat.st_size,
++                stat.st_mtime,
++                hashlib.sha256(path.read_bytes()).hexdigest(),
++            )
++    return snapshot
++
++
++# --- SR-003 / SC-010: path containment --------------------------------------------
++
++
++@pytest.mark.parametrize("segment", TRAVERSAL_SEGMENTS, ids=lambda v: repr(v))
++def test_SR_003_traversal_segments_are_404_on_every_id_route(server, segment):
++    """SR-003, SC-010: a traversal identifier is 404 and never reaches the filesystem."""
++    quoted = urllib.parse.quote(segment, safe="%")
++    before = directory_snapshot(server.data_dir)
++
++    for path, method, token in (
++        (f"/pastes/{quoted}", "GET", None),
++        (f"/pastes/{quoted}/raw", "GET", None),
++        (f"/pastes/{quoted}", "DELETE", "anything"),
++    ):
++        if method == "GET":
++            response = server.get(path)
++        else:
++            response = server.delete(path, token)
++        assert response.status == 404, (method, path, response.status)
++        assert response.json() == {"error": "not found"}
++        assert "passwd" not in response.body.decode("utf-8")
++        assert "root:" not in response.body.decode("utf-8")
++
++    assert directory_snapshot(server.data_dir) == before, (
++        "SR-003: a rejected identifier must not change the data directory"
++    )
++
++
++def test_SR_003_symlink_out_of_the_data_directory_is_not_followed(server, tmp_path):
++    """SR-003: a validly-named record that is a symlink out of the directory is 404."""
++    outside = tmp_path / "outside-the-store.txt"
++    outside.write_text("TOP SECRET CONTENTS", encoding="utf-8")
++
++    paste_id = "A" * 22
++    assert VALID_ID_RE.match(paste_id)
++    link = pathlib.Path(server.data_dir) / f"{paste_id}.json"
++    link.symlink_to(outside)
++
++    for path in (f"/pastes/{paste_id}", f"/pastes/{paste_id}/raw"):
++        response = server.get(path)
++        assert response.status == 404, path
++        assert b"TOP SECRET" not in response.body
++
++    # The link target must survive a revocation attempt too.
++    assert server.delete(f"/pastes/{paste_id}", "anything").status == 404
++    assert outside.read_text(encoding="utf-8") == "TOP SECRET CONTENTS"
++    assert outside.exists()
++
++
++def test_SR_003_nothing_outside_the_data_directory_is_touched(server, tmp_path):
++    """SC-010: no crafted request creates, modifies, or removes anything outside."""
++    sentinel_dir = tmp_path / "sentinels"
++    sentinel_dir.mkdir()
++    (sentinel_dir / "keep.txt").write_text("untouched", encoding="utf-8")
++    (sentinel_dir / "passwd").write_text("root:x:0:0", encoding="utf-8")
++    before = tree_snapshot(sentinel_dir)
++    passwd_before = os.stat("/etc/passwd")
++
++    extra = [
++        str(sentinel_dir / "keep"),
++        "..%2F..%2Fsentinels%2Fkeep",
++        "../sentinels/keep",
++    ]
++    for segment in TRAVERSAL_SEGMENTS + extra:
++        quoted = urllib.parse.quote(segment, safe="%")
++        server.get(f"/pastes/{quoted}")
++        server.get(f"/pastes/{quoted}/raw")
++        server.delete(f"/pastes/{quoted}", "anything")
++
++    assert tree_snapshot(sentinel_dir) == before
++    passwd_after = os.stat("/etc/passwd")
++    assert (passwd_before.st_size, passwd_before.st_mtime) == (
++        passwd_after.st_size,
++        passwd_after.st_mtime,
++    )
++
++
++# --- SR-001: unguessable capabilities ---------------------------------------------
++
++
++def test_SR_001_identifiers_and_tokens_are_unique_and_url_safe(server):
++    """SR-001, FR-011: 1 000 pastes yield 1 000 distinct, URL-safe ids and tokens."""
++    ids = []
++    tokens = []
++    for _ in range(1000):
++        created = server.create("x")
++        ids.append(created["id"])
++        tokens.append(created["delete_token"])
++
++    assert len(set(ids)) == 1000, "FR-011: identifiers must be unique"
++    assert len(set(tokens)) == 1000, "SR-001: revocation secrets must be unique"
++    assert set(ids).isdisjoint(tokens)
++
++    for value in ids:
++        assert VALID_ID_RE.match(value), value
++        # 22 chars of [A-Za-z0-9_-] need no percent-encoding in a URL path.
++        assert urllib.parse.quote(value, safe="") == value
++    for value in tokens:
++        assert TOKEN_RE.match(value), value
++
++
++def test_SR_001_identical_content_yields_unrelated_ids_and_tokens(server):
++    """SR-001: ids and secrets derive from no input — not content, time, or a counter."""
++    first = server.create("identical content")
++    second = server.create("identical content")
++
++    assert first["id"] != second["id"]
++    assert first["delete_token"] != second["delete_token"]
++    # Nothing about the second value is predictable from the first: no shared prefix
++    # (a counter or timestamp-derived value would share one).
++    shared = 0
++    for a, b in zip(first["id"], second["id"]):
++        if a != b:
++            break
++        shared += 1
++    assert shared < 6, "SR-001: identifiers look sequential, not random"
++
++
++# --- SR-002: constant-time comparison ---------------------------------------------
++
++
++def test_SR_002_implementation_uses_hmac_compare_digest(server):
++    """SR-002: the token check is ``hmac.compare_digest``, never ``==``."""
++    store_source = (SRC / "store.py").read_text(encoding="utf-8")
++    assert "hmac.compare_digest(" in store_source
++
++    offenders = []
++    for module in sorted(SRC.glob("*.py")):
++        for number, line in enumerate(
++            module.read_text(encoding="utf-8").splitlines(), start=1
++        ):
++            stripped = line.strip()
++            if stripped.startswith("#"):
++                continue
++            if re.search(r"token", stripped, re.IGNORECASE) and re.search(
++                r"[!=]=", stripped
++            ):
++                offenders.append(f"{module.name}:{number}: {stripped}")
++    assert not offenders, (
++        "SR-002: a delete token must never be compared with == or !=\n"
++        + "\n".join(offenders)
++    )
++
++
++def test_SR_002_token_differing_only_in_its_last_character_is_rejected(server):
++    """SR-002: a near-miss token is rejected, and the paste survives."""
++    created = server.create("near miss")
++    token = created["delete_token"]
++    near_miss = token[:-1] + ("A" if token[-1] != "A" else "B")
++
++    response = server.delete(f"/pastes/{created['id']}", near_miss)
++
++    assert response.status == 403
++    assert response.json() == {"error": "invalid delete token"}
++    assert server.get(f"/pastes/{created['id']}").status == 200
++
++
++# --- SR-004: input validated before it reaches a sink ------------------------------
++
++
++def test_SR_004_rejected_request_elements_never_change_the_store(server):
++    """SR-004: path, method, framing, and header rejections touch no file."""
++    server.create("baseline")
++    before = directory_snapshot(server.data_dir)
++
++    # Bad path segment.
++    server.get("/pastes/" + urllib.parse.quote("../../etc/passwd", safe="%"))
++    # Unsupported method on a known path.
++    server.request("PUT", "/pastes", b"{}", {"Content-Type": "application/json"})
++    # Missing Content-Length.
++    server.send_raw(build_head("POST", "/pastes", server.port))
++    # Chunked framing.
++    server.send_raw(
++        build_head(
++            "POST", "/pastes", server.port, {"Transfer-Encoding": "chunked"}
++        ),
++        b"5\r\nhello\r\n0\r\n\r\n",
++    )
++    # Malformed body.
++    server.post_raw(b"not json", {"Content-Type": "application/json"})
++    # Oversized declaration.
++    server.send_raw(
++        build_head("POST", "/pastes", server.port, {"Content-Length": "50000000"})
++    )
++
++    assert directory_snapshot(server.data_dir) == before
++
++
++def test_SR_004_non_ascii_delete_token_header_is_rejected_not_crashed(server):
++    """SR-004: a non-ASCII token is rejected cleanly, never a 500 from the guard."""
++    created = server.create("unicode token probe")
++    head = build_head(
++        "DELETE",
++        f"/pastes/{created['id']}",
++        server.port,
++        {"X-Delete-Token": "tökén-ÿ"},
++    )
++    response = server.send_raw(head)
++
++    assert response.status == 403
++    assert response.json() == {"error": "invalid delete token"}
++    assert server.get(f"/pastes/{created['id']}").status == 200
++
++
++# --- SR-007: atomic revocation under concurrency ----------------------------------
++
++
++def test_SR_007_concurrent_identical_revocations_yield_exactly_one_204(server):
++    """SR-007: N threads with the same correct token → one 204, the rest 404."""
++    created = server.create("contended")
++    token = created["delete_token"]
++    path = f"/pastes/{created['id']}"
++
++    thread_count = 12
++    barrier = threading.Barrier(thread_count)
++    statuses: list[int] = []
++    lock = threading.Lock()
++
++    def revoke() -> None:
++        barrier.wait()
++        status = server.delete(path, token).status
++        with lock:
++            statuses.append(status)
++
++    threads = [threading.Thread(target=revoke) for _ in range(thread_count)]
++    for thread in threads:
++        thread.start()
++    for thread in threads:
++        thread.join(timeout=30)
++
++    assert len(statuses) == thread_count
++    assert statuses.count(204) == 1, statuses
++    assert statuses.count(404) == thread_count - 1, statuses
++    assert 403 not in statuses, "SR-007: a correct token must never yield 403"
++    assert 500 not in statuses, "SR-007: contention must never yield 500"
++
++
++def test_SR_007_concurrent_reads_during_revocation_are_never_partial(server):
++    """SR-007: a read racing a revocation returns the whole paste or 404, never part."""
++    content = "complete-or-nothing " * 500
++    created = server.create(content)
++    path = f"/pastes/{created['id']}"
++
++    stop = threading.Event()
++    problems: list[str] = []
++    lock = threading.Lock()
++
++    def read_repeatedly() -> None:
++        while not stop.is_set():
++            response = server.get(f"{path}/raw")
++            if response.status == 200:
++                if response.body != content.encode("utf-8"):
++                    with lock:
++                        problems.append(f"truncated body of {len(response.body)} bytes")
++            elif response.status != 404:
++                with lock:
++                    problems.append(f"unexpected status {response.status}")
++
++    readers = [threading.Thread(target=read_repeatedly) for _ in range(4)]
++    for reader in readers:
++        reader.start()
++    try:
++        assert server.delete(path, created["delete_token"]).status == 204
++        # Let the readers observe the other side of the transition.
++        for _ in range(20):
++            server.get(f"{path}/raw")
++    finally:
++        stop.set()
++        for reader in readers:
++            reader.join(timeout=30)
++
++    assert not problems, problems
++
++
++# --- SR-008: restrictive file permissions -----------------------------------------
++
++
++def test_SR_008_data_directory_is_0700_and_records_are_0600(server):
++    """SR-008: the directory is 0700 and every record 0600, under a permissive umask.
++
++    The umask is cleared first: that is what catches a write-then-``chmod``
++    implementation, whose records would be momentarily world-readable.
++    """
++    previous = os.umask(0o000)
++    try:
++        for _ in range(5):
++            server.create("permission probe")
++    finally:
++        os.umask(previous)
++
++    assert os.stat(server.data_dir).st_mode & 0o777 == 0o700
++
++    names = os.listdir(server.data_dir)
++    assert names, "the probe created no records"
++    for name in names:
++        full = os.path.join(server.data_dir, name)
++        assert os.stat(full).st_mode & 0o777 == 0o600, name
++
++
++def test_SR_008_preexisting_loose_data_directory_is_tightened(tmp_path):
++    """SR-008, FR-002: a pre-existing world-readable directory is tightened to 0700."""
++    from conftest import Service
++
++    loose = tmp_path / "loose"
++    loose.mkdir(mode=0o777)
++    os.chmod(loose, 0o777)
++
++    service = Service(str(loose))
++    service.start()
++    try:
++        assert os.stat(str(loose)).st_mode & 0o777 == 0o700
++    finally:
++        service.stop()
++
++
++# --- SR-009 / SR-010: redaction and failing closed --------------------------------
++
++
++def test_SR_009_no_response_leaks_a_token_a_path_or_a_traceback(server):
++    """SR-009, SC-009: every response is scanned for leakage as it is produced.
++
++    ``conftest.scan_response`` applies this check to *every* response the suite makes,
++    so the guarantee holds for any subset of tests. This test exercises the shapes
++    most likely to leak and asserts the scanner is actually armed.
++    """
++    created = server.create("leak probe")
++    paste_id = created["id"]
++
++    probes = [
++        lambda: server.get("/"),
++        lambda: server.get("/nope"),
++        lambda: server.get(f"/pastes/{paste_id}"),
++        lambda: server.get(f"/pastes/{paste_id}/raw"),
++        lambda: server.get("/pastes/" + "A" * 22),
++        lambda: server.post_raw(b"{", {"Content-Type": "application/json"}),
++        lambda: server.post_json({"content": 5}),
++        lambda: server.delete(f"/pastes/{paste_id}", "wrong"),
++        lambda: server.request("PUT", f"/pastes/{paste_id}"),
++    ]
++    for probe in probes:
++        response = probe()
++        text = response.header_text + response.body.decode("utf-8", "replace")
++        assert created["delete_token"] not in text
++        assert server.data_dir not in text
++        assert "Traceback" not in text
++        assert response.header("Server") == "pastebin"
++
++    assert created["delete_token"] in ISSUED_TOKENS, (
++        "the suite-wide token scanner must have recorded this token"
++    )
++
++
++def test_SR_010_internal_failure_fails_closed_with_a_generic_500(server, monkeypatch):
++    """SR-010: an unexpected internal failure yields 500 with no content, no detail."""
++    created = server.create("fail closed probe")
++
++    def explode(*args, **kwargs):
++        raise RuntimeError(f"secret internal detail about {server.data_dir}")
++
++    monkeypatch.setattr(server.store, "read_record", explode)
++
++    response = server.get(f"/pastes/{created['id']}")
++
++    assert response.status == 500
++    assert response.json() == {"error": "internal error"}
++    assert "secret internal detail" not in response.body.decode("utf-8")
++    assert "fail closed probe" not in response.body.decode("utf-8")
++    assert server.data_dir not in response.body.decode("utf-8")
++
++
++def test_SR_010_internal_failure_on_write_returns_500_and_creates_nothing(
++    server, monkeypatch
++):
++    """SR-010: a failing write is reported as 500, never as a successful creation."""
++    before = directory_snapshot(server.data_dir)
++
++    def explode(*args, **kwargs):
++        raise OSError("disk went away")
++
++    monkeypatch.setattr(server.store, "write_record", explode)
++
++    response = server.post_json({"content": "never stored"})
++
++    assert response.status == 500
++    assert response.json() == {"error": "internal error"}
++    assert directory_snapshot(server.data_dir) == before
++
++
++def test_SR_010_no_bare_except_or_swallowed_exception_in_the_runtime():
++    """SR-010, Constitution Principle II: no ``except:`` and no ``except …: pass``."""
++    offenders = []
++    for module in sorted(SRC.glob("*.py")):
++        lines = module.read_text(encoding="utf-8").splitlines()
++        for number, line in enumerate(lines, start=1):
++            stripped = line.strip()
++            if re.fullmatch(r"except\s*:", stripped):
++                offenders.append(f"{module.name}:{number}: bare except")
++            if re.fullmatch(r"except\s+Exception\s*:", stripped):
++                following = lines[number].strip() if number < len(lines) else ""
++                if following == "pass":
++                    offenders.append(f"{module.name}:{number}: swallowed exception")
++    assert not offenders, offenders
+diff --git a/tests/test_startup.py b/tests/test_startup.py
+new file mode 100644
+index 0000000..99cef7a
+--- /dev/null
++++ b/tests/test_startup.py
+@@ -0,0 +1,469 @@
++"""The operator-facing startup contract, driven as a real subprocess.
++
++Covers FR-001, FR-002, FR-003, FR-004, SR-008, SR-011, SC-006.
++"""
++
++from __future__ import annotations
++
++import http.client
++import os
++import re
++import select
++import signal
++import socket
++import subprocess
++import sys
++import time
++
++import pytest
++
++REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++SRC = os.path.join(REPO_ROOT, "src")
++
++READY_RE = re.compile(r"\Alistening on 127\.0\.0\.1:(\d{1,5})\Z")
++
++
++def launch(*args: str) -> subprocess.Popen:
++    """Run ``python -m pastebin`` exactly as contracts/cli.md documents it."""
++    environment = dict(os.environ, PYTHONPATH=SRC, PYTHONUNBUFFERED="")
++    return subprocess.Popen(
++        [sys.executable, "-m", "pastebin", *args],
++        cwd=REPO_ROOT,
++        env=environment,
++        stdout=subprocess.PIPE,
++        stderr=subprocess.PIPE,
++        text=True,
++    )
++
++
++def read_line(stream, timeout: float = 15.0) -> str:
++    """Read one line, failing the test rather than hanging if none arrives."""
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        ready, _, _ = select.select([stream], [], [], 0.1)
++        if ready:
++            return stream.readline()
++    raise AssertionError("no output arrived within the timeout")
++
++
++def await_ready(process: subprocess.Popen) -> int:
++    """Read the readiness line and return the bound port."""
++    line = read_line(process.stdout).rstrip("\n")
++    match = READY_RE.match(line)
++    assert match, f"FR-003: unexpected readiness line {line!r}"
++    return int(match.group(1))
++
++
++def stop(process: subprocess.Popen) -> tuple[int, str, str]:
++    """Interrupt the service and return ``(exit status, stdout tail, stderr)``."""
++    if process.poll() is None:
++        process.send_signal(signal.SIGINT)
++    try:
++        out, err = process.communicate(timeout=15)
++    except subprocess.TimeoutExpired:  # pragma: no cover - failure diagnostics
++        process.kill()
++        out, err = process.communicate()
++        raise AssertionError("the service did not exit on SIGINT")
++    return process.returncode, out, err
++
++
++def http_status(port: int, method: str = "GET", path: str = "/pastes/" + "A" * 22) -> int:
++    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
++    try:
++        connection.request(method, path)
++        return connection.getresponse().status
++    finally:
++        connection.close()
++
++
++def create_paste(port: int, content: str = "hello") -> dict:
++    import json
++
++    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
++    try:
++        body = json.dumps({"content": content}).encode("utf-8")
++        connection.request(
++            "POST", "/pastes", body, {"Content-Length": str(len(body))}
++        )
++        response = connection.getresponse()
++        assert response.status == 201
++        return json.loads(response.read())
++    finally:
++        connection.close()
++
++
++def non_loopback_ipv4() -> str | None:
++    """An address of this host that is not loopback, if it has one."""
++    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++    try:
++        probe.connect(("192.0.2.1", 9))  # TEST-NET-1; no packet is actually sent
++        address = probe.getsockname()[0]
++    except OSError:  # pragma: no cover - host without a default route
++        return None
++    finally:
++        probe.close()
++    return None if address.startswith("127.") else address
++
++
++def listening_addresses(port: int) -> set[str]:
++    """Local addresses with a listening TCP socket on ``port``, from ``/proc``."""
++    addresses = set()
++    for source in ("/proc/net/tcp", "/proc/net/tcp6"):
++        try:
++            with open(source, "r", encoding="ascii") as handle:
++                lines = handle.read().splitlines()[1:]
++        except OSError:  # pragma: no cover - non-Linux
++            continue
++        for line in lines:
++            fields = line.split()
++            local, state = fields[1], fields[3]
++            if state != "0A":  # TCP_LISTEN
++                continue
++            hex_address, hex_port = local.rsplit(":", 1)
++            if int(hex_port, 16) == port:
++                addresses.add(hex_address)
++    return addresses
++
++
++# --- FR-001, FR-003: starting ------------------------------------------------------
++
++
++def test_FR_001_service_starts_from_one_command_and_serves_on_loopback(tmp_path):
++    """FR-001: one command taking a port and a data directory starts the service."""
++    process = launch("serve", "--port", "0", "--data", str(tmp_path / "data"))
++    try:
++        port = await_ready(process)
++        assert http_status(port) == 404
++        created = create_paste(port, "served over loopback")
++        assert len(created["id"]) == 22
++    finally:
++        status, _, err = stop(process)
++    assert status == 0, err
++
++
++def test_FR_003_stdout_carries_exactly_one_readiness_line_and_nothing_else(tmp_path):
++    """FR-003, SR-009: exactly one line on stdout, with no request logging after it."""
++    process = launch("serve", "--port", "0", "--data", str(tmp_path / "data"))
++    port = await_ready(process)
++
++    created = create_paste(port, "logged?")
++    http_status(port, "GET", f"/pastes/{created['id']}")
++    http_status(port, "GET", "/nope")
++    http_status(port, "DELETE", f"/pastes/{created['id']}")
++
++    status, out, err = stop(process)
++
++    assert status == 0
++    assert out == "", f"FR-003: stdout carried more than the readiness line: {out!r}"
++    assert err == "", f"SR-009: nothing may be written to stderr on success: {err!r}"
++
++
++def test_FR_003_port_zero_reports_the_ephemeral_port_actually_bound(tmp_path):
++    """FR-003: ``--port 0`` reports the port the kernel chose, never ``0``."""
++    process = launch("serve", "--port", "0", "--data", str(tmp_path / "data"))
++    try:
++        port = await_ready(process)
++        assert port != 0
++        assert 1024 <= port <= 65535
++        # The reported port is genuinely the one serving.
++        assert http_status(port) == 404
++    finally:
++        stop(process)
++
++
++def test_FR_003_fixed_port_is_reported_verbatim(tmp_path):
++    """FR-003: with an explicit port, the readiness line names that exact port."""
++    with socket.socket() as finder:
++        finder.bind(("127.0.0.1", 0))
++        chosen = finder.getsockname()[1]
++
++    process = launch("serve", "--port", str(chosen), "--data", str(tmp_path / "data"))
++    try:
++        assert await_ready(process) == chosen
++    finally:
++        stop(process)
++
++
++def test_FR_002_data_directory_is_created_with_parents_at_mode_0700(tmp_path):
++    """FR-002, SR-008: a nested, non-existent data directory is created as 0700."""
++    nested = tmp_path / "brand" / "new" / "nested" / "dir"
++    assert not nested.exists()
++
++    process = launch("serve", "--port", "0", "--data", str(nested))
++    try:
++        port = await_ready(process)
++        assert nested.is_dir()
++        assert os.stat(nested).st_mode & 0o777 == 0o700
++        created = create_paste(port, "stored in a fresh tree")
++        record = nested / f"{created['id']}.json"
++        assert record.exists()
++        assert os.stat(record).st_mode & 0o777 == 0o600
++    finally:
++        stop(process)
++
++
++def test_FR_002_existing_data_directory_is_reused(tmp_path):
++    """FR-002: an existing directory is reused, with its pastes still readable."""
++    data = tmp_path / "data"
++    first = launch("serve", "--port", "0", "--data", str(data))
++    port = await_ready(first)
++    created = create_paste(port, "written by the first run")
++    stop(first)
++
++    second = launch("serve", "--port", "0", "--data", str(data))
++    try:
++        port = await_ready(second)
++        assert http_status(second_port := port, "GET", f"/pastes/{created['id']}") == 200
++        assert second_port == port
++    finally:
++        stop(second)
++
++
++# --- FR-004: startup failures ------------------------------------------------------
++
++
++def assert_failed_startup(process: subprocess.Popen, expected: str) -> None:
++    out, err = process.communicate(timeout=20)
++    assert process.returncode != 0, "FR-004: a startup failure must exit non-zero"
++    assert expected in err, f"FR-004: stderr was {err!r}"
++    assert "listening on" not in out, (
++        "FR-004: the readiness line must not be printed on failure"
++    )
++
++
++@pytest.mark.parametrize(
++    "args,expected",
++    [
++        ([], "arguments"),
++        (["serve"], "required"),
++        (["serve", "--port", "0"], "required"),
++        (["serve", "--data", "/tmp/unused-pastebin"], "required"),
++        (["serve", "--port", "not-a-number", "--data", "/tmp/unused-pastebin"], "invalid"),
++        (["brew", "--port", "0", "--data", "/tmp/unused-pastebin"], "invalid choice"),
++    ],
++    ids=["no-args", "no-port-no-data", "no-data", "no-port", "port-not-int", "bad-subcommand"],
++)
++def test_FR_004_invalid_arguments_fail_loudly(args, expected):
++    """FR-004: an unusable command line exits non-zero with a message on stderr."""
++    assert_failed_startup(launch(*args), expected)
++
++
++@pytest.mark.parametrize("port", ["-1", "65536", "99999"], ids=lambda v: v)
++def test_FR_004_out_of_range_port_is_rejected(tmp_path, port):
++    """FR-004: a port outside 0 … 65535 is refused, with no fallback port."""
++    assert_failed_startup(
++        launch("serve", "--port", port, "--data", str(tmp_path / "data")),
++        "error: --port must be between 0 and 65535",
++    )
++
++
++def test_FR_004_port_already_in_use_fails_without_a_fallback(tmp_path):
++    """FR-004: a port already in use is fatal — there is no fallback port."""
++    first = launch("serve", "--port", "0", "--data", str(tmp_path / "first"))
++    try:
++        port = await_ready(first)
++
++        second = launch("serve", "--port", str(port), "--data", str(tmp_path / "second"))
++        out, err = second.communicate(timeout=20)
++
++        assert second.returncode != 0
++        assert f"error: cannot bind 127.0.0.1:{port}:" in err
++        assert "listening on" not in out
++        # The original service is undisturbed.
++        assert http_status(port) == 404
++    finally:
++        stop(first)
++
++
++def test_FR_004_uncreatable_data_directory_fails_without_a_fallback(tmp_path):
++    """FR-004: a data directory that cannot be created is fatal, with no fallback."""
++    blocker = tmp_path / "a-regular-file"
++    blocker.write_text("not a directory", encoding="utf-8")
++
++    assert_failed_startup(
++        launch("serve", "--port", "0", "--data", str(blocker / "sub")),
++        "error: cannot create data directory:",
++    )
++    assert_failed_startup(
++        launch("serve", "--port", "0", "--data", str(blocker)),
++        "error: cannot create data directory:",
++    )
++    assert blocker.read_text(encoding="utf-8") == "not a directory"
++
++
++def test_FR_004_unwritable_data_directory_is_reported_as_such(tmp_path, monkeypatch):
++    """FR-004: an existing but unwritable directory produces its documented message.
++
++    Exercised against ``cli._prepare_data_dir`` directly: a process running as root
++    bypasses the permission bits that would otherwise make a directory unwritable, so
++    a chmod-based subprocess test would not reach this branch on every host.
++    """
++    from pastebin import cli
++
++    target = tmp_path / "read-only"
++    target.mkdir()
++
++    real_access = os.access
++    monkeypatch.setattr(
++        os,
++        "access",
++        lambda path, mode, **kw: False
++        if str(path) == str(target)
++        else real_access(path, mode, **kw),
++    )
++
++    assert cli._prepare_data_dir(str(target)) == "error: data directory is not writable"
++
++
++def test_FR_004_startup_failures_never_create_the_data_directory(tmp_path):
++    """FR-004: a refused start leaves no half-made state behind."""
++    data = tmp_path / "never-created"
++    assert_failed_startup(
++        launch("serve", "--port", "70000", "--data", str(data)),
++        "error: --port must be between 0 and 65535",
++    )
++    assert not data.exists(), "the port is validated before anything is created"
++
++
++# --- SR-011: network exposure ------------------------------------------------------
++
++
++def test_SR_011_there_is_no_host_option(tmp_path):
++    """SR-011: ``--host`` does not exist — the bind address cannot be overridden."""
++    process = launch(
++        "serve", "--port", "0", "--data", str(tmp_path / "data"), "--host", "0.0.0.0"
++    )
++    out, err = process.communicate(timeout=20)
++
++    assert process.returncode != 0
++    assert "unrecognized arguments" in err
++    assert "listening on" not in out
++
++    helptext = subprocess.run(
++        [sys.executable, "-m", "pastebin", "serve", "--help"],
++        cwd=REPO_ROOT,
++        env=dict(os.environ, PYTHONPATH=SRC),
++        capture_output=True,
++        text=True,
++        timeout=20,
++    ).stdout
++    assert "--host" not in helptext
++    assert "--port" in helptext and "--data" in helptext
++
++
++def test_SR_011_only_the_loopback_address_is_bound(tmp_path):
++    """SR-011, FR-001: the listening socket is on 127.0.0.1 and no other interface."""
++    process = launch("serve", "--port", "0", "--data", str(tmp_path / "data"))
++    try:
++        port = await_ready(process)
++
++        addresses = listening_addresses(port)
++        assert addresses, "no listening socket was found for the reported port"
++        assert addresses == {"0100007F"}, (
++            f"SR-011: expected only 127.0.0.1, found {addresses}"
++        )
++
++        external = non_loopback_ipv4()
++        if external is not None:
++            # Nothing answers on the host's routable address...
++            with socket.socket() as probe:
++                probe.settimeout(5)
++                with pytest.raises(OSError):
++                    probe.connect((external, port))
++            # ...and the same port is still free there, which it would not be if the
++            # service had bound 0.0.0.0.
++            with socket.socket() as binder:
++                binder.bind((external, port))
++    finally:
++        stop(process)
++
++
++# --- SC-006: readiness means ready -------------------------------------------------
++
++
++def test_SC_006_a_client_connecting_the_instant_it_sees_readiness_is_served(tmp_path):
++    """SC-006: the socket is listening before the readiness line is printed."""
++    for iteration in range(10):
++        process = launch(
++            "serve", "--port", "0", "--data", str(tmp_path / f"run{iteration}")
++        )
++        try:
++            port = await_ready(process)
++            # No sleep, no retry: the very first connection must be served.
++            assert http_status(port) == 404, f"iteration {iteration}"
++        finally:
++            stop(process)
++
++
++def test_SR_009_abrupt_client_disconnect_writes_nothing_to_stderr(tmp_path):
++    """SR-009: a connection dropped mid-response produces no diagnostic output.
++
++    ``socketserver`` reports a handler exception to stderr with the peer address and
++    a full traceback by default — exactly the disclosure SR-009 forbids, and the
++    extra output FR-003 forbids.
++    """
++    process = launch("serve", "--port", "0", "--data", str(tmp_path / "data"))
++    port = await_ready(process)
++    created = create_paste(port, "x" * 60000)
++
++    for _ in range(10):
++        # Ask for a large body, then vanish without reading a byte of it.
++        raw = socket.create_connection(("127.0.0.1", port), timeout=10)
++        raw.sendall(
++            f"GET /pastes/{created['id']}/raw HTTP/1.1\r\n"
++            f"Host: 127.0.0.1:{port}\r\n\r\n".encode("ascii")
++        )
++        raw.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
++        raw.close()
++    time.sleep(0.5)
++
++    # The service is still healthy...
++    assert http_status(port, "GET", f"/pastes/{created['id']}") == 200
++
++    status, out, err = stop(process)
++
++    assert status == 0
++    assert out == "", f"FR-003: stdout gained output: {out!r}"
++    assert err == "", f"SR-009: stderr gained output: {err!r}"
++
++
++def test_SR_009_concurrent_load_then_shutdown_stays_silent(tmp_path):
++    """SR-009, FR-003: concurrent traffic produces no log line on either stream."""
++    import threading
++
++    process = launch("serve", "--port", "0", "--data", str(tmp_path / "data"))
++    port = await_ready(process)
++
++    def hammer() -> None:
++        for _ in range(15):
++            created = create_paste(port, "concurrent")
++            http_status(port, "GET", f"/pastes/{created['id']}")
++            http_status(port, "GET", f"/pastes/{created['id']}/raw")
++            http_status(port, "DELETE", f"/pastes/{created['id']}")
++            http_status(port, "GET", "/nope")
++
++    workers = [threading.Thread(target=hammer) for _ in range(6)]
++    for worker in workers:
++        worker.start()
++    for worker in workers:
++        worker.join(timeout=60)
++
++    status, out, err = stop(process)
++
++    assert status == 0
++    assert out == ""
++    assert err == ""
++
++
++def test_FR_004_sigint_exits_zero_and_leaves_the_data_intact(tmp_path):
++    """Clean shutdown: SIGINT exits 0 and no paste is cleaned up (contracts/cli.md)."""
++    data = tmp_path / "data"
++    process = launch("serve", "--port", "0", "--data", str(data))
++    port = await_ready(process)
++    created = create_paste(port, "survives the signal")
++
++    status, out, err = stop(process)
++
++    assert status == 0, err
++    assert out == ""
++    assert (data / f"{created['id']}.json").exists()

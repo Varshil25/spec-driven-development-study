@@ -1,0 +1,1340 @@
+diff --git a/specs/002-burn-after-reading-password/contracts/http-api.md b/specs/002-burn-after-reading-password/contracts/http-api.md
+new file mode 100644
+index 0000000..a4294e5
+--- /dev/null
++++ b/specs/002-burn-after-reading-password/contracts/http-api.md
+@@ -0,0 +1,152 @@
++# Contract: HTTP API (feature 002 delta)
++
++**Feature**: `002-burn-after-reading-password` | **Plan**: [../plan.md](../plan.md)
++
++This file states **only what changes**. Feature 001's contract,
++[../../001-pastebin-service/contracts/http-api.md](../../001-pastebin-service/contracts/http-api.md),
++remains in force in full: the same four requests, the same paths and methods, the same 404 for every
++other path and method, the same `{"error": "..."}` body on every unsuccessful response, the same
++timestamp format, the same accurate `Content-Length`, HTTP/1.0 with one request per connection, and
++`127.0.0.1` only. Two request fields, one request header, and two response fields are added; one
++numeric bound grows. Nothing is removed and nothing changes meaning (FR-068).
++
++Field names, the header name, and the status codes below are fixed by the spec's Constraints section
++and are not implementation choices.
++
++## `POST /pastes` — two added request fields
++
++| Field | Type | Required | Meaning |
++|-------|------|----------|---------|
++| `burn_after_reading` | boolean | no | `true` makes the snippet one-time: its first successful read is its last. Absent means `false`. |
++| `password` | string | no | 1 to 128 characters, **counted in characters**, not encoded bytes. Reading the snippet then requires `X-Paste-Password`. Absent means the snippet is unprotected. |
++
++**`null` is not an accepted value for either field.** This is deliberately unlike `expires_in`,
++where `null` means "no expiry": absence, not `null`, is how a caller declines either option
++(FR-046, FR-055).
++
++No coercion of any kind. `"true"`, `"false"`, `1`, `0`, `[]`, `{}`, and `null` are each a `400` for
++`burn_after_reading`; `""`, a 129-character string, a number, a boolean, `null`, `[]`, and `{}` are
++each a `400` for `password`. A rejected publication creates nothing.
++
++Unknown fields are still ignored, including alongside these two (FR-068). `Content-Type` is still
++neither required nor consulted.
++
++The `201` response is **unchanged** — `id`, `delete_token`, `url` — and in particular never carries
++the password or anything derived from it (FR-057).
++
++Added failures: `400` (`burn_after_reading` not a boolean; `password` not a string of 1–128
++characters).
++
++## `X-Paste-Password` — the read-time request header
++
++Carried on `GET /pastes/<id>` and `GET /pastes/<id>/raw`.
++
++| Condition | Treatment |
++|-----------|-----------|
++| The snippet is **not** protected | The header is **not inspected at all** — the read succeeds whatever the header's value or bytes, including bytes that are not valid UTF-8 and including the header given more than once (FR-062). |
++| The snippet is protected, header present exactly once, bytes decode as UTF-8 to the snippet's password | The read proceeds exactly as for an unprotected snippet. |
++| The snippet is protected, header absent | `403` |
++| The snippet is protected, header present exactly once, value does not match | `403` |
++| The snippet is protected, header present exactly once, value is empty | `403` — an empty value is a presented password of zero characters, which can match nothing, so it is refused rather than treated as absent. |
++| The snippet is protected, header present exactly once, bytes are not valid UTF-8 | `403` — never a `500` (FR-070). |
++| The snippet is protected, header present **more than once** | `403`, with **no occurrence selected** — not the first, not the last, not any. A correct password must be presented exactly once to be accepted (FR-072). |
++
++The header's bytes are interpreted as **UTF-8**, so a password containing non-ASCII characters is
++presentable and matchable. Comparison is exact: no trimming, no case folding, no Unicode
++normalisation (FR-058). It does not reveal through timing how much of a presented password was
++correct (FR-061).
++
++The four `403` rows are one outcome with one message; they are indistinguishable to the caller by
++design.
++
++## `GET /pastes/<id>` — two added response fields
++
++```json
++{
++  "id": "Vk3q7mB2x9aLpR4sTzYwQg",
++  "content": "hello",
++  "created_at": "2026-10-23T20:15:00Z",
++  "expires_at": null,
++  "burn_after_reading": false,
++  "protected": false
++}
++```
++
++`burn_after_reading` and `protected` are JSON booleans, always present and never `null`, for every
++snippet including one stored by the previous version of the service (FR-064, FR-067). The four
++existing fields are unchanged in name, type, order of meaning, and value. `delete_token` is still
++absent, and the password — in any form, derived or otherwise — is never present (FR-066).
++
++If the snippet is one-time, this read consumed it: every later request for the identifier, through
++either endpoint, is a `404`.
++
++Added failures: `403` (protected; see the header table above).
++
++## `GET /pastes/<id>/raw` — unchanged
++
++`200` with the snippet's text as the entire body, `Content-Type: text/plain; charset=utf-8`, no
++wrapper and no added newline. **No flag, field, or header is added to this response** (FR-065).
++
++If the snippet is one-time, this read consumed it, exactly as the structured read does.
++
++Added failures: `403` (protected; see the header table above).
++
++## `DELETE /pastes/<id>` — unchanged
++
++Still `X-Delete-Token` and nothing else. A password neither substitutes for the delete token nor is
++required in addition to it, and the header is not consulted on this endpoint at all (FR-063).
++
++An unread one-time snippet deletes normally and returns `204`; an already-consumed one returns `404`,
++as any gone snippet does (FR-052).
++
++## Precedence among failures on a read
++
++Evaluated in this order, so that each row outranks every row below it:
++
++1. **`404`** — the identifier is unknown, malformed, deleted, expired, or already consumed. This
++   outranks `403`: no password, correct or otherwise, can turn it into any other status, and the
++   endpoint reveals nothing a read would not already have revealed (FR-060).
++2. **`500`** — the stored record exists but is damaged. Still an internal error, never a `404` or a
++   `403`, and a damaged one-time snippet is not consumed (FR-049).
++3. **`403`** — the snippet is protected and the presented password does not match.
++4. **`200`** — and only here, if the snippet is one-time, is it consumed.
++
++A one-time snippet is taken out of circulation, durably, *before* the first byte of its response is
++written. A caller that abandons the connection mid-body, or a service stopped at that instant, leaves
++the snippet consumed and gone rather than readable again (FR-048, FR-051).
++
++When several reads of the same unread one-time snippet overlap, exactly one receives `200` with the
++complete text and every other receives `404`. None receives a partial or corrupt body (FR-050).
++
++## Error body — added rows
++
++Shape unchanged: `{"error": "<message>"}` on every unsuccessful response (FR-069). Added and amended
++rows of feature 001's message table; as there, tests assert the status and a non-empty message rather
++than exact wording.
++
++| Status | Condition | Message |
++|--------|-----------|---------|
++| 400 | `burn_after_reading` present and not a boolean | `'burn_after_reading' must be true or false` |
++| 400 | `password` present and not a string of 1–128 characters | `'password' must be a string of 1 to 128 characters` |
++| 403 | protected snippet, password missing, repeated, undecodable, or wrong | `missing or invalid X-Paste-Password` |
++| 413 | request body over the read ceiling | `request body exceeds the maximum of 395776 bytes` *(the bound grew; see below)* |
++
++## The pre-read body ceiling
++
++`394,240` → **`395,776`** bytes (FR-071). The ceiling is still a fixed quantity, independent of any
++length the caller declares, so the memory protection it exists for is unchanged; it grew only because
++two new fields make a larger submission legitimately valid. Derivation and the measurement that shows
++the old bound really did reject a valid submission are in [../research.md](../research.md) R-09.
++
++This can only turn a previous rejection into an acceptance, never the reverse — the one permitted
++exception to FR-068. A submission whose `content` exceeds 65,536 encoded bytes is still a `413`, and
++the content limit itself is unchanged.
++
++A publication combining the largest valid `content`, a 128-character `password`, and
++`burn_after_reading` is accepted (FR-071).
++
++## Status codes used
++
++Unchanged set: `201`, `200`, `204`, `400`, `403`, `404`, `413`, `500`. This feature introduces no new
++status; it adds new routes to `400`, `403`, and `404`. No caller input this specification describes
++produces an unhandled failure or an unintended `500` (FR-070).
+diff --git a/specs/002-burn-after-reading-password/contracts/storage.md b/specs/002-burn-after-reading-password/contracts/storage.md
+new file mode 100644
+index 0000000..36f1c03
+--- /dev/null
++++ b/specs/002-burn-after-reading-password/contracts/storage.md
+@@ -0,0 +1,168 @@
++# Contract: On-disk storage format (feature 002 delta)
++
++**Feature**: `002-burn-after-reading-password` | **Plan**: [../plan.md](../plan.md)
++
++This file states **only what changes**. Feature 001's storage contract,
++[../../001-pastebin-service/contracts/storage.md](../../001-pastebin-service/contracts/storage.md),
++remains in force: a flat directory of `<id>.json` files, one JSON object per snippet, the same write
++protocol, the same read protocol, the same "damaged, never not-found" rule, and the same POSIX
++assumptions. The record gains two keys, the removal of a record gains a durability step, and a claim
++protocol is added for one-time snippets.
++
++This is still the **restart contract** (FR-047, FR-051, FR-056): a later instance started against
++the same directory must enforce the same one-time behaviour and require the same password. It is
++published here because tests depend on it to hand-write legacy and damaged records
++([../research.md](../research.md) R-10).
++
++## Record — two added keys
++
++```json
++{
++  "id": "Vk3q7mB2x9aLpR4sTzYwQg",
++  "content": "hello",
++  "created_at": "2026-10-23T20:15:00Z",
++  "expires_at": "2026-10-23T21:15:00Z",
++  "delete_token": "3bW9…",
++  "burn_after_reading": false,
++  "password": null
++}
++```
++
++Protected, one-time:
++
++```json
++{
++  "id": "7pL0nZ4cQw8xKdRm2vYbSa",
++  "content": "the secret",
++  "created_at": "2026-11-10T09:00:00Z",
++  "expires_at": null,
++  "delete_token": "Qx2…",
++  "burn_after_reading": true,
++  "password": {
++    "iterations": 215000,
++    "salt": "9f3c1a77b4e05d2886ac41be0f7d2355",
++    "hash": "1c0d…64 hex characters…"
++  }
++}
++```
++
++| Key | Required on read | Type | Rule |
++|-----|------------------|------|------|
++| `id`, `content`, `created_at`, `expires_at`, `delete_token` | **yes** | as feature 001 | unchanged |
++| `burn_after_reading` | no | boolean | Absent means `false` (FR-067). Any non-boolean value makes the record damaged. |
++| `password` | no | object or `null` | Absent or `null` means unprotected (FR-067). An object must have **exactly** `iterations`, `salt`, `hash`. |
++
++Inside `password`:
++
++| Key | Type | Rule |
++|-----|------|------|
++| `iterations` | integer | `> 0`. A JSON boolean is not an integer here, as elsewhere in this project. |
++| `salt` | string | Non-empty, even length, valid hexadecimal. 32 characters as written by this version (16 bytes). |
++| `hash` | string | Non-empty, even length, valid hexadecimal. 64 characters as written by this version (32 bytes). |
++
++A record is **valid** if it decodes as UTF-8 JSON, is an object, has all five required keys with the
++types feature 001 states, has no key outside the five required and the two optional ones, `id` equals
++the file-name stem, both timestamps parse under `%Y-%m-%dT%H:%M:%SZ`, and both optional keys — where
++present — satisfy the rules above. Anything else is **damaged**: `500` for that identifier plus a
++stderr diagnostic, never `404` (FR-038, FR-039, carried forward).
++
++**This version always writes both optional keys**, with `burn_after_reading: false` and
++`password: null` for an ordinary snippet, so every record it creates has the same seven-key shape.
++The optional case exists solely for records written by the previous version (FR-067); nothing this
++version writes omits them.
++
++Keys outside the seven are still damaged, so feature 001's extra-key rule and its test are unaffected
++(FR-068).
++
++## The password is not stored
++
++`password` holds a salted, deliberately costly, one-way derivation and nothing else. The password's
++characters appear nowhere in the record, nowhere else in the directory, and on neither output stream
++(FR-056, FR-057, SC-015).
++
++```text
++salt       = secrets.token_bytes(16)
++hash       = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations, dklen=32)
++iterations = calibrated once per process so one verification costs ~50 ms on this host
++```
++
++Verification re-derives with **the record's own** `salt` and `iterations` — never the current
++process's calibration — and compares with `secrets.compare_digest` on the derived bytes, so a record
++written by a differently-calibrated process still verifies (FR-056) and the comparison reveals nothing
++about how much of a presented password was correct (FR-061). Rationale and the rejected alternatives
++are in [../research.md](../research.md) R-01 and R-02.
++
++Because the salt is drawn per snippet, two snippets with identical passwords have different `salt`
++and different `hash`, so one precomputed table cannot attack both (FR-073, SC-021).
++
++## Write protocol — unchanged
++
++Exactly feature 001's five steps: serialise, create `.tmp-<random>` exclusively, write, `flush`,
++`os.fsync`, close, `os.link` to `<id>.json` (retrying with a fresh identifier on `FileExistsError`),
++`os.unlink` the temporary, and only then send the `201`. The two added keys are part of the
++serialised record, so a reader still sees `<id>.json` either absent or complete, never partial
++(FR-043), and the one-time flag and the password derivation are durable before the publication is
++acknowledged (FR-047, FR-056).
++
++## Removal protocol — one added step
++
++Removing a record is now `os.unlink` of `<DIR>/<id>.json` followed by `os.fsync` of a descriptor
++opened on the storage directory:
++
++```text
++os.unlink(<DIR>/<id>.json)          # atomic; ENOENT if it is already gone
++fd = os.open(<DIR>, os.O_RDONLY)    # a directory-entry removal is otherwise only in the page cache
++os.fsync(fd); os.close(fd)
++```
++
++Both the `DELETE` endpoint and the one-time claim go through this one routine. The added `fsync`
++strengthens feature 001's FR-031 and changes nothing a caller can observe, so FR-068 holds; its cost
++measured 12.3 ms on this host.
++
++`FileNotFoundError` means something else removed the record first. Any other `OSError`, from either
++the `unlink` or the `fsync`, means storage is misbehaving and is reported as damaged storage — a
++`500` — which leaves a one-time snippet unconsumed as FR-049 requires.
++
++## Claim protocol (one-time snippets)
++
++The claim **is** the removal above. There is no tombstone, no claim file, no index, and no in-memory
++set of consumed identifiers.
++
++```text
++1. read and validate <id>.json                  → 404 if absent, 500 if damaged
++2. check expiry                                 → 404 if reached or passed (not a consumption)
++3. verify the password if the record is protected → 403 if it does not match (not a consumption)
++4. the text is now in memory
++5. remove the record durably (the routine above)
++     FileNotFoundError → another reader claimed it first → 404, serve nothing
++     other OSError     → 500, snippet unconsumed
++6. only now write the response, from the text held in memory
++```
++
++Step 5 is the whole guarantee. POSIX `unlink` removes a directory entry atomically and fails with
++`ENOENT` when it is already gone, so of any number of overlapping readers **exactly one** wins
++(FR-050; verified over 200 trials of sixteen racing threads in [../research.md](../research.md) R-04).
++The `fsync` in step 5 makes the claim durable **before** step 6 begins, which is FR-048's explicit
++ordering and FR-051's guarantee that a restart cannot resurrect a consumed snippet — including one
++whose response never reached its caller. Because the text was taken in step 4, the winner always has
++a complete body to send and a loser has nothing to send (FR-050).
++
++An expired or damaged one-time snippet never reaches step 5, so it is never consumed (FR-049,
++FR-053). A protected one never reaches step 5 without the correct password, so it cannot be burned by
++someone who cannot read it (SC-013).
++
++## Read protocol — unchanged
++
++One `read_bytes()` of `<DIR>/<id>.json`, then decode and validate. `FileNotFoundError` → `404`. Any
++other `OSError`, a decode failure, or a validation failure → `500`. Nothing is written on the read
++path except the claim in step 5 above, and only for a one-time snippet whose read has already
++succeeded.
++
++## Upgrade and downgrade
++
++**Upgrade** (previous version's records read by this one): supported and required. A five-key record
++is valid, reads as neither one-time nor protected, and is not damaged (FR-067).
++
++**Downgrade** (this version's records read by the previous one): not supported and not specified
++(spec Assumptions). The previous validator requires exactly five keys, so it would report a record
++written by this version as damaged.
+diff --git a/specs/002-burn-after-reading-password/data-model.md b/specs/002-burn-after-reading-password/data-model.md
+new file mode 100644
+index 0000000..3ff34ed
+--- /dev/null
++++ b/specs/002-burn-after-reading-password/data-model.md
+@@ -0,0 +1,174 @@
++# Phase 1 Data Model: Burn After Reading and Password Protection
++
++**Feature**: `002-burn-after-reading-password` | **Date**: 2026-11-10 | **Plan**: [plan.md](./plan.md)
++
++No new entity. The spec's Key Entities section extends the one entity feature 001 defined —
++**Snippet** — with two properties, and names **Reading password** as a concept rather than a stored
++thing: the password itself is never stored, only a derivation of it, and it lives inside the
++snippet's own record. There is still exactly one relationship (the storage location contains
++snippets) and nothing refers to anything else.
++
++Wire field names and the header name are fixed by the spec's Constraints section; see
++[contracts/http-api.md](./contracts/http-api.md). The on-disk encoding is fixed by
++[contracts/storage.md](./contracts/storage.md). Feature 001's model, which continues to hold
++unchanged, is [../001-pastebin-service/data-model.md](../001-pastebin-service/data-model.md).
++
++## Snippet — the two added properties
++
++Still a plain `dict` (Principle IV), created by `store.create_paste()` and returned by
++`store.read_paste()`. The five fields of feature 001 are unchanged in type, origin, and constraints.
++
++| Field | Type | Origin | Constraints |
++|-------|------|--------|-------------|
++| `burn_after_reading` | `bool` | caller (`burn_after_reading`) | Fixed at publication; never modified afterwards. Absent from a record written by the previous version, which means `False` (FR-067). |
++| `password` | `dict \| None` | derived from caller (`password`) | `None` when unprotected. Otherwise `{"iterations": int, "salt": str, "hash": str}` — see below. The password itself is never a field of the record and is never retained after the publication request is answered (FR-056). |
++
++### The `password` sub-record
++
++| Key | Type | Value |
++|-----|------|-------|
++| `iterations` | `int` | PBKDF2 iteration count used for *this* snippet, as calibrated when the serving process started ([research.md](./research.md) R-02). Positive. Verification uses this value, not the current calibration, so a snippet still verifies after a restart on a differently-calibrated host (FR-056). |
++| `salt` | `str` | 16 bytes from `secrets.token_bytes(16)`, hex-encoded (32 characters). Drawn per snippet, so two snippets with identical passwords have different salts and different hashes (FR-073, SC-021). |
++| `hash` | `str` | `hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations, dklen=32)`, hex-encoded (64 characters). One-way: the password cannot be recovered from it (FR-056). |
++
++Either all three keys are present or the whole `password` value is `None`; nesting them makes that
++structural rather than a checked invariant, and makes "is this snippet protected?" the single test
++`record["password"] is not None` at every site that asks.
++
++### Derived report fields
++
++Neither is stored; both are computed from the record when `GET /pastes/<id>` answers (FR-064):
++
++| Response field | Computed as | Never |
++|----------------|-------------|-------|
++| `burn_after_reading` | `record.get("burn_after_reading", False)` | absent, `null`, or anything but a JSON boolean |
++| `protected` | `record.get("password") is not None` | absent, `null`, or anything but a JSON boolean |
++
++The `password` sub-record is never serialised into any response, in whole or in part (FR-057,
++FR-066, SC-015).
++
++## Caller-supplied input (publication)
++
++Added to feature 001's table. The decisive difference from `expires_in` is that **absence, not
++`null`, is how a caller declines either option** — `null` is an invalid value for both (spec
++Assumptions, FR-046, FR-055). The check is therefore `"field" in payload`, not
++`payload.get("field") is not None`.
++
++| Input field | Type accepted | Rule | Violation |
++|-------------|---------------|------|-----------|
++| `burn_after_reading` | JSON `true`/`false`, or absent | if present: `type(v) is bool`. `"true"`, `"false"`, `1`, `0`, `null`, `[]`, `{}` are all rejected — no coercion | 400 |
++| `password` | JSON string, or absent | if present: `type(v) is str` and `1 <= len(v) <= 128`, **counted in characters**. `""`, a 129-character string, a number, a boolean, `null`, a list, an object are all rejected | 400 |
++| any other field | any | still ignored (FR-015, FR-068) | — |
++| declared `Content-Length` | integer | if > 395,776 → reject before reading the body ([research.md](./research.md) R-09) | 413 |
++
++`len(v)` on a Python `str` counts characters, which is what FR-054 and the spec's edge case ("the
++1-to-128 bound is on characters, not encoded bytes") require: a 128-character password of multi-byte
++characters is valid. No trimming, case folding, or Unicode normalisation is applied at publication or
++at verification — the password is stored and compared exactly as given (FR-058).
++
++A submission invalid in several ways is rejected once, naming one problem; which one follows from the
++order the checks are written in and is not specified (spec Assumptions).
++
++## Caller-supplied input (reading)
++
++| Input | Shape | Rule |
++|-------|-------|------|
++| `X-Paste-Password` | request header, 0, 1, or more occurrences | Inspected **only** when the snippet is protected (FR-062). Exactly one occurrence, whose bytes decode as UTF-8 to the snippet's password, is the only accepted form. Absent, repeated, undecodable, or non-matching are one outcome: 403 ([research.md](./research.md) R-06, R-07). |
++
++## Lifecycle
++
++Feature 001's lifecycle gains one transition and one terminal state. The three ways a snippet leaves
++circulation are independent and whichever happens first wins.
++
++```text
++                   POST /pastes (valid)
++     (nonexistent) ──────────────────────────▶ LIVE ◀── a refused or failed read
++                                                │       returns here unchanged
++            ┌───────────────────────────────────┼───────────────────────────────┐
++            │ now >= expires_at                 │ DELETE with correct token     │ successful read,
++            │ (not a consumption)               │ (needs no password)           │ if burn_after_reading
++            ▼                                   ▼                               ▼
++        EXPIRED                             DELETED                         CONSUMED
++  (file remains; 404 on every          (file unlinked durably;     (file unlinked durably *before*
++   access, whatever password            permanent)                  the response is written;
++   is presented; never consumed)                                    permanent, survives restart)
++```
++
++All three terminal states answer every later request for the identifier with **404**, and are
++indistinguishable from each other and from an identifier never issued (FR-060).
++
++### What counts as a consumption
++
++A one-time snippet is consumed on, and only on, a read that has passed every check that could refuse
++it and has the text in hand (FR-049). Concretely, in the order the handler performs them
++([research.md](./research.md) R-05):
++
++| Outcome of a read | Status | Consumed? |
++|-------------------|--------|-----------|
++| Identifier unknown, deleted, or already consumed | 404 | — |
++| Expiry moment reached or passed | 404 | no (FR-053) |
++| Stored record damaged | 500 | no (FR-049) |
++| Protected, and the password is absent, repeated, undecodable, or wrong | 403 | no (FR-049, SC-013) |
++| Every check passed, text obtained, claim lost to a concurrent reader | 404 | no — the other reader consumed it (FR-050) |
++| Every check passed, text obtained, claim won | 200 | **yes** |
++| Claim won, then the caller abandoned the connection or the service stopped mid-body | — | **yes**, deliberately (FR-049, FR-051) |
++
++The claim is an atomic `unlink` plus a directory `fsync`, so exactly one of any number of overlapping
++readers wins it and the removal is durable before the first byte of the response is written
++(FR-048, FR-050, [research.md](./research.md) R-04).
++
++## Server state
++
++One value is added to the server object, alongside `data_dir`:
++
++| Attribute | Type | Set | Meaning |
++|-----------|------|-----|---------|
++| `password_iterations` | `int` | once, in `make_server()` | PBKDF2 iteration count stamped into records this process creates, measured so that one verification costs ~50 ms on this host (FR-073, [research.md](./research.md) R-02). Read by the publish handler; verification ignores it and uses each record's own value. |
++
++It is not a configuration option: no command-line flag sets it and no caller can influence it.
++
++## Requirement to test map
++
++Every functional requirement maps to at least one `pytest` test naming its identifier in the test
++name or docstring (Constitution Principle III, SC-020). Module layout is in
++[plan.md](./plan.md#source-code-repository-root). Requirements are listed in the order the spec
++states them, which is not numerically contiguous.
++
++| FR | Test module | Test(s) |
++|----|-------------|---------|
++| FR-045 | `test_burn.py` | `test_fr045_burn_true_publishes`, `test_fr045_absent_burn_means_not_one_time` |
++| FR-046 | `test_burn.py` | `test_fr046_non_boolean_burn_is_400` (parametrised over `"true"`, `"false"`, `1`, `0`, `null`, `[]`, `{}`), `test_fr046_rejected_publication_creates_nothing` |
++| FR-047 | `test_burn.py` | `test_fr047_one_time_flag_is_on_disk`, `test_fr047_one_time_survives_restart` |
++| FR-048 | `test_burn.py` | `test_fr048_first_read_returns_then_404_forever`, `test_fr048_first_raw_read_returns_then_404`, `test_fr048_record_is_gone_when_the_read_returns`, `test_fr048_abandoned_response_still_consumes` |
++| FR-049 | `test_burn.py` | `test_fr049_wrong_password_does_not_consume`, `test_fr049_missing_password_does_not_consume`, `test_fr049_expired_one_time_is_not_consumed`, `test_fr049_damaged_one_time_is_not_consumed` |
++| FR-050 | `test_burn.py` | `test_fr050_concurrent_reads_serve_exactly_one`, `test_fr050_winner_body_is_complete` |
++| FR-051 | `test_burn.py` | `test_fr051_consumed_snippet_stays_gone_across_restart` |
++| FR-052 | `test_burn.py` | `test_fr052_unread_one_time_deletes_with_token`, `test_fr052_consumed_one_time_delete_is_404` |
++| FR-053 | `test_burn.py` | `test_fr053_expired_one_time_is_404_on_both_endpoints` |
++| FR-054 | `test_password.py` | `test_fr054_password_of_1_and_128_chars_accepted`, `test_fr054_length_is_counted_in_characters_not_bytes` |
++| FR-055 | `test_password.py` | `test_fr055_invalid_password_is_400` (parametrised over `""`, 129 chars, number, bool, `null`, `[]`, `{}`), `test_fr055_rejected_publication_creates_nothing` |
++| FR-056 | `test_password.py` | `test_fr056_record_holds_no_recoverable_password`, `test_fr056_same_password_required_after_restart` |
++| FR-073 | `test_password.py` | `test_fr073_one_verification_costs_between_10ms_and_200ms`, `test_fr073_salt_is_unique_per_snippet`, `test_fr073_identical_passwords_have_different_stored_forms` |
++| FR-074 | `test_password.py` | `test_fr074_verification_does_not_delay_other_snippets` |
++| FR-057 | `test_password.py` | `test_fr057_password_absent_from_publication_response`, `test_fr057_password_absent_from_every_response_and_stream` |
++| FR-058 | `test_password.py` | `test_fr058_correct_password_reads_both_endpoints`, `test_fr058_non_ascii_password_matches_utf8_header_bytes`, `test_fr058_no_trimming_case_folding_or_normalisation`, `test_fr058_invalid_utf8_header_bytes_are_403` |
++| FR-059 | `test_password.py` | `test_fr059_missing_password_is_403`, `test_fr059_wrong_password_is_403`, `test_fr059_empty_password_header_is_403`, `test_fr059_refused_read_leaves_snippet_readable` |
++| FR-072 | `test_password.py` | `test_fr072_repeated_password_header_is_403`, `test_fr072_repeated_header_with_one_correct_copy_is_403`, `test_fr072_snippet_still_readable_with_one_correct_header` |
++| FR-060 | `test_password.py` | `test_fr060_unknown_identifier_is_404_not_403`, `test_fr060_expired_protected_snippet_is_404_whatever_password`, `test_fr060_consumed_protected_snippet_is_404` |
++| FR-061 | `test_password.py` | `test_fr061_verification_uses_compare_digest_on_derived_bytes` |
++| FR-062 | `test_password.py` | `test_fr062_password_header_ignored_on_unprotected_snippet` (parametrised over a value, invalid UTF-8 bytes, and a repeated header) |
++| FR-063 | `test_password.py` | `test_fr063_delete_needs_only_the_token_no_password`, `test_fr063_password_does_not_substitute_for_the_token` |
++| FR-064 | `test_flags.py` | `test_fr064_flags_reported_for_all_four_combinations`, `test_fr064_flags_are_booleans_never_absent_or_null` |
++| FR-065 | `test_flags.py` | `test_fr065_raw_body_is_the_text_alone`, `test_fr065_raw_content_type_unchanged` |
++| FR-066 | `test_flags.py` | `test_fr066_read_discloses_neither_token_nor_password` |
++| FR-067 | `test_compatibility.py` | `test_fr067_five_key_legacy_record_reads_as_neither`, `test_fr067_legacy_record_is_not_reported_as_damaged` |
++| FR-068 | `test_compatibility.py` | `test_fr068_feature_001_suite_passes_unchanged` (the whole of `tests/` from feature 001, run unmodified), `test_fr068_plain_snippet_response_fields_unchanged_but_for_the_two_flags` |
++| FR-069 | `test_compatibility.py` | `test_fr069_every_new_error_has_a_single_error_field` (parametrised over the 400, 403, and 404 paths this feature introduces) |
++| FR-070 | `test_compatibility.py` | `test_fr070_invalid_option_is_400`, `test_fr070_password_failure_is_403`, `test_fr070_no_enumerated_input_produces_a_500_or_a_traceback` |
++| FR-071 | `test_compatibility.py` | `test_fr071_max_content_with_max_password_and_burn_is_created`, `test_fr071_ceiling_covers_worst_case_escaped_body`, `test_fr071_ceiling_is_independent_of_declared_length`, `test_fr071_oversize_content_is_still_413` |
++
++Success criteria SC-011…SC-021 are covered by the same tests: SC-012 by the FR-050 and FR-051 tests,
++SC-013 by the FR-049 tests, SC-014 by the FR-056 and FR-058 tests, SC-015 by the FR-057 test,
++SC-016 by the FR-063 tests, SC-017 by the FR-046, FR-055, and FR-070 tests, SC-018 by the FR-067 and
++FR-068 tests, SC-019 by the FR-064 tests, SC-021 by the FR-073 and FR-074 tests. SC-011 and SC-020
++are properties of this map and of [quickstart.md](./quickstart.md) rather than of a single test.
+diff --git a/specs/002-burn-after-reading-password/plan.md b/specs/002-burn-after-reading-password/plan.md
+new file mode 100644
+index 0000000..21f2672
+--- /dev/null
++++ b/specs/002-burn-after-reading-password/plan.md
+@@ -0,0 +1,206 @@
++# Implementation Plan: Burn After Reading and Password Protection
++
++**Branch**: `002-burn-after-reading-password` | **Date**: 2026-11-10 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/002-burn-after-reading-password/spec.md`
++
++## Summary
++
++Two optional publication fields on the existing service: `burn_after_reading`, which makes a
++snippet's first successful read its last, and `password`, which makes every read present
++`X-Paste-Password`. `GET /pastes/<id>` gains `burn_after_reading` and `protected` booleans.
++
++The design adds no module and no dependency. The one-time claim is a single `os.unlink` plus a
++directory `fsync` — POSIX `unlink` is already the exactly-once primitive FR-050 needs, and the
++`fsync` before the first byte of the response is what FR-048 means by durable-before-send; the
++existing `DELETE` path is folded into the same routine. The password is stored as a per-snippet
++salted PBKDF2-HMAC-SHA256 derivation whose iteration count is **measured once at startup** so that
++one verification costs ~50 ms on the serving host, which is the only way a band stated relative to
++"the machine serving requests" (FR-073) can hold anywhere. `hashlib` releases the GIL, so
++`ThreadingHTTPServer` already satisfies FR-074 with no pool or queue. The stored record gains two
++keys, optional on read so that records written by the previous version remain valid (FR-067), and the
++pre-read body ceiling grows from 394,240 to 395,776 bytes because the old one genuinely rejects a
++submission this spec deems valid (FR-071).
++
++Net change: roughly 120 lines across the two existing runtime modules, four new test modules, and no
++edit to any feature 001 test.
++
++## Technical Context
++
++**Language/Version**: Python 3.11+ — unchanged, stated in `README.md` as the constitution requires.
++No module may use a newer feature.
++
++**Primary Dependencies**: None at runtime. Two standard-library modules are added to the set feature
++001 uses: `hashlib` (`pbkdf2_hmac`) and `time` (`perf_counter`, for the one startup measurement).
++`secrets` and `os` were already imported. `pytest` remains the only development dependency,
++declared in `requirements-dev.txt` and never imported by runtime code.
++
++**Storage**: Local filesystem, unchanged in layout — one JSON file per snippet at `<DIR>/<id>.json`,
++still the sole source of truth. The record gains two keys, optional on read; removal gains a
++directory `fsync`. See [contracts/storage.md](./contracts/storage.md).
++
++**Testing**: `pytest`, on the two fixtures `tests/conftest.py` already provides. Every requirement
++FR-045…FR-074 is named by at least one test; see the
++[requirement to test map](./data-model.md#requirement-to-test-map). Feature 001's test modules are
++run **unmodified** — that is the evidence for FR-068 and SC-018, so changing one of them would be a
++failure of this feature, not a fix.
++
++**Target Platform**: Linux/POSIX host, loopback only. Unchanged, and the claim protocol leans on the
++same POSIX guarantees the publication protocol already does — `unlink` is atomic and fails with
++`ENOENT` on an absent entry, and a directory `fsync` makes an entry removal durable
++([research.md](./research.md) R-04).
++
++**Project Type**: Single-package CLI-launched HTTP service (`src/pastebin`, run as
++`python -m pastebin` with `src/` on the module search path). Unchanged.
++
++**Performance Goals**:
++- One password verification costs 10–200 ms on the serving host, targeted at 50 ms by a startup
++  measurement (FR-073, SC-021).
++- A verification delays no request about another snippet (FR-074). Measured on this two-core host:
++  four concurrent 200,000-iteration derivations took 92.5 ms against 189.3 ms of serial work, so
++  `hashlib` does release the GIL ([research.md](./research.md) R-03).
++- A read of an **unprotected** snippet is unchanged — the header is not even inspected (FR-062).
++- Startup still announces readiness well inside SC-007's two seconds: the calibration measurement
++  costs roughly 15 ms.
++- Feature 001's concurrency obligations (FR-042, FR-043, SC-010) continue to hold unchanged.
++
++**Constraints**:
++- `burn_after_reading` must be a JSON boolean; `password` a string of 1–128 **characters**. `null` is
++  invalid for both — absence, not `null`, declines either option (FR-046, FR-055).
++- Wire names are fixed by the spec: `burn_after_reading`, `password`, `protected`,
++  `X-Paste-Password`. Status codes are fixed: 400 for an invalid option, 403 for a password failure,
++  404 in precedence over 403, and 201/200/204 unchanged.
++- A one-time snippet is consumed only by a read that passed every check and holds the text, and is
++  claimed durably **before** the response is written (FR-048, FR-049).
++- The password is never stored recoverably, never returned, never logged (FR-056, FR-057, SC-015).
++- Verification is constant-time with respect to how much of a presented password is correct (FR-061).
++- Pre-read body ceiling 394,240 → 395,776 bytes, still a fixed constant independent of any declared
++  length (FR-071).
++- Everything feature 001 specifies holds unchanged for a snippet published without either option,
++  the widened ceiling excepted (FR-068).
++
++**Scale/Scope**: Single operator, single host. 30 functional requirements (FR-045…FR-074), 3 user
++stories, 11 success criteria (SC-011…SC-021). ~120 added lines of runtime code in the two existing
++modules; 4 new test modules; 0 new runtime modules.
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++Constitution v1.0.0.
++
++| Gate | Status (pre-Phase 0) | Status (post-Phase 1) | Evidence |
++|------|----------------------|-----------------------|----------|
++| **I. Standard Library Only** — no third-party import reachable from an entry point | PASS | PASS | The two added imports are `hashlib` and `time`, both standard library. `hashlib.pbkdf2_hmac` was chosen over `hashlib.scrypt` partly *because* it is unconditionally present rather than dependent on the interpreter's OpenSSL build ([research.md](./research.md) R-01), so "installs anywhere Python runs" holds without a fallback path. No password library, no `passlib`-style format, no third-party KDF. `pytest` remains confined to `tests/` and `requirements-dev.txt`. |
++| **II. Fail Loudly** — clear diagnostic + explicit failure signal; no sentinels, no bare `except`, no guessing | PASS | PASS | Every new rejection is an explicit `{"error": ...}` body with a defined status: 400 for an invalid option, 403 for a password failure, 404 for a gone snippet, 500 for damaged storage ([contracts/http-api.md](./contracts/http-api.md)). No coercion anywhere — `"true"`, `1`, and `null` are 400s for `burn_after_reading`, and `""` is a 400 for `password`; a header value is never trimmed, case-folded, or normalised. Three exceptions are newly caught, each at the site that handles it and each translated into a clearer error, which is the one thing Principle II permits: `UnicodeDecodeError` on the header bytes → 403 ([research.md](./research.md) R-06), `FileNotFoundError` on the claim → 404, and any other `OSError` from the claim → `StoreCorrupt` → 500 with a stderr diagnostic (R-04). None is a swallow; each has an explicit outward failure. No bare `except:`, no `except Exception: pass`. The `store` functions still raise rather than return a sentinel a caller could mistake for a snippet — `burn_paste` returns a boolean that is *the* answer to "did I claim it", not a stand-in for a record. |
++| **III. Every Requirement Is Testable** — each FR mapped to a named `pytest` test | PASS | PASS | All 30 FRs mapped in [data-model.md](./data-model.md#requirement-to-test-map), each test naming its identifier. The two requirements that look least testable are the reason R-02 and R-10 exist: FR-073's cost band is assertable *because* the iteration count is calibrated to the host rather than hard-coded, and FR-050's exactly-once is assertable with a `threading.Barrier` on the existing in-process fixture (the probe form produced one winner in 200 of 200 trials). FR-068 is tested by running feature 001's suite unmodified. Error behaviour required by Principle II has dedicated tests per status (`test_fr069_*`, `test_fr070_*`). |
++| **IV. Simplicity** — smallest design, functions and plain data, no speculative extension points | PASS | PASS | No new module, no new class, no new entity — two keys on the existing `dict` record and two helper functions in `store`. The claim needs no lock file, index, tombstone, or in-memory set, because `unlink` already *is* exactly-once (R-04); the existing `DELETE` path is folded into the same routine, so the design removes a near-duplicate rather than adding one. No thread pool for verification, because `hashlib` releases the GIL and `ThreadingHTTPServer` is already there (R-03). The `password` sub-record has no `algorithm` field, because there is one algorithm. No `--password-cost` option, no pepper file, no rewrite-on-read migration. Two judgement calls are recorded rather than assumed obvious: the startup calibration (justified below) and nesting the derivation values under one key instead of three flat ones (R-08). |
++
++**Result**: No violations. Complexity Tracking is empty.
++
++**The one judgement call worth naming**: the startup calibration is ~20 lines that a hard-coded
++iteration count would not need. It is not a speculative extension point or a configuration knob —
++nothing can set it, and it has exactly one consumer — but it *is* code a simpler design would omit,
++so Principle IV requires it be justified against a present requirement. FR-073 bounds a verification
++at 10–200 ms "on the machine serving requests", and SC-021 makes that an asserted test. A fixed count
++tuned to 50 ms here breaches the ceiling on a host four times slower and falls under the floor on one
++five times faster, so the requirement would hold only on this machine and its test would be a
++hardware lottery. Measuring makes it hold by construction. Full reasoning and the rejected
++alternatives — fixed constant, CLI option, per-request recalibration — are in
++[research.md](./research.md) R-02.
++
++**Technology constraints check**: `json` for serialization, `pathlib` for paths, plain `stderr`
++writes for diagnostics, `pytest` as the only development tool, `argparse` unchanged — all as the
++constitution's Technology and Dependency Constraints section prescribes. The storage format is still
++JSON, readable by the standard library alone, which is why a packed `algorithm$iterations$salt$hash`
++string was rejected in favour of a nested object (R-08). `logging` is still deliberately unused:
++FR-068 carries FR-044's prohibition on per-request output forward.
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/002-burn-after-reading-password/
++├── plan.md              # This file (/speckit-plan command output)
++├── research.md          # Phase 0 output (/speckit-plan command)
++├── data-model.md        # Phase 1 output (/speckit-plan command)
++├── quickstart.md        # Phase 1 output (/speckit-plan command)
++├── contracts/           # Phase 1 output (/speckit-plan command)
++│   ├── http-api.md      #   Delta on feature 001's HTTP contract: 2 fields, 1 header, 2 flags
++│   └── storage.md       #   Delta on feature 001's storage contract: 2 keys, claim protocol
++├── checklists/
++│   └── requirements.md  # Existing spec-quality checklist
++└── tasks.md             # Phase 2 output (/speckit-tasks command - NOT created by /speckit-plan)
++```
++
++There is no `contracts/cli.md` delta: the command line, the ready line, the exit statuses, and the
++output discipline are untouched by this feature, so
++[../001-pastebin-service/contracts/cli.md](../001-pastebin-service/contracts/cli.md) stands as
++written.
++
++### Source Code (repository root)
++
++Changed and added files only; every other file in the repository is untouched.
++
++```text
++README.md                  # M  Document the two options, the header, the two flags, the new ceiling
++
++src/
++└── pastebin/
++    ├── __init__.py        # -  unchanged
++    ├── __main__.py        # -  unchanged (calibration happens in make_server, which it already calls)
++    ├── server.py          # M  publish: validate the two new fields (absence, not null, declines)
++    │                      #    read:    password gate, then claim, then respond — in that order
++    │                      #    read:    report burn_after_reading and protected
++    │                      #    helpers: _presented_password (get_all + latin-1 → utf-8)
++    │                      #    make_server: calibrate and store password_iterations
++    └── store.py           # M  MAX_BODY_BYTES recomputed; MIN/MAX_PASSWORD_CHARS added
++                           #    create_paste: accept burn flag and password, derive and store
++                           #    _validate_record: five required keys, two optional, strict types
++                           #    hash_password / password_matches / calibrate_password_iterations
++                           #    _unlink_durably (unlink + directory fsync), used by both removals
++                           #    burn_paste: claim a one-time snippet, True if won
++                           #    delete_paste: now routed through _unlink_durably
++
++tests/
++├── conftest.py            # -  unchanged — both fixtures, the raw-socket client, and the
++│                          #    read_record/write_record helpers already cover what is needed
++├── test_cli.py            # -  unchanged  ┐
++├── test_publish.py        # -  unchanged  │
++├── test_read.py           # -  unchanged  │  feature 001's suite runs unmodified; that it does
++├── test_delete.py         # -  unchanged  │  is the evidence for FR-068 and SC-018, so editing
++├── test_expiry.py         # -  unchanged  │  any of these would be a failure, not a fix
++├── test_persistence.py    # -  unchanged  │
++├── test_routing.py        # -  unchanged  │
++├── test_errors.py         # -  unchanged  │
++├── test_damaged_storage.py# -  unchanged  │
++├── test_concurrency.py    # -  unchanged  ┘
++├── test_burn.py           # A  FR-045..FR-053: publish, consume, exactly-once, restart, no-consume
++├── test_password.py       # A  FR-054..FR-063, FR-072..FR-074: validation, verification, cost, 403s
++├── test_flags.py          # A  FR-064..FR-066: the two report flags, raw endpoint unchanged
++└── test_compatibility.py  # A  FR-067..FR-071: legacy records, 001 unchanged, error shape, ceiling
++```
++
++**Structure Decision**: the feature is absorbed into the two existing runtime modules along the
++boundary feature 001 already drew — `store` owns the record, its encoding, and its durable removal;
++`server` owns the HTTP surface, validation, and the order of checks. The password derivation goes in
++`store`, not a new `passwords` module, because it is part of the record's encoding and is the thing
++`store` must validate on read; a third module would be a layer with one caller, which Principle IV
++forbids ("prefer one obvious module over several indirect ones"). The claim goes in `store` for the
++same reason and sits beside `delete_paste`, which it shares its implementation with.
++
++Tests follow feature 001's convention of one module per requirement group rather than the template's
++`contract/integration/unit` split, for the same reason: nearly every test drives the real HTTP
++surface. The four new modules map one-to-one onto the spec's four requirement headings, which is what
++makes `pytest -k fr0NN` a useful coverage check.
++
++## Complexity Tracking
++
++> No Constitution Check violations. This table is intentionally empty.
++>
++> The startup calibration of the password iteration count is the only element of the design that a
++> smaller implementation could omit. It is not a violation — it is forced by FR-073's
++> machine-relative cost band, as the Constitution Check records and [research.md](./research.md) R-02
++> argues in full — but it is the first thing to revisit if that requirement is ever amended to name a
++> fixed cost parameter instead of a time band.
+diff --git a/specs/002-burn-after-reading-password/quickstart.md b/specs/002-burn-after-reading-password/quickstart.md
+new file mode 100644
+index 0000000..2a8b7de
+--- /dev/null
++++ b/specs/002-burn-after-reading-password/quickstart.md
+@@ -0,0 +1,270 @@
++# Quickstart & Validation Guide: Burn After Reading and Password Protection
++
++**Feature**: `002-burn-after-reading-password` | **Plan**: [plan.md](./plan.md)
++
++How to prove the two new options work end to end, and that everything feature 001 did still does.
++Interface details live in [contracts/http-api.md](./contracts/http-api.md) and
++[contracts/storage.md](./contracts/storage.md); field semantics and the requirement→test map in
++[data-model.md](./data-model.md). Running the service itself is unchanged — see
++[../001-pastebin-service/quickstart.md](../001-pastebin-service/quickstart.md).
++
++## Prerequisites
++
++- Python 3.11 or newer (`python3 --version`)
++- `curl` for the manual scenarios
++- `pytest` for the automated suite: `python3 -m pip install -r requirements-dev.txt`
++
++Unchanged from feature 001: no runtime dependencies, nothing to build, nothing to install for the
++service itself.
++
++## Run it
++
++```bash
++PYTHONPATH=src python3 -m pastebin serve --port 8765 --data ./pastes
++```
++
++Expected: the same single line `listening on 127.0.0.1:8765`, and nothing further however much
++traffic follows. Startup now also measures the host's password-derivation rate once — a few tens of
++milliseconds, invisible against the two-second readiness budget, and printed nowhere.
++
++```bash
++export B=127.0.0.1:8765
++```
++
++## Automated suite
++
++```bash
++python3 -m pytest                 # whole suite: feature 001's modules and this feature's
++python3 -m pytest -k fr050        # one requirement
++python3 -m pytest tests/test_burn.py tests/test_password.py tests/test_flags.py tests/test_compatibility.py
++```
++
++Expected: everything passes, **including feature 001's test modules unmodified** — that is SC-018
++and FR-068, and the unchanged files are themselves the evidence. Every requirement FR-045…FR-074 is
++named by at least one test; see the
++[requirement to test map](./data-model.md#requirement-to-test-map).
++
++The password tests are the slowest in the suite by design: each protected read pays the ~50 ms
++derivation FR-073 requires.
++
++---
++
++## Scenario 1 — a snippet that disappears once it has been read (User Story 1)
++
++```bash
++ID=$(curl -s -X POST $B/pastes -d '{"content": "one-time secret", "burn_after_reading": true}' \
++     | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
++
++curl -s $B/pastes/$ID            # first read
++curl -s -o /dev/null -w '%{http_code}\n' $B/pastes/$ID        # second read
++curl -s -o /dev/null -w '%{http_code}\n' $B/pastes/$ID/raw    # and the other endpoint
++```
++
++Expected: the first read returns the full JSON with `"content": "one-time secret"`,
++`"burn_after_reading": true`, `"protected": false`, and the usual timestamps. Both later reads print
++`404`. `ls ./pastes/$ID.json` reports no such file — the record is gone, not flagged.
++
++Repeat with `$B/pastes/$ID/raw` as the *first* read: the body is exactly `one-time secret` with no
++added newline, and the structured endpoint then returns `404` (FR-048).
++
++## Scenario 2 — the one-time property survives a restart
++
++```bash
++ID=$(curl -s -X POST $B/pastes -d '{"content": "survives", "burn_after_reading": true}' \
++     | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
++# Ctrl-C the service, then start it again on the same --data directory
++curl -s $B/pastes/$ID                                          # returns it, once
++curl -s -o /dev/null -w '%{http_code}\n' $B/pastes/$ID         # 404
++```
++
++Expected: an unread one-time snippet is still one-time after a restart, and a consumed one stays
++gone across a further restart (FR-047, FR-051).
++
++## Scenario 3 — exactly one of many overlapping readers is served (SC-012)
++
++```bash
++ID=$(curl -s -X POST $B/pastes -d '{"content": "only once", "burn_after_reading": true}' \
++     | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
++
++for i in $(seq 1 16); do curl -s -o /dev/null -w '%{http_code}\n' $B/pastes/$ID & done | sort | uniq -c
++```
++
++Expected: exactly one `200` and fifteen `404`s. Never two `200`s, and never a truncated body
++(FR-050). The automated version of this, released from a `threading.Barrier` over many trials, is
++`test_fr050_concurrent_reads_serve_exactly_one`.
++
++## Scenario 4 — a snippet only the password holder can read (User Story 2)
++
++```bash
++ID=$(curl -s -X POST $B/pastes -d '{"content": "confidential", "password": "correct horse"}' \
++     | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
++
++curl -s -o /dev/null -w '%{http_code}\n' $B/pastes/$ID                                   # no header
++curl -s -o /dev/null -w '%{http_code}\n' -H 'X-Paste-Password: wrong' $B/pastes/$ID       # wrong
++curl -s -H 'X-Paste-Password: correct horse' $B/pastes/$ID                               # right
++curl -s -H 'X-Paste-Password: correct horse' $B/pastes/$ID/raw                            # and raw
++```
++
++Expected: `403` with `{"error": "missing or invalid X-Paste-Password"}` for the first two; the full
++snippet for the third, reporting `"protected": true`; the bare text for the fourth. Crucially, the
++two refusals leave the snippet readable — the third command still works after them (FR-059, SC-013).
++
++Combine the options and confirm a refusal does not burn:
++
++```bash
++ID=$(curl -s -X POST $B/pastes -d '{"content": "both", "burn_after_reading": true, "password": "pw"}' \
++     | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
++curl -s -o /dev/null -w '%{http_code}\n' -H 'X-Paste-Password: nope' $B/pastes/$ID   # 403
++curl -s -H 'X-Paste-Password: pw' $B/pastes/$ID                                      # still there
++curl -s -o /dev/null -w '%{http_code}\n' -H 'X-Paste-Password: pw' $B/pastes/$ID     # now 404
++```
++
++## Scenario 5 — the password is never disclosed, and never stored (SC-015, FR-056)
++
++```bash
++ID=$(curl -s -X POST $B/pastes -d '{"content": "x", "password": "Tr0ub4dor&3-UNIQUE"}' \
++     | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
++
++curl -s -D - -H 'X-Paste-Password=[REDACTED:assigned_secret]&3-UNIQUE' $B/pastes/$ID | grep -c UNIQUE   # 0
++grep -rc 'UNIQUE' ./pastes/ || echo "absent from storage"
++python3 -m json.tool ./pastes/$ID.json
++```
++
++Expected: `0` matches in the response (headers and body), no match anywhere in the storage directory,
++and a record whose `password` holds only `iterations`, `salt`, and `hash`. Nothing appears on the
++service's standard output or standard error either.
++
++Two snippets with the **same** password must have different stored forms (FR-073, SC-021):
++
++```bash
++for i in 1 2; do curl -s -X POST $B/pastes -d '{"content": "a", "password": "same"}' \
++  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'; done \
++  | while read id; do python3 -c "import json;r=json.load(open('./pastes/$id.json'));print(r['password']['salt'], r['password']['hash'][:16])"; done
++```
++
++Expected: two different salts and two different hashes.
++
++## Scenario 6 — the password costs 10–200 ms to verify (FR-073, SC-021)
++
++```bash
++ID=$(curl -s -X POST $B/pastes -d '{"content": "timed", "password": "pw"}' \
++     | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
++PLAIN=$(curl -s -X POST $B/pastes -d '{"content": "timed"}' \
++     | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
++
++curl -s -o /dev/null -w 'protected   %{time_total}s\n' -H 'X-Paste-Password: pw' $B/pastes/$ID
++curl -s -o /dev/null -w 'unprotected %{time_total}s\n' $B/pastes/$PLAIN
++```
++
++Expected: the protected read takes between 10 ms and 200 ms longer than the unprotected one — the
++derivation cost, calibrated to the host at startup ([research.md](./research.md) R-02). An
++unprotected read is as fast as it was before this feature.
++
++And it must not block anything else (FR-074):
++
++```bash
++( for i in $(seq 1 4); do curl -s -o /dev/null -H 'X-Paste-Password: pw' $B/pastes/$ID & done
++  time curl -s -o /dev/null $B/pastes/$PLAIN; wait )
++```
++
++Expected: the unprotected read completes in single-digit milliseconds, without waiting for the four
++protected reads.
++
++## Scenario 7 — a non-ASCII password, and bytes that are not UTF-8 (FR-058)
++
++```bash
++ID=$(curl -s -X POST $B/pastes -d "$(python3 -c 'import json; print(json.dumps({"content":"ünicode","password":"pässwörd-é中"}))')" \
++     | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
++
++curl -s -H "$(printf 'X-Paste-Password: p\xc3\xa4ssw\xc3\xb6rd-\xc3\xa9\xe4\xb8\xad')" $B/pastes/$ID
++curl -s -o /dev/null -w '%{http_code}\n' -H "$(printf 'X-Paste-Password: \xff\xfe')" $B/pastes/$ID
++```
++
++Expected: the UTF-8 encoded password reads the snippet; the invalid bytes give `403`, **not** `500`
++(FR-070).
++
++## Scenario 8 — deletion still needs only the delete token (FR-063, SC-016)
++
++```bash
++OUT=$(curl -s -X POST $B/pastes -d '{"content": "withdraw me", "password": "readpw"}')
++ID=$(echo "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
++TOK=$(echo "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["delete_token"])')
++
++curl -s -o /dev/null -w '%{http_code}\n' -X DELETE -H "X-Paste-Password: readpw" $B/pastes/$ID  # 403
++curl -s -o /dev/null -w '%{http_code}\n' -X DELETE -H "X-Delete-Token: $TOK" $B/pastes/$ID      # 204
++```
++
++Expected: the reading password does not authorise withdrawal (`403`), and the delete token alone
++does, with no password presented (`204`).
++
++## Scenario 9 — the two report flags, all four combinations (User Story 3, SC-019)
++
++```bash
++for body in '{"content":"a"}' \
++            '{"content":"a","burn_after_reading":true}' \
++            '{"content":"a","password":"pw"}' \
++            '{"content":"a","burn_after_reading":true,"password":"pw"}'; do
++  ID=$(curl -s -X POST $B/pastes -d "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
++  curl -s -H 'X-Paste-Password: pw' $B/pastes/$ID \
++    | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["burn_after_reading"], r["protected"])'
++done
++```
++
++Expected: `False False`, `True False`, `False True`, `True True` — both flags always present, always
++booleans, never `null`. The password header on the two unprotected snippets is ignored (FR-062).
++
++## Scenario 10 — invalid values are rejected and create nothing (SC-017)
++
++```bash
++for body in '{"content":"a","burn_after_reading":"true"}' '{"content":"a","burn_after_reading":1}' \
++            '{"content":"a","burn_after_reading":null}'  '{"content":"a","password":""}' \
++            '{"content":"a","password":null}'            '{"content":"a","password":123}' \
++            "{\"content\":\"a\",\"password\":\"$(python3 -c 'print("x"*129)')\"}"; do
++  curl -s -o /dev/null -w "%{http_code}  $body\n" -X POST $B/pastes -d "$body"
++done
++ls ./pastes | wc -l   # unchanged by the loop
++```
++
++Expected: `400` on every line, each with an explanatory `{"error": ...}` body, and no new record in
++the storage directory. Note `null` is a `400` for both options, unlike `expires_in`, where it means
++"no expiry".
++
++## Scenario 11 — compatibility (FR-067, FR-068, FR-071)
++
++A record written by the previous version — five keys, neither new one — must still read:
++
++```bash
++python3 - <<'PY'
++import json, pathlib
++p = pathlib.Path("./pastes/LegacyRecordExample.json")
++p.write_text(json.dumps({"id": "LegacyRecordExample", "content": "written before 002",
++                         "created_at": "2026-10-23T20:15:00Z", "expires_at": None,
++                         "delete_token": "legacy-token"}))
++PY
++curl -s $B/pastes/LegacyRecordExample
++```
++
++Expected: `200` with `"burn_after_reading": false, "protected": false` — not a `500`, and no
++damaged-storage diagnostic on standard error.
++
++The largest valid submission must now be accepted (FR-071):
++
++```bash
++python3 -c 'import json; print(json.dumps({"content": "\u0001"*65536, "password": "p"*128, "burn_after_reading": True}))' \
++  > /tmp/max.json
++curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/pastes --data-binary @/tmp/max.json   # 201
++python3 -c 'import json; print(json.dumps({"content": "a"*65537}))' > /tmp/over.json
++curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/pastes --data-binary @/tmp/over.json  # 413
++```
++
++Expected: `201` for the maximum valid submission that the old ceiling would have refused as too
++large, and `413` still for content over 65,536 bytes.
++
++## What "done" looks like
++
++- `python3 -m pytest` passes, with feature 001's test modules **unmodified** (FR-068, SC-018).
++- Every requirement FR-045…FR-074 is named by a passing test
++  ([map](./data-model.md#requirement-to-test-map)) (SC-020).
++- Scenarios 1–11 above behave as stated against a freshly started service.
++- `grep -rn 'import ' src/pastebin/` names only standard-library modules (Principle I).
++- The service still prints exactly one line to standard output and nothing per request (FR-068).
+diff --git a/specs/002-burn-after-reading-password/research.md b/specs/002-burn-after-reading-password/research.md
+new file mode 100644
+index 0000000..911705c
+--- /dev/null
++++ b/specs/002-burn-after-reading-password/research.md
+@@ -0,0 +1,334 @@
++# Phase 0 Research: Burn After Reading and Password Protection
++
++**Feature**: `002-burn-after-reading-password` | **Date**: 2026-11-10 | **Plan**: [plan.md](./plan.md)
++
++## Unknowns extracted from Technical Context
++
++The spec's Constraints section carries forward every constraint of feature 001 — Python 3.11+,
++standard library only, the `pastebin` package under `src/`, the `python -m pastebin serve --port
++PORT --data DIR` command form — and fixes the new wire names (`burn_after_reading`, `password`,
++`protected`, `X-Paste-Password`) and status codes. The user input for this phase restates the same
++three choices and fixes the test runner (`pytest`). No field of Technical Context is therefore
++marked NEEDS CLARIFICATION, and the spec's own Clarifications session has already resolved the five
++behavioural questions that were open (UTF-8 header bytes, the widened size bound, claim-before-send,
++repeated headers, and a deliberately costly derivation).
++
++What remained open were *how* questions — which standard-library mechanism satisfies each new
++requirement, given an implementation that already exists and must not change.
++
++| # | Question | Driving requirements |
++|---|----------|----------------------|
++| R-01 | Which standard-library derivation gives a salted, 10–200 ms, one-way password hash? | FR-056, FR-073, SC-021 |
++| R-02 | How is the derivation's cost kept inside 10–200 ms *on the serving machine*? | FR-073, SC-021 |
++| R-03 | Does a verification block concurrent requests for other snippets? | FR-074, FR-042, SC-021 |
++| R-04 | How is a one-time snippet claimed atomically, durably, and exactly once? | FR-048, FR-050, FR-051 |
++| R-05 | In what order are the checks on a read performed? | FR-049, FR-053, FR-060, FR-061 |
++| R-06 | How are the bytes of `X-Paste-Password` recovered and decoded as UTF-8? | FR-058, FR-062 |
++| R-07 | How is a repeated `X-Paste-Password` header detected without picking an occurrence? | FR-072 |
++| R-08 | How does the stored record gain two fields without making old records damaged? | FR-047, FR-056, FR-067 |
++| R-09 | What is the recomputed pre-read body ceiling? | FR-071 |
++| R-10 | How are the new behaviours tested — exactly-once under contention, restart, cost band? | SC-012, SC-021, Principle III |
++
++Every finding below was checked against the running interpreter (Python 3.13.17 on this host)
++before being recorded; the measurements quoted are from that check.
++
++---
++
++## R-01 — Password derivation
++
++**Decision**: `hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations, dklen=32)`
++with a fresh 16-byte salt from `secrets.token_bytes(16)` per snippet. Salt, iteration count, and the
++32-byte derived key are stored hex-encoded in the snippet's record; verification re-derives with the
++record's own salt and iteration count and compares with `secrets.compare_digest`.
++
++**Rationale**: PBKDF2-HMAC-SHA256 is the one costly KDF the standard library offers
++unconditionally — `hashlib.pbkdf2_hmac` is always present, OpenSSL-backed where available and with a
++pure-Python fallback otherwise — so Principle I is satisfied with no portability caveat. It is
++one-way, so FR-056's prohibition on storing a recoverable form holds. Its cost is a single linear
++parameter, which is what makes R-02's calibration possible: measured here at 4.3 µs per 1,000
++iterations (11.5 ms at 50,000; 46.6 ms at 200,000; 91.3 ms at 400,000), linear across the range.
++Its memory cost is negligible, which matters for FR-074: ten concurrent verifications cost ten
++hash states, not ten large scratch buffers. Storing the iteration count *in the record* rather than
++as a global means a snippet written before a recalibration still verifies (FR-056 across restarts),
++and is the same discipline the existing record already applies to `expires_at` — the value is
++computed once at publication and never recomputed.
++
++**Alternatives considered**:
++
++- **`hashlib.scrypt`** — memory-hard, and therefore strictly better against custom hardware; measured
++  here at 43.6 ms for `n=2**14, r=8, p=1`. Rejected on two grounds. It is conditional: `hashlib.scrypt`
++  exists only when the interpreter was linked against an OpenSSL providing scrypt, and raises
++  otherwise, so a service that must run "anywhere Python runs" (Principle I's rationale) would need a
++  fallback path — two derivations where the spec requires one. And its cost parameter `n` moves in
++  powers of two, so tuning into a 10–200 ms band is coarse where PBKDF2's is continuous. Its ~16 MB
++  working set also multiplies by concurrency, which FR-074 makes a live concern.
++- **`hashlib.blake2b` with a salt and a `person` value** — fast and always available, but *fast* is
++  exactly what FR-073 forbids. A single salted BLAKE2b is a few microseconds, so a copy of the
++  storage directory would yield a weak password immediately.
++- **`secrets.compare_digest` against the password stored in clear** — forbidden outright by FR-056.
++- **A per-service pepper outside the storage directory** — would strengthen the threat model FR-073
++  names (a stolen copy of the directory), but requires a key file, its lifecycle, and a story for
++  what happens when it is lost. No requirement asks for it; Principle IV rejects it.
++
++## R-02 — Keeping the cost inside the required band
++
++**Decision**: measure the host's PBKDF2 rate once, at server construction, and solve for the
++iteration count that costs 50 ms:
++
++```text
++probe    = min of 3 timings of pbkdf2_hmac(..., PASSWORD_PROBE_ITERATIONS)
++iterations = clamp(round(PASSWORD_PROBE_ITERATIONS * 0.05 / probe),
++                   MIN_PASSWORD_ITERATIONS, MAX_PASSWORD_ITERATIONS)
++```
++
++The result is held on the server object (`httpd.password_iterations`) and passed to
++`store.create_paste`; `store` itself stays free of module-level mutable state.
++
++**Rationale**: FR-073 bounds one verification at 10–200 ms *"on the machine serving requests"*, and
++SC-021 makes that an asserted test. A hard-coded iteration count cannot satisfy a machine-relative
++bound: a count tuned to 50 ms here is 200 ms on a host four times slower and 10 ms on one five times
++faster, so the two ends of plausible hardware already span the whole band and a test asserting it
++would be hardware-dependent rather than a test of the service. Measuring instead makes the
++requirement hold by construction, on whatever host the operator runs, and makes SC-021's test
++deterministic. 50 ms is the geometric middle of the band, so a factor of five of measurement noise
++or load in either direction still lands inside it. The cost is one measurement of roughly 15 ms at
++startup — far inside SC-007's two-second readiness budget — and about twenty lines of code.
++
++The two clamps are sanity rails, not tuning knobs. `MIN_PASSWORD_ITERATIONS` (20,000) stops a
++pathologically slow or heavily loaded host from calibrating down to a cost that is cheap to attack;
++it binds only on a host roughly ten times slower than this one, where a 50 ms target is unreachable
++anyway. `MAX_PASSWORD_ITERATIONS` (5,000,000) stops a probe that measured as near-zero — clock
++granularity, or a host so fast the probe is noise — from producing an absurd count. Neither is
++reached on this host, where calibration selects roughly 215,000 iterations.
++
++**Alternatives considered**:
++
++- **A fixed constant, e.g. 600,000 iterations** (the current OWASP figure). Simpler by twenty lines,
++  and rejected only because of the machine-relative band: 600,000 iterations is 137 ms here and over
++  a second on modest hardware, breaching FR-073's ceiling, while on a fast host of a few years hence
++  it drops under the floor. If FR-073 were ever amended to name a fixed cost parameter instead of a
++  time band, this is the design to revert to.
++- **An operator-supplied `--password-cost` option**. A configuration knob with one caller, which
++  Principle IV prohibits, and it moves the obligation FR-073 places on the service onto the operator.
++- **Recalibrating per request, or periodically**. Strictly worse: it spends the measurement cost
++  repeatedly for a parameter that only affects *new* snippets, since verification must use the
++  iteration count the record was written with.
++
++**Known limit** (recorded as an assumption rather than solved): on a host where even
++`MIN_PASSWORD_ITERATIONS` costs more than 200 ms, no salted costly derivation can satisfy both ends
++of FR-073's band at once, and the floor wins — security over latency.
++
++## R-03 — Verification and concurrency
++
++**Decision**: no new mechanism. `ThreadingHTTPServer` already serves each connection on its own
++thread (feature 001, R-01), and `hashlib.pbkdf2_hmac` releases the GIL for the duration of the
++derivation, so a verification runs on its thread without stalling the interpreter.
++
++**Rationale**: FR-074 forbids a verification from delaying a request about a different snippet, and
++FR-042 already obliges the service to serve overlapping requests concurrently. Verified
++experimentally on this two-core host: four threads each doing 200,000 iterations finished in 92.5 ms
++against 189.3 ms of serial work (2.05× — full use of both cores), and two threads in 52.7 ms against
++94.6 ms (1.80×). Had the GIL been held, the speedup would have been 1.0×. No thread pool, no
++semaphore, and no work queue is therefore needed, and adding one would be an abstraction with no
++requirement behind it (Principle IV).
++
++The derivation is also reached only on a read of a snippet that is actually protected — FR-062 has
++the header inspected for no other snippet — so an unprotected read costs exactly what it costs
++today.
++
++**Alternatives considered**: a bounded `concurrent.futures.ThreadPoolExecutor` for derivations, to
++cap total CPU spent on verification. Rejected: it would *introduce* the queuing delay FR-074
++prohibits, as the (n+1)-th verification would wait on the pool.
++
++## R-04 — Claiming a one-time snippet
++
++**Decision**: the claim is a single `os.unlink` of `<DIR>/<id>.json` followed by an `os.fsync` of a
++descriptor opened on the storage directory. The caller whose `unlink` succeeds has claimed the
++snippet and serves the text it already read into memory; a caller whose `unlink` raises
++`FileNotFoundError` lost the race and reports 404. Both the one-time claim and the existing
++`DELETE` path go through one `store` helper that unlinks and then fsyncs the directory.
++
++**Rationale**: POSIX `unlink` removes a directory entry atomically and fails with `ENOENT` when the
++entry is already gone, which is precisely the exactly-once primitive FR-050 asks for — no lock file,
++no index, no tombstone. Verified here over 200 trials of sixteen threads racing to unlink the same
++path: exactly one winner and fifteen `FileNotFoundError`s in every trial, with no other error. The
++directory `fsync` is what makes the removal *durable* as FR-048 demands — a directory entry removal
++is otherwise only in the page cache — and performing it before `send_response` is what satisfies
++FR-048's ordering and FR-051's "a restart does not resurrect it", including for the claim whose
++response never reached its caller. Because the text was read into memory before the claim, the
++winner can serve a complete body (FR-050) and a loser has nothing to serve.
++
++Routing the existing `DELETE` through the same helper is a reduction, not an addition: one durable
++removal instead of two near-identical ones. It strengthens FR-031 and changes nothing a caller can
++observe, so FR-068 holds (the directory fsync measured 12.3 ms on this host).
++
++An `unlink` that fails for any reason *other* than `ENOENT` means storage is misbehaving; it is
++translated to `StoreCorrupt` and reported through the existing damaged-storage path as a 500, which
++leaves the snippet unconsumed exactly as FR-049 requires.
++
++**Alternatives considered**:
++
++- **Rename to a unique claim name, then unlink it.** Also exactly-once (`rename`'s source must
++  exist), and it would let the winner re-read the text from the claimed file. Rejected as a strictly
++  longer route to the same guarantee: the text is already in memory from the validation read, so the
++  extra name and extra syscall buy nothing.
++- **A `claimed: true` field rewritten into the record.** Needs a read-modify-write that is not atomic
++  against a concurrent claim, so it would need a lock, and it leaves the consumed secret on disk —
++  worse on every axis.
++- **An in-memory set of consumed identifiers.** Lost on restart, which FR-051 forbids, and it would
++  be the service's first piece of state outside the storage directory.
++- **`O_EXCL` lock files per snippet.** Exactly-once, but leaves litter after an abrupt stop and needs
++  a reclamation story no requirement asks for.
++
++## R-05 — Order of checks on a read
++
++**Decision**: `load and validate the record` → `404 if absent, 500 if damaged, 404 if expired` →
++`403 if protected and the presented password does not match` → `take the text` →
++`claim if one-time, 404 if the claim is lost` → `write the response`.
++
++**Rationale**: this single ordering discharges every precedence rule the spec states. Loading first
++makes 404 outrank 403 for an unknown, deleted, or already-consumed identifier (FR-060) and keeps the
++endpoint from revealing an identifier a read would not have revealed — the same argument, and the
++same order, that feature 001 already uses on `DELETE` (FR-026). Checking expiry before the password
++gives FR-053 and User Story 2 scenario 6. Checking the password before the claim is what makes a
++protected one-time snippet unburnable by someone who cannot read it (FR-049, SC-013). Claiming after
++the text is in hand but before the first byte of the response is written is FR-048's explicit
++ordering. Damaged storage is diagnosed by the load, before any claim, so a damaged one-time snippet
++is not consumed (FR-049).
++
++**Alternatives considered**: claiming before verifying the password would be cheaper by one failed
++derivation and is rejected outright — it would let anyone who could guess a link destroy a snippet
++they cannot read, which is the attack SC-013 exists to exclude. Writing the response and then
++claiming is rejected by FR-048 and by the spec's own clarification: a snippet served twice cannot be
++recalled, a snippet lost unread can be republished.
++
++## R-06 — Recovering the password header's bytes
++
++**Decision**: `self.headers.get_all("X-Paste-Password")[0].encode("latin-1").decode("utf-8")`;
++a `UnicodeDecodeError` means the presented bytes match no password and the read is refused as 403.
++
++**Rationale**: `http.client.parse_headers` decodes the whole header block as ISO-8859-1, so the `str`
++`http.server` hands over holds one character per original byte. Re-encoding as `latin-1` is therefore
++lossless and total — it cannot fail, because every character came from a latin-1 decode — and
++recovers the bytes the caller actually sent, which is what FR-058 requires be interpreted as UTF-8.
++Verified on the running server: the header bytes `70 c3 a4 73 73 77 c3 b6 72 64 2d c3 a9 e4 b8 ad`
++arrive as a 16-character latin-1 string and round-trip to `pässwörd-é中`, so a non-ASCII password is
++presentable and matchable. The bytes `ff fe` arrive likewise and raise `UnicodeDecodeError` on the
++UTF-8 decode, which is caught and treated as a mismatch — a 403, never the 500 an uncaught decode
++error would produce (FR-070).
++
++Catching `UnicodeDecodeError` at exactly this site is a deliberate translation of an exception into a
++clearer error, which is the one thing Principle II permits; it is not a swallow, because the outcome
++is an explicit refusal.
++
++The header is read only when the snippet is protected, which gives FR-062 for free: an unprotected
++snippet is served whatever the header's value or bytes, including invalid UTF-8 and including a
++repeated header, because nothing looks at it.
++
++## R-07 — Detecting a repeated header
++
++**Decision**: `self.headers.get_all("X-Paste-Password")` — `None` when the header is absent, a list
++of every occurrence otherwise. A list of length other than one is treated as a password that does not
++match.
++
++**Rationale**: `self.headers` is an `email.message.Message`, whose `get()` silently returns the
++*first* occurrence — which is exactly the behaviour FR-072 forbids, since a correct password smuggled
++into a second copy of the header past whatever inspected the first must not open the snippet.
++`get_all` is the standard-library way to see all occurrences without choosing one. Verified: a request
++carrying `X-Paste-Password: wrong` then `X-Paste-Password: right` yields `get() == "wrong"` and
++`get_all() == ["wrong", "right"]`, so only the `get_all` form can detect the repetition at all.
++Collapsing "absent", "repeated", and "undecodable" into one refusal is not a loss of information to
++the caller: FR-059 and FR-072 make all three the same 403 with the same message, and the spec's edge
++cases note that the outcomes are indistinguishable by design.
++
++An empty header value needs no special case: it is a one-element list holding `""`, a presented
++password of zero characters, which cannot match any stored password because a stored password is at
++least one character (FR-054). It is therefore refused rather than treated as absent, as the spec's
++edge cases require, without a line of code saying so.
++
++## R-08 — Extending the stored record
++
++**Decision**: the record gains two keys, `burn_after_reading` (a boolean) and `password` (`null`, or
++an object with exactly `iterations`, `salt`, and `hash`). Both are *written always* by this version
++and *optional on read*: a record lacking them is valid and means not one-time and not protected.
++Validation keeps its shape — five required keys, two optional, any other key still damaged — and the
++new values are type-checked as strictly as the existing ones.
++
++**Rationale**: FR-047 and FR-056 require both properties to be durable; FR-067 requires a record
++written by the previous version, which names neither key, to read as neither one-time nor protected
++rather than as damaged. Making the keys optional on read is exactly that rule, and nothing more
++elaborate — no version field, no migration pass, no rewrite-on-read — is needed, because absence
++already has an unambiguous meaning. Writing them unconditionally keeps one obvious shape for every
++record this version creates, so the absent case is purely the legacy path rather than something the
++service produces for itself.
++
++Keeping "any other key is damaged" preserves feature 001's rule and its test, which uses the key name
++`surprise` and so is unaffected by the two names now accepted (FR-068, SC-018).
++
++Nesting the three derivation values under one `password` key, rather than adding three flat keys, is
++what makes "protected" a single `is not None` test at every site that asks, and makes the invariant
++"either all three are present or none is" structural rather than a check. A packed string in the
++`algorithm$iterations$salt$hash` style familiar from `passlib` was rejected: it would need its own
++parser and its own damaged-record diagnostics, where a nested object is validated by the same few
++lines as the rest of the record. There is no `algorithm` field, because there is one algorithm;
++adding a field to name it would be a speculative extension point (Principle IV).
++
++## R-09 — The recomputed body ceiling
++
++**Decision**: `MAX_BODY_BYTES = 6 * MAX_CONTENT_BYTES + 12 * MAX_PASSWORD_CHARS + 1_024` =
++**395,776** bytes, up from 394,240.
++
++**Rationale**: FR-071 is not a formality — the old ceiling genuinely rejects a submission this spec
++deems valid. Measured: the worst-case valid body, with 65,536 bytes of content that JSON escapes
++six-for-one, a 128-character password of astral characters that escapes to a twelve-byte surrogate
++pair each, and `burn_after_reading`, serialises to 394,811 bytes, which exceeds the old 394,240 and
++would be refused as too large. The recomputed bound leaves 965 bytes of headroom over that exact
++worst case.
++
++The two added terms are derived the same way feature 001's was. Content stays at six output bytes per
++input byte (a C0 control byte becomes `\u0001`; a four-byte astral character becomes a twelve-byte
++escaped surrogate pair, only three per input byte). A password is bounded in *characters*, not bytes,
++so its worst case is twelve output bytes per character — the same escaped surrogate pair, now counted
++per character rather than per byte. The 1,024-byte slack still covers the field names, whitespace, and
++the unknown fields FR-015 requires be tolerated; the two new field names add 46 bytes to that
++allowance, which it absorbs.
++
++The bound remains a module constant, independent of anything the caller declares, so the memory
++protection FR-040 exists for is unchanged (FR-071's final sentence). A submission whose *content*
++exceeds 65,536 encoded bytes is still a 413, decided before or after the body is read as it is today.
++
++## R-10 — Testing the new behaviours
++
++**Decision**: four new test modules on the existing fixtures, with no new harness:
++
++- **Exactly-once under contention** (SC-012, FR-050): N threads on the in-process `service` fixture
++  released from a `threading.Barrier` onto the same unread one-time snippet; assert exactly one 200
++  and N−1 404s, that the one 200 carries the whole text, and that the record file is gone. Repeated
++  over many trials — the same shape as the R-04 probe, which produced one winner in 200 of 200 trials.
++- **Across a restart** (FR-047, FR-051, FR-056, SC-012, SC-014): the `server_process` fixture
++  publishes, is stopped, and a second process is started on the same directory — already how feature
++  001 tests durability.
++- **The cost band** (FR-073, SC-021): time one read of a protected snippet against one read of an
++  unprotected one on the same host and assert the difference falls in 10–200 ms. Because R-02
++  calibrates to the host, this is a genuine assertion rather than a hardware lottery. Salt uniqueness
++  is read straight off disk: two snippets published with the same password must differ in both `salt`
++  and `hash`.
++- **Concurrency under verification** (FR-074, SC-021): overlap a read of a protected snippet with
++  reads of a *different* unprotected snippet and assert the latter complete without waiting for the
++  former — the measurement R-03 already validated.
++- **Claim-before-send** (FR-048): assert the ordering by its consequence rather than by instrumenting
++  the handler — a caller that reads the response headers and abandons the connection mid-body leaves
++  the snippet gone, and the record file is absent the moment a successful read returns.
++- **No password anywhere** (FR-057, FR-066, SC-015): publish with a distinctive password, then assert
++  it appears in no response body, no response header, and neither captured stream of the
++  `server_process` fixture.
++
++**Rationale**: `conftest.py` already provides both server fixtures, raw-socket sends for framing the
++`http.client` cannot express (needed for the repeated and invalid-UTF-8 headers), and
++`read_record`/`write_record` helpers for inspecting and hand-writing stored records — which is how
++the FR-067 legacy-record test writes a five-key record directly. Nothing new is required of the
++harness, and runtime code gains no test-only hook (Principle IV).
++
++The only new cost is time: a few dozen protected reads at the calibrated ~50 ms each. Tests that care
++about neither the cost nor the band override `service.httpd.password_iterations` downward, which is
++legitimate because the iteration count is server state the handler reads, not a constant it embeds.

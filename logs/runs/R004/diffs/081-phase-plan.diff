@@ -1,0 +1,1410 @@
+diff --git a/specs/001-user-accounts-cli/contracts/cli-contract.md b/specs/001-user-accounts-cli/contracts/cli-contract.md
+new file mode 100644
+index 0000000..afee8cc
+--- /dev/null
++++ b/specs/001-user-accounts-cli/contracts/cli-contract.md
+@@ -0,0 +1,182 @@
++# Contract: Command-Line Interface
++
++**Feature**: `001-user-accounts-cli` | **Date**: 2026-11-04
++
++This is the tool's whole external interface. It is the contract the tests assert
++against directly, by running the real executable in a subprocess with piped
++streams — not by calling Python functions.
++
++## Invocation
++
++```text
++python -m accounts --store PATH COMMAND USERNAME
++```
++
++- `src/` must be on `PYTHONPATH` (A-013); there is no install step
++  (Principle I).
++- `--store PATH` is **required**. `PATH` is the store file; the operator naming
++  it is the deliberate purpose of the invocation and it is not confined to any
++  base directory (SR-003).
++- `COMMAND` is exactly one of `register`, `login`, `unlock`, `passwd`,
++  `delete` (FR-001). Nothing else is accepted.
++- `USERNAME` is exactly one positional argument, 3–32 characters of
++  `[A-Za-z0-9_]`, compared case-sensitively (FR-011).
++- Option abbreviation is **not** accepted (`--sto` is an error), `--store=PATH`
++  is accepted as argparse's standard equivalent form, and there is no `-h` or
++  `--help`: every exit status must correspond to one of the six documented
++  conditions (FR-003), and help is not one of them.
++- No password may ever appear as an argument (FR-002).
++
++## Standard input protocol
++
++Passwords are read from stdin, one per line, in the order below (FR-002). A
++line is terminated by `\n`, optionally preceded by `\r`; the terminator is not
++part of the password (A-009). A final line at end-of-stream without a
++terminator is valid.
++
++| Command | Lines read | Order |
++|---|---|---|
++| `register` | 1 | new password |
++| `login` | 1 | password to verify |
++| `unlock` | **0** | — must work with stdin closed (A-006) |
++| `passwd` | 2 | current password, then new password |
++| `delete` | 1 | password to verify |
++
++Lines beyond those listed are never read and are not an error. Each line is at
++most 4 096 bytes before its terminator is stripped; a longer line is refused,
++not truncated (FR-014, SR-006). Each line must be valid UTF-8.
++
++## Success output
++
++On success a command writes only the text below to stdout, followed by a single
++newline, and writes **nothing** to stderr (FR-004).
++
++| Command | stdout | Exit |
++|---|---|---|
++| `register` | `registered USERNAME` | 0 |
++| `login` | `ok` | 0 |
++| `unlock` | *(nothing)* | 0 |
++| `passwd` | *(nothing)* | 0 |
++| `delete` | *(nothing)* | 0 |
++
++## Exit statuses
++
++Exactly these six, and no others, for exactly these conditions (FR-003).
++
++| Status | Condition |
++|---|---|
++| 0 | The operation completed |
++| 1 | Credentials rejected — wrong password, or an unknown account on `login` (A-001) |
++| 2 | Invalid request — bad usage, invalid username, password too short or too long when being set, over-long or non-UTF-8 input line, missing password input |
++| 3 | Account conflict — `register` on an existing username, or `unlock`/`passwd`/`delete` on an unknown username |
++| 4 | The account is locked |
++| 5 | The store could not be read, parsed or written |
++
++## Failure output
++
++On failure a command writes **one line** to stderr and **nothing** to stdout
++(FR-005). `invalid credentials` and `account locked` are exact, detail-free
++strings fixed by FR-005; every other message states what was expected and what
++was received. `USERNAME` below is echoed through a sanitiser that renders any
++character outside printable ASCII as `\xNN` and truncates at 64 characters
++(SR-002, SR-009). `N` is always a length or a count — never a password, salt,
++digest, parameter or any store content (SR-009).
++
++| Status | Message to stderr |
++|---|---|
++| 2 | `usage: python -m accounts --store PATH {register\|login\|unlock\|passwd\|delete} USERNAME` |
++| 2 | `error: unknown command 'COMMAND': expected one of register, login, unlock, passwd, delete` |
++| 2 | `error: invalid username 'USERNAME': expected 3-32 characters of letters, digits or underscore, received N characters` |
++| 2 | `error: invalid username 'USERNAME': expected only letters, digits or underscore` |
++| 2 | `error: new password too short: expected at least 12 characters, received N` |
++| 2 | `error: new password too long: expected at most 1024 characters, received N` |
++| 2 | `error: missing password input: expected N password line(s) on stdin, received M` |
++| 2 | `error: password line too long: expected at most 4096 bytes before the line terminator` |
++| 2 | `error: password line is not valid UTF-8 text` |
++| 1 | `invalid credentials` |
++| 4 | `account locked` |
++| 3 | `error: account 'USERNAME' already exists` |
++| 3 | `error: no such account 'USERNAME'` |
++| 5 | `error: cannot read store 'PATH': <errno description>` |
++| 5 | `error: cannot write store 'PATH': <errno description>` |
++| 5 | `error: store 'PATH' is malformed: <structural reason>` |
++| 5 | `error: store 'PATH' is too large: expected at most 8388608 bytes, received N` |
++| 5 | `error: store 'PATH' holds too many accounts: expected at most 10000, received N` |
++| 5 | `error: store 'PATH' is full: expected at most 10000 accounts, cannot add another` |
++
++The `<structural reason>` names the shape problem and never a value: e.g.
++`not a JSON object`, `unsupported version`, `record 'alice' has unexpected
++field`, `record 'alice' field 'failed_logins' out of range`, `nesting too
++deep`. The store path is echoed verbatim because SR-009 exempts the operator's
++own argument.
++
++## Indistinguishability guarantee
++
++A `login` against an account that does not exist and a `login` with a wrong
++password against an account that does exist produce the **identical** stderr
++line (`invalid credentials`), the identical exit status (1), identical empty
++stdout, and comparable wall-clock time — the unknown-account path performs one
++discarded scrypt derivation so the two cannot be told apart by timing (SC-004,
++SR-009).
++
++## Store side effects
++
++| Command | Creates the store? | Writes the store? |
++|---|---|---|
++| `register` | yes, on first use (FR-007) | on success only |
++| `login` | **never** (FR-007) | on success if the count was non-zero; on failure to increment the count |
++| `unlock` | **never** | on success only |
++| `passwd` | **never** | on success only |
++| `delete` | **never** | on success only |
++
++Against a store path that does not exist: `register` creates it; `login`
++returns 1; `unlock`, `passwd` and `delete` return 3 — and none of them leaves
++any file behind, not even a temporary or lock file (FR-007, SR-003).
++
++Every change becomes visible all at once (FR-009). Every failing command leaves
++the store byte-identical, with the single exception of the `login` failure-count
++increment (FR-006, SC-008).
++
++## Worked example sequence
++
++The spec's SC-011 refers to "the documented example sequence from the feature
++request", which the recorded request does not actually contain — see the
++clarification note in [plan.md](../plan.md#spec-gaps-flagged-not-blocking).
++This sequence stands as the documented one until that is resolved; it is
++asserted line for line, status for status.
++
++```console
++$ printf 'correct-horse-battery\n' | python -m accounts --store ./s login alice
++invalid credentials                                   # stderr, exit 1 (no store, no account)
++$ ls ./s; echo "exit=$?"
++ls: cannot access './s': No such file or directory    # login created nothing
++$ printf 'correct-horse-battery\n' | python -m accounts --store ./s register alice
++registered alice                                      # stdout, exit 0
++$ stat -c '%a' ./s
++600                                                   # owner-only (SC-010)
++$ printf 'correct-horse-battery\n' | python -m accounts --store ./s login alice
++ok                                                    # stdout, exit 0
++$ printf 'short\n' | python -m accounts --store ./s register bob
++error: new password too short: expected at least 12 characters, received 5
++                                                      # stderr, exit 2
++$ printf 'correct-horse-battery\n' | python -m accounts --store ./s register alice
++error: account 'alice' already exists                 # stderr, exit 3
++$ for i in 1 2 3 4 5; do printf 'wrong-password-here\n' \
++    | python -m accounts --store ./s login alice; echo "exit=$?"; done
++invalid credentials                                   # x5, exit 1 each
++$ printf 'correct-horse-battery\n' | python -m accounts --store ./s login alice
++account locked                                        # stderr, exit 4 — correct password refused
++$ python -m accounts --store ./s unlock alice < /dev/null
++                                                      # no output, exit 0
++$ printf 'correct-horse-battery\n' | python -m accounts --store ./s login alice
++ok                                                    # stdout, exit 0
++$ printf 'correct-horse-battery\nnew-password-here\n' \
++    | python -m accounts --store ./s passwd alice
++                                                      # no output, exit 0
++$ printf 'correct-horse-battery\n' | python -m accounts --store ./s login alice
++invalid credentials                                   # old password dead, exit 1
++$ printf 'new-password-here\n' | python -m accounts --store ./s delete alice
++                                                      # no output, exit 0
++$ python -m accounts --store ./s unlock alice < /dev/null
++error: no such account 'alice'                        # stderr, exit 3
++```
+diff --git a/specs/001-user-accounts-cli/contracts/store-format.md b/specs/001-user-accounts-cli/contracts/store-format.md
+new file mode 100644
+index 0000000..fa823a5
+--- /dev/null
++++ b/specs/001-user-accounts-cli/contracts/store-format.md
+@@ -0,0 +1,151 @@
++# Contract: Store File Format
++
++**Feature**: `001-user-accounts-cli` | **Date**: 2026-11-04
++
++The store file is an interface, not an implementation detail: FR-008 requires
++that accounts written by one invocation be readable by every later invocation,
++so the format is a contract between runs of the tool. Entity semantics live in
++[data-model.md](../data-model.md); this file pins the bytes.
++
++## Encoding
++
++A single JSON document, UTF-8, produced by:
++
++```python
++json.dumps(doc, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
++```
++
++followed by one trailing `\n`.
++
++- **Structured encoding, no concatenation** (SR-002): records are produced and
++  consumed only through `json`, so no username or credential material can
++  create, merge or truncate a record by containing a delimiter, line terminator
++  or control character.
++- `ensure_ascii=True` guarantees the file contains no raw control bytes and no
++  non-ASCII bytes, so it is safe to `cat` in a terminal.
++- `sort_keys=True` plus fixed separators make the file byte-deterministic for a
++  given account set, which is what lets "the store is unchanged after a failed
++  operation" (SC-008) be tested as a byte comparison.
++
++## Shape
++
++```json
++{
++  "accounts": {
++    "alice": {
++      "dklen": 32,
++      "failed_logins": 0,
++      "hash": "RUhBTVBMRS1ESUdFU1QtMzItQllURVMtQkFTRTY0LQ==",
++      "kdf": "scrypt",
++      "n": 131072,
++      "p": 1,
++      "r": 8,
++      "salt": "U1lOVEhFVElDLVNBTFQtMTZC"
++    }
++  },
++  "version": 1
++}
++```
++
++The digest and salt above are synthetic illustration values, not real material
++(Principle: secrets hygiene — no credential material in the repository).
++
++Maximum nesting depth of a valid store is 3 (`document` → `accounts` →
++`record`). There is no recursive structure, so parsing cost is linear in file
++size and no regular expressions are involved (SR-006).
++
++## Field rules
++
++### Document
++
++| Key | Type | Accepted values |
++|---|---|---|
++| `version` | integer | exactly `1` |
++| `accounts` | object | 0–10 000 members; each key a valid username |
++
++Exactly these two keys. Any additional key, any missing key, any other type →
++malformed (status 5).
++
++### Record
++
++Exactly these eight keys, no more and no fewer (SR-001 — the field set is an
++allow-list, not a minimum):
++
++| Key | Type | Accepted values |
++|---|---|---|
++| `kdf` | string | exactly `"scrypt"` |
++| `n` | integer | power of two, `2 … 1048576` |
++| `r` | integer | `1 … 32` |
++| `p` | integer | `1 … 16` |
++| `dklen` | integer | `16 … 64` |
++| `salt` | string | padded standard-alphabet base64 decoding to exactly 16 bytes |
++| `hash` | string | padded standard-alphabet base64 decoding to exactly `dklen` bytes |
++| `failed_logins` | integer | `0 … 5` |
++
++Additional cross-field rule: `n * r * 128` must not exceed 201 326 592
++(192 MiB), the `maxmem` the tool passes to `scrypt` — a record demanding more
++is malformed rather than an unbounded allocation (SR-006).
++
++`true`/`false` are **not** accepted where an integer is required (Python's
++`bool` is an `int` subclass, so the check is explicitly `type(v) is int`).
++
++Keys of the `accounts` object must each be 3–32 characters of
++`[A-Za-z0-9_]`; a key that is not → malformed (status 5), never skipped.
++
++## Validation discipline
++
++Every field is validated against the table above on **load**, before any of it
++is used (SR-001: validate on the way in). One invalid record fails the whole
++load with status 5. The store is never repaired, never partially loaded, never
++silently treated as empty, and never partially overwritten (spec edge case
++"Unreadable, malformed or truncated store"; Principle II).
++
++Order of checks on load:
++
++1. `open()` the path. `ENOENT` → in-memory empty store, **no file created**.
++   Any other `OSError` → status 5.
++2. `fstat` the descriptor; size > 8 388 608 → status 5 **without reading**
++   (SR-006).
++3. Read and UTF-8 decode; `UnicodeDecodeError` → status 5.
++4. `json.loads`; `JSONDecodeError` → status 5; `RecursionError` from
++   pathological nesting → status 5.
++5. Validate document shape, then account count, then every record.
++
++## Write discipline
++
++A change is written by this exact sequence (FR-009, SR-003, SR-008, SC-009,
++SC-010):
++
++1. `dir = dirname(realpath(store_path))` — the real file's own directory, so
++   `rename` cannot cross a filesystem and an operator's symlinked store keeps
++   working.
++2. `fd = os.open(dir + "/." + name + "." + secrets.token_hex(8) + ".tmp",
++   O_WRONLY|O_CREAT|O_EXCL, 0o600)` — unpredictable name, no overwriting an
++   existing file, owner-only permissions set *at creation*.
++3. Write the serialised bytes, `os.fsync(fd)`, `os.close(fd)`.
++4. `os.replace(tmp, store_path)` — atomic within the filesystem.
++5. `fsync` the directory descriptor, making the rename itself durable.
++6. On any failure in steps 2–4, unlink the temporary file and report status 5.
++
++No password is ever written to the temporary file (it holds only the same
++digests as the store), and no temporary file survives a failure (SR-003,
++SC-005).
++
++## Concurrency
++
++Every command holds an exclusive `fcntl.flock(LOCK_EX)` on a descriptor for the
++store's **directory** for the entire read–modify–write (SR-007). Rationale for
++locking the directory rather than the file — the file may not exist yet, and
++`os.replace` changes the inode — is recorded in
++[research R4](../research.md#r4--serialising-concurrent-invocations-sr-007-edge-case-simultaneous-invocations).
++
++The lock is advisory and binds only cooperating invocations of this tool, which
++is the scope SR-007 states. In particular, concurrent failed `login` attempts
++cannot lose a failure-count increment and so cannot exceed the five-attempt
++limit.
++
++## Compatibility
++
++`version` is the only compatibility mechanism. A store written by a future
++version is reported as `error: store 'PATH' is malformed: unsupported version`
++with status 5 — it is never read on a best-effort basis (Principle II).
+diff --git a/specs/001-user-accounts-cli/data-model.md b/specs/001-user-accounts-cli/data-model.md
+new file mode 100644
+index 0000000..edf9ecc
+--- /dev/null
++++ b/specs/001-user-accounts-cli/data-model.md
+@@ -0,0 +1,160 @@
++# Phase 1 Data Model: Local User Account Manager (CLI)
++
++**Feature**: `001-user-accounts-cli` | **Date**: 2026-11-04
++
++Derived from [spec.md](./spec.md) "Key Entities" and the FR/SR requirements.
++The on-disk encoding of these entities is the cross-invocation contract and is
++specified separately in [contracts/store-format.md](./contracts/store-format.md).
++
++---
++
++## Entity: Store
++
++The whole set of accounts, held in the single file at the operator-supplied
++path (FR-007). In memory it is a plain `dict`; there is no store class
++(Principle IV).
++
++| Field | Type | Rules |
++|---|---|---|
++| `version` | `int` | MUST equal `1`. Any other value → status 5. Present so a future format change is detectable rather than silently misread (Principle II). |
++| `accounts` | `dict[str, Account]` | Keys are usernames and MUST each satisfy the username rules below. At most one entry per username — enforced structurally by the mapping, not by a check. At most 10 000 entries (A-011, SR-006). |
++
++**Constraints**
++
++- **Existence**: created only by `register` (FR-007). A missing file loads as
++  `{"version": 1, "accounts": {}}` *in memory* and is not written to disk by
++  `login`, `unlock`, `passwd` or `delete`.
++- **Size**: the file MUST be at most 8 MiB (8 388 608 bytes), checked from the
++  open file descriptor before any parsing (A-011, SR-006). Over-size → status 5.
++- **Count**: a loaded store with more than 10 000 accounts → status 5. A
++  `register` that would exceed 10 000 → status 5 (see
++  [research R10 note](./research.md#resolved-no-outstanding-needs-clarification)).
++- **Permissions**: owner read/write only, `0o600`, set at creation (SR-008,
++  SC-010).
++- **Atomicity**: replaced as a whole; after any interruption the file holds
++  either the complete old content or the complete new content (FR-009, SC-009).
++- **Validation on load**: every record is validated against the structure,
++  field set and field formats below before any of it is used. A single invalid
++  record fails the whole load under status 5 — never repaired, guessed at or
++  skipped (SR-001).
++
++---
++
++## Entity: Account
++
++One named local identity. In memory a plain `dict`; the username is not a field
++of the record, it is the key that locates it.
++
++| Field | Type | Rules |
++|---|---|---|
++| *(key)* `username` | `str` | 3–32 characters, each of `A–Z a–z 0–9 _`. Compared exactly, case-sensitively, so `Alice` and `alice` are two accounts (FR-011). Violation on input → status 2; violation in a stored key → status 5. |
++| `kdf` | `str` | MUST be exactly `"scrypt"`. Any other value → status 5 (SR-001: allow-list, no guessing). |
++| `n` | `int` | scrypt cost. MUST be a power of two, `2 <= n <= 2**20`. |
++| `r` | `int` | scrypt block size. MUST be `1 <= r <= 32`. |
++| `p` | `int` | scrypt parallelism. MUST be `1 <= p <= 16`. |
++| `dklen` | `int` | derived key length in bytes. MUST be `16 <= dklen <= 64`. |
++| `salt` | `str` | base64 (standard alphabet, padded) of exactly 16 random bytes from `secrets.token_bytes` (SR-005). Fresh per account, and re-generated on every password change. |
++| `hash` | `str` | base64 of exactly `dklen` bytes: `scrypt(password, salt, n, r, p, dklen)`. The password itself is never stored in any form (SR-004). |
++| `failed_logins` | `int` | Consecutive failed `login` attempts, `0 <= failed_logins <= 5`. A value outside that range → status 5. |
++
++**Derived attribute**
++
++| Name | Definition |
++|---|---|
++| `locked` | `failed_logins >= 5`. Not stored — see [research R7](./research.md#r7--lock-state-is-derived-not-stored). |
++
++**Constraints**
++
++- `n`, `r`, `p`, `dklen` are recorded per account so a future parameter
++  increase does not invalidate existing accounts (SR-004). New and changed
++  passwords are written with the current module defaults
++  (`n=2**17, r=8, p=1, dklen=32`); verification always uses the values in the
++  record.
++- `n * r * 128` for a stored record MUST NOT exceed the `maxmem` the tool
++  passes to `scrypt` (192 MiB); a record demanding more → status 5 rather than
++  an unbounded allocation (SR-006).
++- Two accounts given the same password have different salts and therefore
++  different `hash` values (SC-006) — guaranteed by generating the salt per
++  account rather than per store.
++- Unknown extra fields in a record → status 5. The field set is an allow-list,
++  not a minimum (SR-001).
++
++---
++
++## Entity: Credential attempt
++
++One password supplied on stdin for one invocation. Never persisted, never
++echoed, never written to a temporary file (SR-004, SR-009, SC-005). It exists
++only as a local `str` for the duration of one derivation.
++
++| Property | Rule |
++|---|---|
++| Source | One line of `sys.stdin.buffer`, in the order the command documents (FR-002). Never a command-line argument (FR-002). |
++| Line size | At most 4 096 bytes including the terminator that is then stripped; longer → status 2, refused rather than truncated (FR-014, SR-006). |
++| Encoding | UTF-8. Undecodable bytes → status 2 (A-009, [research R5](./research.md#r5--reading-passwords-from-stdin-under-a-byte-cap-fr-002-fr-014-sr-006-a-009-a-010)). |
++| Terminator | One trailing `\n`, then one preceding `\r`, stripped and not part of the password (A-009). |
++| Length when **being set** (`register`, new password of `passwd`) | 12–1 024 characters, counted after decoding. Outside that → status 2 (FR-012, A-011). |
++| Length when **being verified** (`login`, `delete`, current password of `passwd`) | Not range-checked; any decodable in-limit line is simply compared, and a mismatch — including from an over-long or empty password — is status 1 (spec edge cases). |
++| Absence | Stream ends before the required line → status 2, nothing changed (A-010). |
++| Surplus | Lines beyond what the command needs are never read, so they are ignored without cost (spec edge case). |
++
++---
++
++## State transitions
++
++`failed_logins` is the only mutable account state; the password material is
++replaced wholesale by `passwd`.
++
++```text
++                       register (12–1024 char password)
++                                   │
++                                   ▼
++                         ┌───────────────────┐
++         login OK ──────▶│  failed_logins=0  │◀────── unlock, passwd OK
++         (reset)         │     (unlocked)    │        (reset + relock clear)
++                         └───────────────────┘
++                                   │ login fails
++                                   ▼
++                      ┌─────────────────────────┐
++                      │  failed_logins = 1..4   │  login still possible;
++                      │       (unlocked)        │  each failure → status 1
++                      └─────────────────────────┘
++                                   │ 5th consecutive failure
++                                   │ (that attempt still reports status 1)
++                                   ▼
++                      ┌─────────────────────────┐
++                      │   failed_logins = 5     │  login → status 4 always,
++                      │        (LOCKED)         │  correct password included
++                      └─────────────────────────┘
++                                   │ unlock (no password) or passwd (correct current)
++                                   ▼
++                            failed_logins = 0
++
++   delete (correct password, locked or not) ──▶ record removed entirely
++```
++
++**Transition rules**
++
++| Trigger | Precondition | Effect on `failed_logins` | Status |
++|---|---|---|---|
++| `register` | username absent, password 12–1 024 chars | set to `0` | 0 |
++| `register` | username present | unchanged | 3 |
++| `login` | locked (`>= 5`) | **unchanged** — the lock is reported before the password is considered, so a locked account's count does not grow (FR-017, scenario 2.4) | 4 |
++| `login` | unlocked, password matches | reset to `0` (FR-015, A-002) | 0 |
++| `login` | unlocked, password mismatches | `+1`, capped by the lock taking effect at 5 (FR-015, FR-016) | 1 |
++| `login` | username absent | no record to change; dummy derivation performed for timing parity | 1 |
++| `unlock` | username present | reset to `0`, lock cleared, succeeds whether locked or not (FR-018, A-007) | 0 |
++| `unlock` | username absent | no change | 3 |
++| `passwd` | username present, current password matches, new password 12–1 024 chars | reset to `0`, lock cleared (FR-019) — a password change is also a recovery path; new salt generated | 0 |
++| `passwd` | current password mismatches | **unchanged** — `passwd` failures do not count toward the login lock (A-005) | 1 |
++| `passwd` | current matches, new password out of range | unchanged, stored password unchanged | 2 |
++| `passwd` | username absent | no change | 3 |
++| `delete` | username present, password matches (locked or not, FR-019) | record removed | 0 |
++| `delete` | password mismatches | unchanged (A-005: no increment) | 1 |
++| `delete` | username absent | no change | 3 |
++
++**Invariant**: every transition that ends in a non-zero status leaves the
++stored account set and every stored password exactly as it was, with the single
++exception of the `login` failure-count increment (FR-006, SC-008). That
++exception is also the only case in which a failing command writes the store at
++all.
+diff --git a/specs/001-user-accounts-cli/plan.md b/specs/001-user-accounts-cli/plan.md
+new file mode 100644
+index 0000000..2c54418
+--- /dev/null
++++ b/specs/001-user-accounts-cli/plan.md
+@@ -0,0 +1,272 @@
++# Implementation Plan: Local User Account Manager (CLI)
++
++**Branch**: `001-user-accounts-cli` | **Date**: 2026-11-04 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/001-user-accounts-cli/spec.md`
++
++## Summary
++
++A single-invocation CLI that keeps named local accounts with passwords in one
++JSON file, invoked as `python -m accounts --store PATH COMMAND USERNAME`, with
++passwords read only from stdin and every outcome reported as one of six
++documented exit statuses.
++
++Technical approach: a flat, six-module package under `src/accounts/` with no
++classes beyond one error type. Passwords are stored as `hashlib.scrypt`
++digests at the OWASP-minimum work factor with a per-account 16-byte
++`secrets` salt and the parameters recorded per record; digests are compared
++with `hmac.compare_digest`. The store is one JSON document validated
++field-by-field against an allow-list on every load, size-capped before parsing,
++and replaced atomically by writing a `0o600` temporary file in the store's own
++directory and `os.replace`-ing it over the target. Every command holds an
++exclusive `fcntl.flock` on the store's *directory* — not the file, which may
++not exist yet and whose inode the rename swaps — for the whole
++read–modify–write, which is what stops concurrent failed logins from losing a
++failure-count increment. Lock state is derived from the failure count rather
++than stored alongside it.
++
++Full rationale and measurements: [research.md](./research.md).
++
++## Technical Context
++
++**Language/Version**: Python 3.11+ (A-013, confirmed by the planning input).
++Development and measurement host: CPython 3.13.17, Linux 6.18, x86-64.
++
++**Primary Dependencies**: none at runtime — standard library only (A-013,
++Principle I). Modules used: `argparse`, `base64`, `fcntl`, `hashlib`, `hmac`,
++`json`, `os`, `re`, `secrets`, `sys`. Development only: `pytest`, declared in
++`requirements-dev.txt` and never imported by shipped code.
++
++**Storage**: one JSON file at the operator-supplied path, created on first
++`register`, replaced atomically thereafter. Format contract:
++[contracts/store-format.md](./contracts/store-format.md).
++
++**Testing**: `pytest`, driving the real executable in a subprocess with piped
++stdin/stdout/stderr so the assertions are against the operator-visible
++contract. `pytest.ini` sets `pythonpath = src` and `testpaths = tests`; the
++1 000-account and crash-loop tests carry a `slow` marker.
++
++**Target Platform**: POSIX (Linux, macOS). `fcntl.flock` and `os.replace` are
++both hard requirements; there is no Windows support in scope.
++
++**Project Type**: single-project CLI tool. No network, no service, no UI
++(A-012).
++
++**Performance Goals**: every command under 1 s on a 1 000-account store
++(FR-010, SC-007). Measured: store load+save for 1 000 accounts is 3.0 ms
++combined, so the budget is dominated by the deliberate KDF cost of 0.369 s per
++derivation — `passwd` performs two. See
++[research R8](./research.md#r8--performance-budget-against-sc-007) and the
++flagged note below.
++
++**Constraints**: password 12–1 024 characters; input line ≤ 4 096 bytes; store
++file ≤ 8 MiB; ≤ 10 000 accounts (A-011). scrypt `maxmem` 192 MiB bounds
++per-invocation memory. No password in any argument, output stream, temporary
++file, or repository file including fixtures.
++
++**Scale/Scope**: single machine, single operator, 5 commands, 6 exit statuses,
++~1 000 accounts typical and 10 000 maximum. 19 functional, 9 security and 11
++success-criteria requirements to cover.
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++Constitution version 1.0.0.
++
++| Gate | Pre-Phase 0 | Post-Phase 1 | Evidence |
++|---|---|---|---|
++| **I. Standard Library Only** — no third-party runtime import; runs on a bare `python3` with no install step; dev tools declared separately | PASS | **PASS** | Every mechanism chosen in Phase 0 is stdlib: `hashlib.scrypt`, `secrets`, `hmac.compare_digest`, `json`, `fcntl.flock`, `os.replace`, `argparse`. `pytest` is dev-only, declared in `requirements-dev.txt`, never imported by `src/`. Run instruction is `PYTHONPATH=src python -m accounts` — no install. |
++| **II. Fail Loudly** — clear actionable message, non-zero exit, states expected/received/where, no broad suppression, no fallback or silent coercion | PASS | **PASS** | Six-status contract with a message table in [contracts/cli-contract.md](./contracts/cli-contract.md); every non-zero status writes one stderr line naming what was expected and what was received. A malformed store is status 5, never repaired, skipped or treated as empty ([store-format.md](./contracts/store-format.md#validation-discipline)). An over-long password is refused, never truncated. `except` clauses are narrow (`OSError`, `JSONDecodeError`, `UnicodeDecodeError`, `RecursionError`) and each one maps to a status rather than to a default. One deliberate exception-suppression is recorded in Complexity Tracking. |
++| **III. Every Requirement Is Testable** — every FR and SR maps to a named automated test; error paths assert message *and* status | PASS | **PASS** | [Requirement-to-test mapping](#requirement-to-test-mapping) below covers FR-001…019, SR-001…009 and SC-001…011 with no unmapped row. Tests assert exit status, stdout and stderr together. Security requirements are tested as negatives (rejected input) as well as positives. |
++| **IV. Simplicity** — smallest design, functions over classes, flat over nested, stdlib over hand-rolled, nothing for anticipated needs | PASS | **PASS** | Six modules, five with code, no classes except one exception type. Store and account are plain `dict`s, not models. Lock state is *derived* rather than stored, removing a field and a whole malformed-store case ([research R7](./research.md#r7--lock-state-is-derived-not-stored)). `argparse` chosen over hand-rolled parsing per the stdlib preference ([research R10](./research.md#r10--argument-parsing)). No config system, no plugin layer, no abstraction over the KDF, no "future" fields. Three justified deviations are recorded in Complexity Tracking. |
++| **V. Secure by Default (NON-NEGOTIABLE)** — every applicable baseline rule named, mapped to an enforcing boundary with its stdlib mechanism, and tested | PASS | **PASS** | The spec enumerates all nine rules as SR-001…009 and justifies the one non-applicable part (SR-003, path confinement). [Security mapping](#security-requirement-mapping) gives the enforcing module, function, stdlib mechanism and test id for each. No rule is weakened: the KDF is held at the OWASP minimum work factor even where that costs performance headroom. |
++
++**Planning-stage obligation** (constitution, Security Requirements §Planning):
++"map every security requirement to the module, function, or boundary that
++enforces it, name the standard-library mechanism used, and record the
++identifiers of the tests that will prove it" — discharged by the
++[Security requirement mapping](#security-requirement-mapping) table.
++
++**Gate result**: PASS before Phase 0 and PASS after Phase 1 design. No
++unjustified violation; nothing blocks `/speckit-tasks`.
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/001-user-accounts-cli/
++├── spec.md              # Feature specification (/speckit-specify output)
++├── plan.md              # This file (/speckit-plan output)
++├── research.md          # Phase 0 output — mechanism decisions with measurements
++├── data-model.md        # Phase 1 output — entities, fields, state transitions
++├── quickstart.md        # Phase 1 output — run and validation guide (V1…V12)
++├── contracts/           # Phase 1 output
++│   ├── cli-contract.md  #   invocation, stdin protocol, exit statuses, messages
++│   └── store-format.md  #   on-disk format, validation and write discipline
++└── tasks.md             # Phase 2 output (/speckit-tasks — NOT created here)
++```
++
++### Source Code (repository root)
++
++```text
++src/
++└── accounts/
++    ├── __init__.py       # package marker and version string; no logic
++    ├── __main__.py       # `python -m accounts` entry: sys.exit(cli.main(sys.argv[1:]))
++    ├── cli.py            # argv parsing, stdin reading, the five commands, exit statuses, messages
++    ├── store.py          # directory lock, load+validate, atomic 0o600 write, size/count limits
++    ├── crypto.py         # scrypt parameters, salt generation, hash, constant-time verify, dummy verify
++    ├── validation.py     # username and password rules, the four A-011 limits
++    └── errors.py         # AccountsError(status, message) — the only class in the package
++
++tests/
++├── conftest.py              # tmp store path, subprocess runner, store-builder fixtures
++├── test_cli_contract.py     # FR-001…005: usage, unknown command, arg shape, stream discipline
++├── test_register.py         # US1 scenarios 1, 5, 6, 7
++├── test_login_lockout.py    # US1 scenarios 2-4, all of US2
++├── test_passwd.py           # US3 scenarios
++├── test_delete.py           # US4 scenarios
++├── test_store_format.py     # FR-007…009, store validation, limits, permissions, atomicity
++├── test_security.py         # SR-001…009 negatives, leakage, enumeration parity
++├── test_concurrency.py      # SR-007 interleaving (slow)
++├── test_crash_safety.py     # SC-009 SIGKILL loop (slow)
++├── test_performance.py      # FR-010, SC-007 at 1 000 accounts (slow)
++└── test_example_sequence.py # SC-011 worked sequence, line for line
++
++pytest.ini                   # pythonpath = src, testpaths = tests, slow marker
++requirements-dev.txt          # pytest — development dependency only (Principle I)
++```
++
++**Structure Decision**: single project, flat package. A-013 fixes the package
++name, its location under `src/`, and `python -m accounts` as the entry point,
++so `src/accounts/` with `__main__.py` is given rather than chosen. Principle IV
++prefers a module to a package, but the mandated `python -m accounts` form
++requires a package; within it the layout is as flat as the security mapping
++allows — the split into `cli` / `store` / `crypto` / `validation` exists because
++the constitution's planning stage requires each security requirement to name
++*the boundary that enforces it*, and these are those four boundaries (request
++handling, persistence, cryptography, input rules). No `models/`, `services/` or
++`lib/` layering: there is nothing to put in them. Tests are split by user story
++and by cross-cutting concern so each story's "Independent Test" from the spec
++is a single runnable file.
++
++## Security requirement mapping
++
++Required by the constitution's Planning-stage obligation. Test ids are
++`file::test` and are the names `/speckit-tasks` should carry forward.
++
++| SR | Enforcing module / function | Stdlib mechanism | Test id |
++|---|---|---|---|
++| **SR-001** all input untrusted, allow-list, validate on the way in | `cli.parse_args` (command), `validation.validate_username`, `validation.check_settable_password`, `store.load` → `store._validate_record` | `argparse` `choices=`, `re.fullmatch` on `[A-Za-z0-9_]{3,32}`, explicit `type(v) is int` field checks | `test_cli_contract.py::test_sr001_unknown_command_rejected`, `test_security.py::test_sr001_record_field_allowlist`, `::test_sr001_unknown_record_field_is_status_5`, `::test_sr001_invalid_record_never_skipped_or_repaired` |
++| **SR-002** no injection by concatenation | `store.dump` / `store.load` (structured encoding only), `cli.sanitize_for_message` | `json.dumps(ensure_ascii=True)` / `json.loads`; no shell, no query, no markup anywhere in the feature | `test_security.py::test_sr002_delimiter_in_username_cannot_split_record`, `::test_sr002_control_chars_not_echoed_raw_to_stderr` |
++| **SR-003** path containment N/A; temp-file discipline applies | `store.atomic_write` | `os.path.realpath` + `os.open(..., O_WRONLY\|O_CREAT\|O_EXCL, 0o600)` with `secrets.token_hex(8)` in the name; `os.unlink` on failure | `test_store_format.py::test_sr003_temp_file_in_store_directory_only`, `test_security.py::test_sr003_no_temp_file_survives_failure`, `::test_sr003_temp_name_unpredictable_and_exclusive` |
++| **SR-004** credential storage | `crypto.hash_password`, `crypto.verify`; no password crosses into `store` or `cli` output | `hashlib.scrypt(n=2**17, r=8, p=1, dklen=32, maxmem=192MiB)`, `secrets.token_bytes(16)` per account | `test_security.py::test_sr004_password_absent_from_store_bytes`, `::test_sr004_params_recorded_per_record`, `::test_sr004_no_plaintext_in_repo_fixtures` |
++| **SR-005** CSPRNG and constant-time comparison | `crypto.new_salt`, `crypto.verify` | `secrets.token_bytes`, `hmac.compare_digest` | `test_security.py::test_sr005_salts_unique_across_accounts`, `::test_sr005_verify_uses_constant_time_compare` |
++| **SR-006** resource limits, bounded parsing | `cli.read_password_line` (4 096 B), `validation` limits, `store.load` (8 MiB pre-parse via `fstat`, 10 000 accounts), `crypto` (`maxmem`) | `BufferedReader.readline(4097)`, `os.fstat(fd).st_size`, caught `RecursionError`, no regex in the parse path | `test_security.py::test_sr006_overlong_line_refused_not_truncated`, `::test_sr006_oversize_store_refused_before_parsing`, `::test_sr006_deeply_nested_store_is_status_5`, `test_store_format.py::test_sr006_account_count_cap` |
++| **SR-007** authorisation at the point of operation; holds under concurrency | `cli.cmd_passwd` / `cmd_delete` / `cmd_login` (verify inside the same invocation), `store.locked_store` context manager | `fcntl.flock(dir_fd, LOCK_EX)` held across the whole read–modify–write | `test_passwd.py::test_sr007_wrong_current_password_blocks_change`, `test_concurrency.py::test_sr007_concurrent_failures_cannot_exceed_five`, `::test_sr007_concurrent_registers_do_not_lose_an_account` |
++| **SR-008** least-privilege files, set at creation | `store.atomic_write` | explicit `0o600` mode argument to `os.open`, preserved across `os.replace` | `test_store_format.py::test_sr008_store_mode_600_on_create`, `::test_sr008_store_mode_600_after_passwd_replace` |
++| **SR-009** no sensitive data in output | `cli` message table + `cli.sanitize_for_message`; `errors.AccountsError` carries only pre-redacted text | fixed strings for `invalid credentials` / `account locked`; lengths and counts only; no traceback reaches a stream | `test_security.py::test_sr009_no_secret_material_in_either_stream`, `::test_sr009_unknown_and_wrong_password_identical_output`, `::test_sr009_no_traceback_on_any_failure_path`, `::test_sr009_store_path_is_the_only_path_echoed` |
++
++## Requirement-to-test mapping
++
++Principle III makes an unmapped requirement a blocker. No row is empty.
++
++| Requirement | Test id |
++|---|---|
++| FR-001 invocation form, five commands | `test_cli_contract.py::test_fr001_invocation_form`, `::test_fr001_five_commands_accepted` |
++| FR-002 no password in argv; stdin one per line | `test_cli_contract.py::test_fr002_stdin_protocol_per_command`, `test_security.py::test_fr002_no_password_accepted_as_argument` |
++| FR-003 exactly six statuses | `test_cli_contract.py::test_fr003_every_status_reachable`, `::test_fr003_no_other_status_observed` |
++| FR-004 success output and silent stderr | `test_cli_contract.py::test_fr004_success_output_per_command` |
++| FR-005 failure message to stderr, empty stdout, exact fixed strings | `test_cli_contract.py::test_fr005_failure_streams`, `::test_fr005_exact_fixed_messages` |
++| FR-006 failing operation changes nothing | `test_store_format.py::test_fr006_store_byte_identical_after_each_failure` |
++| FR-007 single file, created only by `register` | `test_store_format.py::test_fr007_register_creates_store`, `::test_fr007_other_commands_create_nothing` |
++| FR-008 readable by later invocations | `test_store_format.py::test_fr008_round_trip_across_invocations` |
++| FR-009 all-at-once visibility | `test_crash_safety.py::test_fr009_store_old_or_new_never_mixed` |
++| FR-010 1 000 accounts under a second | `test_performance.py::test_fr010_thousand_account_store` |
++| FR-011 username rules, case-sensitive | `test_register.py::test_fr011_username_length_and_charset`, `::test_fr011_case_sensitive_distinct_accounts` |
++| FR-012 password length when set | `test_register.py::test_fr012_password_min_length`, `test_passwd.py::test_fr012_new_password_min_length` |
++| FR-013 verify current password first | `test_login_lockout.py::test_fr013_login_verifies`, `test_passwd.py::test_fr013_verify_before_change`, `test_delete.py::test_fr013_verify_before_removal` |
++| FR-014 four enforced maxima | `test_security.py::test_sr006_overlong_line_refused_not_truncated`, `test_register.py::test_fr014_password_max_length`, `test_store_format.py::test_sr006_account_count_cap`, `test_security.py::test_sr006_oversize_store_refused_before_parsing` |
++| FR-015 count increments and resets | `test_login_lockout.py::test_fr015_failure_increments`, `::test_fr015_success_resets` |
++| FR-016 lock at five; fifth still status 1 | `test_login_lockout.py::test_fr016_fifth_failure_is_status_1`, `::test_fr016_sixth_attempt_is_locked` |
++| FR-017 locked login reports 4 regardless of password | `test_login_lockout.py::test_fr017_correct_password_refused_when_locked`, `::test_fr017_lock_reported_before_password_considered` |
++| FR-018 `unlock` clears, needs no password, idempotent | `test_login_lockout.py::test_fr018_unlock_restores_access`, `::test_fr018_unlock_on_unlocked_account_succeeds`, `::test_fr018_unlock_reads_no_stdin` |
++| FR-019 `passwd`/`delete` work when locked; `passwd` resets | `test_passwd.py::test_fr019_passwd_works_on_locked_account`, `::test_fr019_passwd_resets_failure_count`, `test_delete.py::test_fr019_delete_works_on_locked_account` |
++| SR-001 … SR-009 | see [security mapping](#security-requirement-mapping) |
++| SC-001 every status reachable and asserted | `test_cli_contract.py::test_fr003_every_status_reachable` |
++| SC-002 cross-invocation persistence | `test_store_format.py::test_fr008_round_trip_across_invocations` |
++| SC-003 no success after five failures until unlock | `test_login_lockout.py::test_sc003_no_guess_succeeds_while_locked` |
++| SC-004 wrong password and unknown account indistinguishable | `test_security.py::test_sr009_unknown_and_wrong_password_identical_output`, `::test_sc004_timing_parity_for_unknown_account` |
++| SC-005 password nowhere on disk or in output | `test_security.py::test_sr004_password_absent_from_store_bytes`, `::test_sc005_no_password_in_any_temp_file` |
++| SC-006 same password, different stored material | `test_security.py::test_sc006_same_password_different_digests` |
++| SC-007 under a second; rejection timing independent of the wrong part | `test_performance.py::test_sc007_each_command_under_one_second`, `::test_sc007_store_scaling_component_negligible`, `test_security.py::test_sc007_rejection_timing_independent_of_mismatch_position` |
++| SC-008 failures leave the store as it was | `test_store_format.py::test_fr006_store_byte_identical_after_each_failure`, `::test_sc008_only_exception_is_login_failure_count` |
++| SC-009 kill mid-write leaves a valid store | `test_crash_safety.py::test_sc009_sigkill_loop_store_always_valid` |
++| SC-010 owner-only store | `test_store_format.py::test_sr008_store_mode_600_on_create` |
++| SC-011 documented sequence reproduced line for line | `test_example_sequence.py::test_sc011_worked_sequence` |
++
++## Check ordering
++
++The spec pins several orderings and implies others; getting them wrong silently
++changes which status an operator sees. The resolved order is specified in
++[research R6](./research.md#r6--ordering-of-checks-resolving-requirement-interactions)
++and asserted by `test_cli_contract.py::test_r6_check_order_precedence`. The two
++non-obvious points:
++
++- **`login` checks the lock before the password** (FR-017, scenario 2.4), so a
++  locked account's failure count never grows past 5.
++- **`passwd` authenticates before validating the new password** (scenario 3.2:
++  a wrong current password with "any new password" is status 1), whereas
++  `register` validates the password before reading the store (scenario 1.6).
++  This asymmetry is the spec's, not an implementation accident.
++
++## Spec gaps flagged (not blocking)
++
++Three items were decided during planning so that design and implementation can
++proceed; each is a candidate for `/speckit-clarify` and none changes the
++architecture.
++
++1. **`register` into a full store has no status in FR-003.** A-011 caps a store
++   at 10 000 accounts but the status table has no row for "cannot accept another
++   account". Decided: **status 5**, because statuses 1–4 are each defined for a
++   specific account-level outcome while this is a store-level refusal to write,
++   and SR-006 frames the account cap as a store limit beside the file-size cap.
++2. **SC-011 refers to an example sequence the recorded feature request does not
++   contain.** The spec's Input field has no worked example with outputs, so
++   there is nothing to reproduce "line for line". A worked sequence is supplied
++   in [contracts/cli-contract.md](./contracts/cli-contract.md#worked-example-sequence)
++   and `test_example_sequence.py` asserts it; if the operator has a specific
++   sequence in mind, substituting it is a one-file change.
++3. **`passwd` has only ~1.3× headroom against SC-007's absolute 1 s bound**,
++   because two deliberate scrypt derivations (0.369 s each here) are inherent to
++   it. Keeping the OWASP-minimum work factor was chosen over buying margin by
++   weakening a NON-NEGOTIABLE principle; the hardware-independent
++   store-scaling assertion is tested alongside the absolute one. If the absolute
++   bound is binding on the target hardware, the lever is the work factor and
++   that is an SR-004 decision, not an implementation detail. See
++   [research R1](./research.md#r1--password-hashing-algorithm-and-parameters)
++   and [R8](./research.md#r8--performance-budget-against-sc-007).
++
++**Non-applicability already justified in the spec**: SR-003's path-containment
++rule does not apply, because naming the store file is the operator's explicit
++purpose in invoking the tool. The temp-file half of that rule does apply and is
++enforced. Constitution Principle V requires exactly this explicit statement
++rather than silence.
++
++## Complexity Tracking
++
++> Deviations toward added structure, each with the requirement that forces it
++> (Principle IV).
++
++| Violation | Why Needed | Simpler Alternative Rejected Because |
++|---|---|---|
++| A **package** (`src/accounts/` with `__main__.py`) rather than a single module | A-013 mandates `python -m accounts` with the package under `src/`; `-m` on a plain module cannot provide the stated invocation form | A single `accounts.py` would be the Principle IV default, but it cannot satisfy the stated invocation constraint |
++| **Six modules** inside the package rather than one | The constitution's Planning-stage rule requires every security requirement to be mapped to "the module, function, or boundary that enforces it"; `cli` / `store` / `crypto` / `validation` *are* those four boundaries, and `errors` exists only to let all four raise one status-carrying error without an import cycle | One 600-line module would blur the four security boundaries the mapping has to name, and the mapping is a hard gate, not a preference. Merging `errors` into any other module creates a cycle (`store` and `cli` both raise and both import `validation`) |
++| **One class** (`errors.AccountsError`) in a package that otherwise uses only functions and dicts | Principle II requires every failure to carry both a message and an exit status to the single place that writes them; an exception with two attributes is the stdlib-idiomatic carrier | Returning `(status, message)` tuples through every call site would thread error plumbing through `store` and `crypto` and invite a silently dropped status — exactly the silent-wrong-answer class Principle II calls most severe |
++| A **discarded scrypt derivation** on `login` against an unknown username | SC-004 and SR-009 require a wrong password and an unknown account to be indistinguishable; without it the two differ by ~0.37 s, which enumerates accounts by stopwatch | Returning early is simpler and faster but leaves a timing oracle that defeats the requirement the fixed message exists to satisfy |
++| **Catching `RecursionError`** during store parsing — an exception class normally left to propagate | SR-006 requires bounded parsing; `json`'s C scanner signals pathological nesting this way and the alternative is a traceback on stderr, which SR-009 forbids | Letting it propagate prints a traceback and exits with an undocumented status, violating FR-003 and SR-009 together. The catch is narrow (one call site), maps to status 5, and `test_security.py::test_sr006_deeply_nested_store_is_status_5` asserts the surviving behaviour, as Principle II requires |
++
++No entry here is a weakening of Principle V; the two security-related entries
++*add* a control rather than relax one.
+diff --git a/specs/001-user-accounts-cli/quickstart.md b/specs/001-user-accounts-cli/quickstart.md
+new file mode 100644
+index 0000000..82eff25
+--- /dev/null
++++ b/specs/001-user-accounts-cli/quickstart.md
+@@ -0,0 +1,238 @@
++# Quickstart & Validation Guide
++
++**Feature**: `001-user-accounts-cli` | **Date**: 2026-11-04
++
++How to run the tool and how to prove it satisfies the spec. This is a
++validation guide — the behaviour it checks is defined in
++[contracts/cli-contract.md](./contracts/cli-contract.md) and
++[contracts/store-format.md](./contracts/store-format.md), and the
++implementation steps belong in `tasks.md`.
++
++## Prerequisites
++
++- Python **3.11 or newer** (`python3 -VV`). Verified on 3.13.17.
++- No runtime install step and no third-party runtime package (Principle I).
++- For the test suite only: `pytest` (`pip install -r requirements-dev.txt`).
++- A POSIX filesystem. `fcntl.flock` and `os.replace` are both required; the
++  tool targets Linux and macOS.
++
++## Running it
++
++```bash
++export PYTHONPATH=src           # no install step; src/ on the path is all it needs
++python -m accounts --store ./demo.store register alice
++```
++
++Every command reads the passwords it needs from stdin, one per line, and never
++from an argument. The minimum password length is 12 characters.
++
++```bash
++# register, then verify
++printf 'correct-horse-battery\n' | python -m accounts --store ./demo.store register alice
++printf 'correct-horse-battery\n' | python -m accounts --store ./demo.store login alice   # -> "ok", exit 0
++
++# change a password: current first, then new
++printf 'correct-horse-battery\nnew-password-here\n' \
++  | python -m accounts --store ./demo.store passwd alice
++
++# unlock takes no password at all
++python -m accounts --store ./demo.store unlock alice < /dev/null
++
++# remove an account
++printf 'new-password-here\n' | python -m accounts --store ./demo.store delete alice
++```
++
++Branch on the exit status, not on the output:
++
++```bash
++printf "$CANDIDATE\n" | python -m accounts --store ./demo.store login "$USER_NAME"
++case $? in
++  0) echo "authenticated" ;;
++  1) echo "rejected" ;;
++  4) echo "locked - run unlock" ;;
++  *) echo "request or store problem" ;;
++esac
++```
++
++## Running the test suite
++
++```bash
++pip install -r requirements-dev.txt
++pytest                      # pytest.ini sets pythonpath=src and testpaths=tests
++pytest -m "not slow"        # skips the 1000-account performance and crash-loop tests
++```
++
++The suite drives the real executable in a subprocess with piped streams, so it
++asserts the contract an operator actually gets — exit status, stdout and stderr
++— rather than internal function returns. Every test names the FR/SR/SC
++identifier it covers in its own name or docstring (Principle III).
++
++## Validation scenarios
++
++Each scenario below is an end-to-end check that a requirement holds. All are
++automated in the suite; the manual commands are given so a reviewer can
++reproduce any of them by hand.
++
++### V1 — Register and verify across invocations (US1, FR-008, SC-002)
++
++```bash
++rm -f ./v1.store
++printf 'correct-horse-battery\n' | python -m accounts --store ./v1.store register alice; echo "exit=$?"
++printf 'correct-horse-battery\n' | python -m accounts --store ./v1.store login alice;    echo "exit=$?"
++printf 'wrong-password-here\n'   | python -m accounts --store ./v1.store login alice;    echo "exit=$?"
++```
++
++**Expect**: `registered alice` / exit 0 and the file now exists; `ok` / exit 0;
++`invalid credentials` on stderr / exit 1.
++
++### V2 — Unknown account is indistinguishable from a wrong password (SC-004, SR-009, A-001)
++
++```bash
++printf 'any-password-here-ok\n' | python -m accounts --store ./v1.store login nobody_here
++```
++
++**Expect**: byte-identical stderr (`invalid credentials`), identical exit
++status 1 and identical empty stdout to V1's wrong-password case. The automated
++version also compares wall-clock times and asserts they are within the same
++order of magnitude, since the unknown-account path performs a discarded
++derivation for exactly this reason.
++
++### V3 — Lockout and recovery (US2, FR-015 … FR-018, SC-003)
++
++```bash
++for i in 1 2 3 4; do printf 'wrong-password-here\n' \
++  | python -m accounts --store ./v1.store login alice; echo "exit=$?"; done
++printf 'correct-horse-battery\n' | python -m accounts --store ./v1.store login alice   # still works, resets count
++for i in 1 2 3 4 5; do printf 'wrong-password-here\n' \
++  | python -m accounts --store ./v1.store login alice; echo "exit=$?"; done            # 5th locks
++printf 'correct-horse-battery\n' | python -m accounts --store ./v1.store login alice   # refused
++python -m accounts --store ./v1.store unlock alice < /dev/null; echo "exit=$?"
++printf 'correct-horse-battery\n' | python -m accounts --store ./v1.store login alice   # works again
++```
++
++**Expect**: four × exit 1 then `ok`/0 (success resets the count); five × exit 1
++with the fifth still reported as exit 1, not 4; then `account locked` / exit 4
++*for the correct password*; `unlock` silent / exit 0; finally `ok` / 0.
++
++### V4 — Validation and conflict statuses (FR-003, FR-011, FR-012)
++
++```bash
++printf 'correct-horse-battery\n' | python -m accounts --store ./v1.store register ab          # 2: username too short
++printf 'correct-horse-battery\n' | python -m accounts --store ./v1.store register 'bad name'  # 2: bad character
++printf 'short\n'                 | python -m accounts --store ./v1.store register bob         # 2: password too short
++printf 'correct-horse-battery\n' | python -m accounts --store ./v1.store register alice       # 3: exists
++python -m accounts --store ./v1.store unlock nobody_here < /dev/null                          # 3: unknown
++python -m accounts --store ./v1.store frobnicate alice < /dev/null                            # 2: unknown command
++python -m accounts --store ./v1.store login alice < /dev/null                                 # 2: missing input
++```
++
++**Expect**: the exit statuses in the comments, each with its message on stderr
++and nothing on stdout, and no account created or altered by any of them.
++
++### V5 — No secret ever leaves memory (SR-004, SR-009, SC-005, SC-006)
++
++```bash
++PW='correct-horse-battery'
++printf '%s\n' "$PW" | python -m accounts --store ./v5.store register carol
++grep -c -- "$PW" ./v5.store || echo "0 occurrences - good"
++ls -a .                                   # no leftover .tmp file
++printf '%s\n' "$PW" | python -m accounts --store ./v5.store register dave_x
++python -c "import json;a=json.load(open('./v5.store'))['accounts'];print(a['carol']['hash']!=a['dave_x']['hash'], a['carol']['salt']!=a['dave_x']['salt'])"
++```
++
++**Expect**: zero occurrences of the password in the store, in stdout and in
++stderr; no temporary file left behind; and `True True` — two accounts with the
++*same* password have different salts and different digests (SC-006).
++
++### V6 — Owner-only permissions (SR-008, SC-010)
++
++```bash
++stat -c '%a' ./v5.store        # macOS: stat -f '%Lp'
++```
++
++**Expect**: `600`. The automated test also asserts the mode immediately after a
++`passwd`, since the file is replaced by a rename and must not inherit a wider
++mode from the temporary file.
++
++### V7 — Malformed store fails loudly and changes nothing (SR-001, Principle II)
++
++```bash
++cp ./v5.store ./v7.store
++printf '{"version":1,"accounts":{"carol":{"kdf":"argon2"}}}' > ./v7.bad
++cp ./v7.bad ./v7.copy
++printf 'correct-horse-battery\n' | python -m accounts --store ./v7.bad login carol; echo "exit=$?"
++cmp ./v7.bad ./v7.copy && echo "unchanged - good"
++printf 'not json at all' > ./v7.trunc
++printf 'correct-horse-battery\n' | python -m accounts --store ./v7.trunc register carol; echo "exit=$?"
++```
++
++**Expect**: exit 5 with a structural reason on stderr in both cases, the
++malformed file byte-identical afterwards, and no account created. The tool never
++starts from an empty store and never partially overwrites the existing one.
++
++### V8 — Atomic write survives a kill (FR-009, SC-009)
++
++Automated as a loop that starts a `passwd` and sends `SIGKILL` after a random
++sub-millisecond delay, repeatedly; after each kill the store is loaded and every
++account that existed beforehand is verified again.
++
++**Expect**: in every trial the store still parses and still verifies every
++account it held before — it is either fully in its old state or fully in its new
++one, never a mixture and never empty.
++
++### V9 — Concurrent invocations cannot dodge the lockout (SR-007)
++
++Automated: register an account, then launch 20 concurrent `login` attempts with
++the *wrong* password against the same store, wait for all of them, then try the
++**correct** password.
++
++**Expect**: the correct password is refused with `account locked` / exit 4 — no
++failure-count increment was lost to an interleaving. The stored count is 5, not
++some smaller number.
++
++### V10 — Scale and timing (FR-010, SC-007)
++
++```bash
++pytest -m slow -k performance
++```
++
++**Expect**: a store built with 1 000 accounts; every command completes in under
++one second; and the store-scaling component is negligible — the same command
++against a 1-account store and a 1 000-account store differ by under 100 ms.
++Note the `passwd` headroom caveat in
++[research R8](./research.md#r8--performance-budget-against-sc-007).
++
++### V11 — Unusual password content round-trips (spec edge cases, A-009)
++
++```bash
++printf 'pâss wörd — ünïcode ✓\n' | python -m accounts --store ./v11.store register eve_x
++printf 'pâss wörd — ünïcode ✓\n' | python -m accounts --store ./v11.store login eve_x
++printf 'pâss wörd — ünïcode ✓'   | python -m accounts --store ./v11.store login eve_x   # no trailing newline
++```
++
++**Expect**: `registered eve_x`/0, then `ok`/0 twice — spaces, punctuation and
++non-ASCII characters are all accepted and verify byte-for-byte, and a missing
++final terminator makes no difference.
++
++### V12 — Case-sensitive usernames (FR-011)
++
++```bash
++printf 'correct-horse-battery\n' | python -m accounts --store ./v12.store register alice
++printf 'different-password-x\n'  | python -m accounts --store ./v12.store register Alice
++printf 'different-password-x\n'  | python -m accounts --store ./v12.store login Alice
++```
++
++**Expect**: both registrations succeed (exit 0) — `Alice` and `alice` are two
++distinct accounts — and each verifies only its own password.
++
++## Requirement coverage
++
++Every FR, SR and SC identifier maps to at least one automated test; the mapping
++table lives in [plan.md](./plan.md#requirement-to-test-mapping) and
++Principle III makes an unmapped requirement a blocker, not a gap.
++
++## Cleanup
++
++```bash
++rm -f ./demo.store ./v1.store ./v5.store ./v7.* ./v11.store ./v12.store
++```
+diff --git a/specs/001-user-accounts-cli/research.md b/specs/001-user-accounts-cli/research.md
+new file mode 100644
+index 0000000..a9b89ce
+--- /dev/null
++++ b/specs/001-user-accounts-cli/research.md
+@@ -0,0 +1,371 @@
++# Phase 0 Research: Local User Account Manager (CLI)
++
++**Feature**: `001-user-accounts-cli` | **Date**: 2026-11-04
++
++**Input**: [spec.md](./spec.md), [constitution](../../.specify/memory/constitution.md)
++
++## Purpose
++
++The spec records its environment constraints as given (A-013: Python 3.11+,
++standard library only, package `accounts` under `src/`), and the user input for
++this planning run confirms them and adds `pytest` for tests. No
++`NEEDS CLARIFICATION` marker therefore survives into the Technical Context on
++the *environment* axis. What remained open were the **mechanism** choices the
++spec deliberately left to planning: which password hash, which store encoding,
++how atomicity and serialisation are achieved, and how a handful of
++requirement interactions order themselves. Each is resolved below against the
++machine this will run on.
++
++All measurements below were taken on the development host (Python 3.13.17,
++Linux 6.18, x86-64) and are reproducible with the commands in
++[quickstart.md](./quickstart.md).
++
++---
++
++## R1 — Password hashing algorithm and parameters
++
++**Decision**: `hashlib.scrypt` with `n=2**17, r=8, p=1, dklen=32,
++maxmem=192*1024*1024`, a fresh 16-byte salt per account from
++`secrets.token_bytes(16)`. The algorithm name and all four parameters are
++stored alongside each account record.
++
++**Rationale**:
++
++- SR-004 requires "a deliberately slow password-hashing algorithm at current
++  parameters". The standard library offers exactly two candidates:
++  `hashlib.scrypt` (memory-hard) and `hashlib.pbkdf2_hmac` (iterated only).
++  Constitution Principle V rule 4 prefers "memory-hard **or** iterated"; scrypt
++  is the stronger of the two available and is present in this build
++  (`hashlib.scrypt` resolves, OpenSSL-backed).
++- `n=2**17, r=8, p=1` is the OWASP Password Storage minimum work factor for
++  scrypt. Measured cost: **0.369 s** per derivation, 128 MiB working set.
++- `maxmem` must be set explicitly: OpenSSL's default cap (32 MiB) rejects
++  `n=2**17, r=8`. 192 MiB gives headroom over the 128 MiB working set and is
++  itself the enforced memory bound SR-006 asks for on this operation.
++- Storing the parameters per record (rather than as a global constant) is what
++  makes a future parameter increase a non-migration: old accounts keep
++  verifying under their recorded parameters, new and changed passwords get the
++  new ones. SR-004 requires this recording anyway.
++
++**Alternatives considered**:
++
++| Option | Measured | Rejected because |
++|---|---|---|
++| `pbkdf2_hmac('sha256', …, 600_000)` | 0.144 s | Not memory-hard; far cheaper to attack on GPU/ASIC per unit of defender cost. Only worth it if scrypt were unavailable. |
++| scrypt `n=2**16, r=8, p=2` | 0.347 s | Equivalent work to the chosen set at half the memory (64 MiB). A legitimate OWASP-listed alternative; chosen set preferred because higher `n` (not higher `p`) is where scrypt's memory hardness comes from. |
++| scrypt `n=2**16, r=8, p=1` | 0.169 s | Half the OWASP minimum work factor. Would have bought performance margin (see R8) by weakening a NON-NEGOTIABLE principle — rejected. |
++| scrypt `n=2**14, r=8, p=1` | 0.028 s | Eighth of the minimum work factor. Rejected outright. |
++
++**Also decided**: verification compares the derived digest to the stored digest
++with `hmac.compare_digest` (SR-005, constant-time). `login` against a username
++that does not exist performs one derivation against a fixed synthetic dummy
++salt and discards the result, so that the unknown-account and wrong-password
++paths cost the same wall-clock time (SC-004 requires identical message and
++status; equal timing closes the side channel that would otherwise still
++enumerate accounts). The dummy input is a module constant, not a password.
++
++---
++
++## R2 — Store encoding
++
++**Decision**: a single JSON object, UTF-8, written with
++`json.dumps(…, ensure_ascii=True, sort_keys=True, separators=(",", ":"))`,
++shaped `{"version": 1, "accounts": {<username>: <flat record>}}`. Parsed with
++`json.loads`. See [contracts/store-format.md](./contracts/store-format.md).
++
++**Rationale**:
++
++- SR-002 requires a structured encoding in which no username or credential
++  material can create, merge or truncate a record by containing a delimiter,
++  newline or control character. JSON string escaping gives this for free;
++  `ensure_ascii=True` additionally guarantees the file holds no raw control
++  characters or non-ASCII bytes at all, so the file is safe to inspect in a
++  terminal.
++- Usernames are restricted to `[A-Za-z0-9_]` by FR-011 anyway, so they are
++  already safe as JSON object keys — and a dict keyed by username enforces
++  "at most one account per username" structurally rather than by a check.
++- `sort_keys=True` makes the file byte-for-byte deterministic for a given
++  account set, which is what lets the SC-008 "store unchanged after failure"
++  test be a plain byte comparison instead of a semantic diff.
++- Measured: 1 000 accounts serialise to **179 KiB**; `json.loads` 1.3 ms,
++  `json.dumps` 1.7 ms. 10 000 accounts project to ~1.75 MiB, comfortably under
++  the 8 MiB ceiling of A-011 — the two limits are mutually consistent.
++- Bounded parsing (SR-006): the file size is checked against the 8 MiB limit
++  from the open file descriptor *before* the bytes are parsed, and deeply
++  nested input raises a catchable `RecursionError` from the C scanner
++  (confirmed: 200 000-deep array → `RecursionError`), which is reported as
++  status 5. No regular expressions are used in parsing, so there is no
++  backtracking cost to bound.
++
++**Alternatives considered**: a line-oriented `username:salt:hash:count` format
++(rejected — delimiter injection is exactly what SR-002 forbids, and escaping it
++by hand reimplements JSON badly); `sqlite3` (rejected — Principle IV, a
++relational engine for one flat dict, and FR-009's atomicity is already solved
++more simply by `os.replace`; also leaves `-wal`/`-journal` sidecar files, which
++conflicts with FR-007's "the store MUST be the single file at the given path");
++`configparser` (rejected — no nesting, weak escaping, and interpolation is an
++injection surface); `pickle` (rejected outright — arbitrary code execution on a
++malformed store).
++
++---
++
++## R3 — Atomic replacement (FR-009, SC-009)
++
++**Decision**: write to a fresh temporary file in the store's own directory,
++`fsync` it, close it, `os.replace()` it over the store path, then `fsync` the
++containing directory. The temporary file is created with
++`os.open(path, O_WRONLY|O_CREAT|O_EXCL, 0o600)` and a name of
++`.<storename>.<16-hex>.tmp` where the hex comes from `secrets.token_hex(8)`. On
++any failure the temporary file is unlinked.
++
++**Rationale**:
++
++- `os.replace` is `rename(2)`, which is atomic within a filesystem: a reader
++  sees either the whole old file or the whole new one, never a mixture, and
++  never an empty file. The directory `fsync` is what makes the rename itself
++  durable after a power loss, not merely after a process kill.
++- Same-directory placement is required twice over: `rename` cannot cross
++  filesystems, and SR-003 explicitly mandates it.
++- `O_EXCL` plus an unpredictable name satisfies SR-003's "no overwriting of an
++  existing file, unpredictable name"; the explicit `0o600` mode argument
++  satisfies SR-008's "set at creation rather than applied afterwards", and the
++  mode survives the rename, so the store inherits owner-only permissions
++  (SC-010).
++- `tempfile.NamedTemporaryFile` was considered and rejected: it creates with
++  mode `0o600` correctly but its `delete` semantics and name handling fight the
++  rename pattern, and `tempfile.mkstemp` in the target directory is the same
++  call as above with less control over the name prefix. `os.open` directly is
++  the smaller, clearer thing (Principle IV).
++
++**Consequence recorded**: if the store path is a symbolic link, the directory
++used for the temporary file and the rename target are derived from
++`os.path.realpath()`, so the operator's symlink keeps pointing at a real file
++instead of being replaced by one. SR-003 states containment does not apply
++here, so following the operator's own deliberate symlink honours their intent.
++
++---
++
++## R4 — Serialising concurrent invocations (SR-007, edge case "simultaneous invocations")
++
++**Decision**: hold an exclusive `fcntl.flock(LOCK_EX)` on a file descriptor for
++the **directory containing the store** for the whole read–modify–write of every
++command, including read-mostly ones.
++
++**Rationale**:
++
++- The obvious candidate — locking the store file itself — is wrong twice.
++  First, `register` on a store that does not exist yet has no file to lock, so
++  two concurrent first-registrations would race. Second, `os.replace` swaps the
++  inode: a lock held on the old inode protects nothing once the new file is in
++  place, so each invocation would be locking a different object.
++- The directory is the thing that both the store and its temporary file live
++  in, exists for the whole operation, and has a stable inode. Locking it closes
++  both races. Confirmed working on this platform:
++  `os.open(dir, O_RDONLY)` + `flock(LOCK_EX)` succeeds.
++- Locking the directory also means it creates **no files**, which FR-007
++  requires: a `login` against a non-existent store must not bring a store — or
++  a `.lock` sidecar — into existence.
++- Taking the lock exclusively even for `login` is deliberate: every command can
++  write (a failed `login` increments the failure count, a successful one resets
++  it), so a shared/exclusive distinction would buy nothing and cost a
++  lock-upgrade race. A-012 caps the required throughput at "correct", not
++  "fast".
++- The lock is advisory and effective only between cooperating invocations of
++  this tool, which is precisely SR-007's stated scope ("serialised against
++  other invocations").
++
++**Alternatives considered**: a `PATH.lock` sidecar file (rejected — creates a
++file for non-`register` commands, against FR-007); `O_EXCL` lock-file spinning
++(rejected — needs stale-lock recovery, which is a new failure mode and more
++code); no locking (rejected — SR-007 names the lost-failure-count-increment
++attack explicitly).
++
++**Cost accepted**: invocations against *different* stores in the same directory
++serialise against each other unnecessarily. Acceptable under A-012.
++
++---
++
++## R5 — Reading passwords from stdin under a byte cap (FR-002, FR-014, SR-006, A-009, A-010)
++
++**Decision**: read each password line from `sys.stdin.buffer` with
++`readline(MAX_LINE_BYTES + 1)`, i.e. `readline(4097)`. Classify:
++
++| Return | Meaning |
++|---|---|
++| `b""` | input ended → missing password input, status 2 (A-010) |
++| length 4097 | line exceeds the 4 096-byte limit → status 2, nothing read further |
++| otherwise | strip one trailing `\n`, then one preceding `\r`; decode UTF-8 |
++
++**Rationale**: the size argument is what makes the read bounded — the limit is
++enforced by never asking for more than 4 097 bytes, not by measuring after the
++fact, so an attacker-supplied 1 GiB line cannot be loaded (SR-006). A return of
++exactly 4 097 bytes is unambiguous proof of overflow; any shorter return is
++within limit whether or not it ended in a newline (a final line at EOF without
++a terminator is valid). A present-but-empty line is `b"\n"` → a password of
++length 0, which is the spec's intended distinction from *missing* input.
++
++**Decided consequences**:
++
++- A line that is not valid UTF-8 is a malformed *request*, status 2, on every
++  command — not a wrong password. A-009 defines a password as UTF-8 text, so
++  undecodable bytes are not a candidate password at all. Recorded as a decision
++  because the spec does not name this case.
++- Length for FR-012/A-011 purposes is counted in **characters after decoding**
++  (A-009: "length is counted in characters"), while the 4 096-byte line cap is
++  counted in **bytes**. Both limits are therefore enforced, in that order.
++- Extra input lines are never read, which is both how they are "ignored" (spec
++  edge case) and why a 10 GiB stdin costs nothing.
++- `unlock` reads **zero** lines (A-006), so it must work with stdin closed.
++
++---
++
++## R6 — Ordering of checks (resolving requirement interactions)
++
++The spec pins several orderings and leaves a few implied. Resolved order, which
++the contract tests assert directly:
++
++1. **Argument shape** → status 2. Usage, unknown command, missing/extra
++   arguments, missing `--store`.
++2. **Username format** (FR-011) → status 2. Before the store is touched at all,
++   so an invalid username can never create a store file.
++3. **Password input** (R5) → status 2. Missing line, over-long line, bad UTF-8.
++4. **`register` only — new password length** (FR-012) → status 2, before the
++   store is read. `register` has nothing to authenticate against, so length is
++   pure request validation and belongs "on the way in" (SR-001). Scenario 1.6
++   confirms it on a fresh store.
++5. **Store load** (FR-007, SR-001, SR-006) → status 5 on unreadable, over-size,
++   over-count, unparseable or structurally invalid content. A missing store is
++   *not* an error here: it loads as empty and is not created.
++6. **Account existence**: `register` → 3 if present; `unlock`/`passwd`/`delete`
++   → 3 if absent; `login` → status 1 `invalid credentials` if absent (A-001),
++   after the dummy derivation of R1.
++7. **Lock state** (FR-017) — `login` only → status 4, *before* the password is
++   considered (scenario 2.4 is explicit). `passwd` and `delete` skip this step
++   entirely (FR-019).
++8. **Current-password verification** (FR-013) → status 1.
++9. **`passwd` only — new password length** → status 2, *after* step 8. Scenario
++   3.2 says a wrong current password with "any new password" yields status 1,
++   so authentication precedes new-password validation here. This is the one
++   place where FR-013's "before doing anything else that the operation implies"
++   outranks SR-001's validate-early rule, and the spec's own scenario is what
++   decides it.
++10. **Apply and save** → status 0.
++
++**Noted asymmetry, deliberate**: new-password length is validated before the
++store is read for `register` (step 4) and after authentication for `passwd`
++(step 9). Both placements come from the spec's own acceptance scenarios.
++
++---
++
++## R7 — Lock state is derived, not stored
++
++**Decision**: each account record stores `failed_logins` (an integer) and
++**no** separate locked flag. Locked is computed as
++`failed_logins >= 5`.
++
++**Rationale**: FR-016 locks the account "as soon as its count of consecutive
++failed login attempts reaches 5" and FR-018 has `unlock` clear the lock *and*
++reset the count to zero, so the two can never legitimately disagree — the flag
++would be pure redundancy. Storing both invents a new malformed-store case (a
++record claiming `locked: true` with `failed_logins: 0` — which would then have
++to be rejected under status 5) for no behavioural gain. Principle IV calls for
++the flat, non-redundant structure. The Key Entities line "whether it is locked"
++is satisfied by a derived attribute; no requirement distinguishes a locked
++account whose count is not exactly 5.
++
++**Alternative considered**: store `locked: bool` as well, for forensic clarity
++about *why* an account is locked. Rejected — the count already says that, and
++the redundancy has to be validated and kept consistent forever.
++
++---
++
++## R8 — Performance budget against SC-007
++
++**Measured**: store load+save for 1 000 accounts is **3.0 ms** combined
++(1.3 ms parse, 1.7 ms serialise). One scrypt derivation at the chosen
++parameters is **0.369 s**. Interpreter start for `python -m accounts` is
++~30 ms. Derivations per command: `unlock` 0, `login` 1, `register` 1,
++`delete` 1, `passwd` 2 (verify current, derive new).
++
++| Command | Projected wall clock, 1 000-account store |
++|---|---|
++| `unlock` | ~0.04 s |
++| `login`, `register`, `delete` | ~0.40 s |
++| `passwd` | ~0.77 s |
++
++**Decision**: keep the OWASP-minimum parameters, and test SC-007 two ways:
++
++- an **absolute** assertion, every command under 1 s on a 1 000-account store;
++- a **hardware-independent** assertion that the store-scaling component is
++  negligible — the same command against a 1-account store and a
++  1 000-account store differ by less than 100 ms.
++
++**Flagged for the user (clarification candidate, not a blocker)**: `passwd`
++leaves only ~1.3× headroom on the absolute bound, because two deliberate
++derivations are inherent to it. On hardware materially slower than this host
++the absolute assertion for `passwd` alone could fail. The cost is deliberate
++security work, not inefficiency, and SC-007's wording ("on a store holding
++1 000 accounts") reads as a statement about *store scale*, which the second
++assertion measures directly. If the absolute 1 s bound on `passwd` is the
++binding requirement on the target hardware, the lever is the work factor
++(R1's `n=2**16, r=8, p=1` alternative halves it), and that is a spec decision
++about SR-004, not an implementation detail. Proceeding with the strong
++parameters until told otherwise.
++
++---
++
++## R9 — Error message construction (FR-005, SR-002, SR-009)
++
++**Decision**: every failure writes exactly one line to stderr and nothing to
++stdout. Two messages are fixed strings mandated by FR-005 — `invalid
++credentials` and `account locked` — and carry no detail at all. Every other
++message states what was expected and what was received, where "what was
++received" is a **length, a count or a sanitised username**, never a password, a
++salt, a digest, a parameter or any store content.
++
++Usernames echoed back into a message pass through a sanitiser that renders
++anything outside printable ASCII as `\xNN` and truncates at 64 characters
++(SR-002: no unescaped control characters from input in output; SR-009: no
++terminal-injection surface). The store path may be echoed verbatim — SR-009
++exempts "the operator's own argument" explicitly.
++
++Full message table: [contracts/cli-contract.md](./contracts/cli-contract.md).
++
++---
++
++## R10 — Argument parsing
++
++**Decision**: `argparse.ArgumentParser(add_help=False, allow_abbrev=False)`
++with `--store` as a required option, `command` as a positional with
++`choices=("register", "login", "unlock", "passwd", "delete")`, and `username`
++as a positional. `ArgumentParser.error` is overridden to raise the project's
++own error carrying status 2 instead of calling `sys.exit` itself.
++
++**Rationale**: Principle IV prefers the standard library's existing solution to
++a hand-rolled one, and `choices` *is* SR-001's allow-list for the command name.
++`allow_abbrev=False` stops `--sto` from being accepted as `--store`, keeping the
++accepted surface exactly what FR-001 specifies. `add_help=False` is deliberate:
++FR-003 admits only six exit statuses for their stated conditions and the spec
++defines no help operation, so no path may exit 0 without having performed an
++operation. Overriding `error()` keeps every exit status flowing through one
++place in `cli.py` rather than letting argparse exit on its own terms.
++
++**Alternative considered**: hand-rolled `sys.argv` walking (~20 lines).
++Rejected under Principle IV's preference for the stdlib solution, though it was
++close — argparse's defaults needed three suppressions to behave.
++
++---
++
++## Resolved: no outstanding NEEDS CLARIFICATION
++
++Every unknown that entered Phase 0 is decided above. Two items are recorded as
++decisions the user may want to revisit, and neither blocks design or
++implementation:
++
++1. **R8** — `passwd`'s headroom against SC-007's absolute 1 s bound.
++2. **Register into a full store** — A-011 caps a store at 10 000 accounts but
++   FR-003's status table has no row for "the store cannot accept another
++   account". Decided: status **5**, on the grounds that statuses 1–4 are each
++   defined for a specific account-level outcome while this is a store-level
++   refusal to write, and SR-006 frames the account cap as a store limit
++   alongside the file-size cap. Recorded in the contract.

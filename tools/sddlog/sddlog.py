@@ -206,6 +206,8 @@ def git(repo, *args, check=False):
             ["git", "-C", str(repo)] + list(args),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",  # a diff of a non-UTF-8 file must not crash the capture
         )
     except FileNotFoundError:
         return 127, ""

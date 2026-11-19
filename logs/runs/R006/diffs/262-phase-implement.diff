@@ -1,0 +1,2240 @@
+diff --git a/.gitignore b/.gitignore
+index 75c6182..47628c7 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,3 +1,18 @@
+ __pycache__/
+ *.pyc
+ .pytest_cache/
++
++# Python build / environment artefacts
++.venv/
++venv/
++dist/
++build/
++*.egg-info/
++
++# Editor and OS noise
++.DS_Store
++Thumbs.db
++*.tmp
++*.swp
++.vscode/
++.idea/
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..ab23dfc
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,13 @@
++# pytest configuration only.
++#
++# Deliberately carries no packaging metadata, no [project] table, no dependencies and no build
++# backend: A-10 fixes the invocation as `python -m logredact` with `src/` on PYTHONPATH, and
++# constitution Principle I requires the project to stay runnable with no dependency resolution
++# step (research.md R1, R13).
++
++[tool.pytest.ini_options]
++pythonpath = ["src"]
++testpaths = ["tests"]
++markers = [
++    "slow: resource-bound tests over 1 MiB lines and large inputs",
++]
+diff --git a/specs/001-logredact-cli/plan.md b/specs/001-logredact-cli/plan.md
+index 38d8317..3a1a6eb 100644
+--- a/specs/001-logredact-cli/plan.md
++++ b/specs/001-logredact-cli/plan.md
+@@ -258,6 +258,7 @@ justified against the requirement that forces it. Recorded here so a reviewer ca
+ | Negative lookbehind guarding the email pattern | SR-005 requires time linear in line length | The unguarded pattern is quadratic: measured 7,142 ms at 80 KB and extrapolating to ~1.5 hours for one 1 MiB line. Bounding the quantifiers with RFC limits also restores linearity but stops redacting emails with a local part over 64 characters — a redaction gap, which is the failure the tool exists to prevent ([R5](./research.md)) |
+ | Card candidate scan inside a digit run, instead of checking the matched run once | FR-006 + FR-013 + SC-005 — a card preceded by other bare numbers is still a card in an allowed grouping | Checking only the maximal run leaves `log 1 2 3 4111 1111 1111 1111 end` un-redacted: the 19-digit run fails Luhn and the real card survives in the output ([R8](./research.md)) |
+ | Incremental two-parity Luhn sum rather than recomputing per candidate | SR-005 and SC-010 — bounded time and memory per line | The straightforward version (tokenise the run, join and re-checksum each candidate) measured 15.8 s per adversarial 1 MiB line and allocated ~500,000 strings for one line, breaking SC-010's fixed memory bound. Prefix-sum arrays are faster still but allocate proportionally to the run ([R8](./research.md)) |
++| One private exception class, `_OverLengthLine`, in `cli.py` — the only class in the delivered code | FR-018 requires an over-length line to stop the *run*, so the condition must unwind past the per-source loop, two call levels up from where it is detected | Returning a status code from the line loop instead — rejected: the loop already returns a read-failure flag, so a second out-of-band outcome would have to be encoded in the same return value and re-checked by every caller, and Principle II prefers an exception to a return a caller can misread. Recorded here (added during implementation review) because Principle IV requires any added component to be justified in the plan |
+ 
+ ## Phase status
+ 
+diff --git a/specs/001-logredact-cli/quickstart.md b/specs/001-logredact-cli/quickstart.md
+index ba85a5d..7677330 100644
+--- a/specs/001-logredact-cli/quickstart.md
++++ b/specs/001-logredact-cli/quickstart.md
+@@ -108,8 +108,9 @@ The first of those two must print the redaction of `a.log` and `b.log` on stdout
+ just the first — with one diagnostic naming `does-not-exist.log` on stderr. The second must print
+ `2`, one line per missing operand.
+ 
++```bash
+ # the line-length cap: 1 MiB is accepted, one character more fails (FR-018)
+-python3 - <<'PY' > /tmp/long.log
++python3 - <<'PY'
+ cap = 1 << 20
+ open('/tmp/long.log','w').write('ok jane@example.com\n' * 2 + 'x' * cap + '\n')
+ PY
+diff --git a/specs/001-logredact-cli/tasks.md b/specs/001-logredact-cli/tasks.md
+index d1aff29..a3b0e93 100644
+--- a/specs/001-logredact-cli/tasks.md
++++ b/specs/001-logredact-cli/tasks.md
+@@ -34,9 +34,9 @@ relative to the repository root. The tool is run as `python -m logredact` with `
+ 
+ **Purpose**: Create the layout and the pytest configuration. No behaviour yet.
+ 
+-- [ ] T001 Create the directory layout `src/logredact/` and `tests/` at the repository root per plan.md Project Structure
+-- [ ] T002 [P] Create `pyproject.toml` at the repository root carrying **pytest configuration only** — `[tool.pytest.ini_options]` with `pythonpath = ["src"]`, `testpaths = ["tests"]`, and `markers = ["slow: resource-bound tests over 1 MiB lines and large inputs"]`. No packaging metadata, no `[project]` dependencies, no build backend (Principle I, research.md R1, R13)
+-- [ ] T003 [P] Create `src/logredact/__init__.py` as an empty package marker with no logic (plan.md Project Structure)
++- [X] T001 Create the directory layout `src/logredact/` and `tests/` at the repository root per plan.md Project Structure
++- [X] T002 [P] Create `pyproject.toml` at the repository root carrying **pytest configuration only** — `[tool.pytest.ini_options]` with `pythonpath = ["src"]`, `testpaths = ["tests"]`, and `markers = ["slow: resource-bound tests over 1 MiB lines and large inputs"]`. No packaging metadata, no `[project]` dependencies, no build backend (Principle I, research.md R1, R13)
++- [X] T003 [P] Create `src/logredact/__init__.py` as an empty package marker with no logic (plan.md Project Structure)
+ 
+ ---
+ 
+@@ -47,11 +47,11 @@ every user story needs.
+ 
+ **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
+ 
+-- [ ] T004 Add the module-level constants to `src/logredact/redact.py` exactly as data-model.md specifies: `MAX_LINE_CHARS = 1 << 20` (1,048,576 characters **including the line terminator**; the cap is **inclusive**, so a line of exactly 1 MiB is accepted), `MIN_CARD_DIGITS = 13`, `MAX_CARD_DIGITS = 19`, `EMAIL_PLACEHOLDER = "[EMAIL]"`, `IP_PLACEHOLDER = "[IP]"`, `CARD_PLACEHOLDER = "[CARD]"`. These are constants, not configuration — no option, environment variable, or file may change them (A-9, SR-005, FR-006)
+-- [ ] T005 Create `src/logredact/cli.py` with `EXIT_OK = 0` and `EXIT_ERROR = 2`, the shared text-stream settings `encoding="utf-8", errors="surrogateescape", newline=""` (research.md R3 — `surrogateescape` round-trips invalid UTF-8 per A-4, `newline=""` disables newline translation per FR-009), a `sys.stdout.reconfigure(...)` call applying those settings to standard output, and a `main(argv=None) -> int` skeleton that returns `EXIT_OK` (FR-015)
+-- [ ] T006 Implement the strict argument allowlist in `src/logredact/cli.py`: `argparse.ArgumentParser(prog="python -m logredact", add_help=False, allow_abbrev=False, usage="%(prog)s [--count] [FILE ...]")`, one `--count` `store_true` flag, and `nargs="*"` file operands. `add_help=False` and `allow_abbrev=False` are **required** by SR-001 — the defaults would accept `--cou` and would make `-h` write to stdout and exit 0, both forbidden (research.md R9)
+-- [ ] T007 Create `src/logredact/__main__.py` containing only the entry point `raise SystemExit(main())`, so `python -m logredact` is the invocation (FR-001)
+-- [ ] T008 [P] Create `tests/conftest.py` with a `run_cli` fixture that runs `[sys.executable, "-m", "logredact", *args]` in a subprocess with `PYTHONPATH=src`, feeds input as raw `bytes`, and returns `(status, stdout_bytes, stderr_bytes)` — raw bytes, never decoded text, because the byte-for-byte guarantees of FR-009 and A-4 cannot be asserted on decoded strings (research.md R13)
++- [X] T004 Add the module-level constants to `src/logredact/redact.py` exactly as data-model.md specifies: `MAX_LINE_CHARS = 1 << 20` (1,048,576 characters **including the line terminator**; the cap is **inclusive**, so a line of exactly 1 MiB is accepted), `MIN_CARD_DIGITS = 13`, `MAX_CARD_DIGITS = 19`, `EMAIL_PLACEHOLDER = "[EMAIL]"`, `IP_PLACEHOLDER = "[IP]"`, `CARD_PLACEHOLDER = "[CARD]"`. These are constants, not configuration — no option, environment variable, or file may change them (A-9, SR-005, FR-006)
++- [X] T005 Create `src/logredact/cli.py` with `EXIT_OK = 0` and `EXIT_ERROR = 2`, the shared text-stream settings `encoding="utf-8", errors="surrogateescape", newline=""` (research.md R3 — `surrogateescape` round-trips invalid UTF-8 per A-4, `newline=""` disables newline translation per FR-009), a `sys.stdout.reconfigure(...)` call applying those settings to standard output, and a `main(argv=None) -> int` skeleton that returns `EXIT_OK` (FR-015)
++- [X] T006 Implement the strict argument allowlist in `src/logredact/cli.py`: `argparse.ArgumentParser(prog="python -m logredact", add_help=False, allow_abbrev=False, usage="%(prog)s [--count] [FILE ...]")`, one `--count` `store_true` flag, and `nargs="*"` file operands. `add_help=False` and `allow_abbrev=False` are **required** by SR-001 — the defaults would accept `--cou` and would make `-h` write to stdout and exit 0, both forbidden (research.md R9)
++- [X] T007 Create `src/logredact/__main__.py` containing only the entry point `raise SystemExit(main())`, so `python -m logredact` is the invocation (FR-001)
++- [X] T008 [P] Create `tests/conftest.py` with a `run_cli` fixture that runs `[sys.executable, "-m", "logredact", *args]` in a subprocess with `PYTHONPATH=src`, feeds input as raw `bytes`, and returns `(status, stdout_bytes, stderr_bytes)` — raw bytes, never decoded text, because the byte-for-byte guarantees of FR-009 and A-4 cannot be asserted on decoded strings (research.md R13)
+ 
+ **Checkpoint**: `python -m logredact` runs, accepts only the allowlisted arguments, and exits 0 doing nothing. User story work can begin.
+ 
+@@ -71,25 +71,25 @@ No file handling and no flags involved.
+ 
+ > **Write these tests FIRST and confirm they FAIL before implementing T017–T024.**
+ 
+-- [ ] T009 [P] [US1] Unit test `test_email_shapes` in `tests/test_redaction_rules.py` covering every row of the email table in contracts/redaction-rules.md: `jane@example.com` → `[EMAIL]`; `jane.doe+test@mail.example.com` → `[EMAIL]`; `mail jane@example.com.` → `mail [EMAIL].` (the sentence period stays); `a@1.2.3.4.example.com` → `[EMAIL]` once; `user@localhost` **unchanged** (domain needs at least one dot, research.md R6); `@property` unchanged; `jane@example.c` unchanged (last label shorter than two letters) (FR-004)
+-- [ ] T010 [P] [US1] Unit tests `test_ipv4_shapes`, `test_ipv4_out_of_range`, and `test_ipv4_flanked_by_digit_or_dot` in `tests/test_redaction_rules.py`: `0.0.0.0`, `255.255.255.255`, `192.168.0.10` → `[IP]`; `999.1.1.1`, `256.1.1.1`, `1.2.3`, `1.2.3.4.5` unchanged; `01.2.3.4` **entirely** unchanged (leading zero, and the inner `1.2.3.4` is blocked by the preceding digit); `v10.0.0.7-beta` → `v[IP]-beta` — **asserts the redaction**, not pass-through (FR-005, FR-013, research.md R7)
+-- [ ] T011 [P] [US1] Unit tests `test_card_groupings`, `test_luhn_failure_untouched`, `test_card_flanked_by_digit`, and `test_separator_between_adjacent_cards_preserved` in `tests/test_redaction_rules.py` covering every row of the card table: `4111111111111111`, `4111 1111 1111 1111`, `4111-1111-1111-1111` → `[CARD]`; `1234567890123` unchanged (Luhn fails); `4111  1111  1111  1111`, `4111 1111-1111 1111`, `4111--1111--1111--1111` unchanged; `1234114111111111111111` unchanged; `94111 1111 1111 1111` and `4111 1111 1111 11110` unchanged; `log 1 2 3 4111 1111 1111 1111 end` → `log 1 2 3 [CARD] end`; `4111 1111 1111 1111 4111 1111 1111 1111` → `[CARD] [CARD]` **with the separating space preserved** (Phase 0 regression, research.md R8); `x4111 1111 1111 1111` → `x[CARD]` (FR-006, FR-007, FR-008, FR-013)
+-- [ ] T012 [P] [US1] Unit tests `test_email_beats_ipv4`, `test_placeholder_not_rescanned`, and `test_counts_once_per_replacement` in `tests/test_redaction_rules.py`: an overlapping candidate is redacted exactly once under the winning kind in the order email → IPv4 → card; a line that literally contains `[EMAIL]` is passed through as ordinary text; a value appearing three times increments its counter three times, per replacement rather than per distinct value (FR-014, A-1, A-2)
+-- [ ] T013 [P] [US1] Unit tests `test_surrounding_text_preserved`, `test_no_fragment_of_match_survives`, and `test_format_specifiers_in_input_are_inert` in `tests/test_redaction_rules.py`: non-matched characters keep their original order and position; no digit of a redacted card and no character of a redacted address appears anywhere in the output; input containing `%s`, `{}`, and `%(x)d` is never interpreted as a format string (FR-008, SR-006, SR-002)
+-- [ ] T014 [P] [US1] Corpus tests `test_clean_corpus_unchanged`, `test_near_miss_corpus_untouched`, and `test_genuine_corpus_fully_redacted` in `tests/test_redaction_rules.py`: a corpus of lines with no personal data returns 100% byte-identical (SC-003); a corpus of near-misses (out-of-range quads, Luhn-failing runs, runs shorter than 13 or longer than 19 digits, mis-separated groupings, non-email `@` usages) has 0 redactions (SC-004); a corpus of genuine emails, IPv4 addresses, and cards in every grouping FR-006 allows is 100% redacted with no original value appearing in any form (SC-005)
+-- [ ] T015 [P] [US1] Create `tests/test_resource_bounds.py` with `test_adversarial_lines_are_linear`, marked `@pytest.mark.slow`, parametrised over the adversarial shapes `"a" * n`, `"a" * (n//2) + "@" + "1." * (n//4)`, `"1 " * (n//2)`, `"1-" * (n//2)`, `"." * n`, and `"4111 " * (n//5)` at doubling sizes, asserting both a generous wall-clock ceiling (a 1 MiB line under 10 s against a measured 3.4 s worst case) and that the time roughly doubles rather than quadruples as the size doubles. This is the tripwire for the quadratic email pattern found in Phase 0 — a regression here costs hours per line, not seconds (SR-005, research.md R5, R8, R13, R14)
+-- [ ] T016 [P] [US1] Contract tests in `tests/test_cli_stream.py` using the `run_cli` fixture: `test_module_invocation` and `test_reads_stdin_when_no_operands` (C-01), `test_worked_examples` asserting C-01, C-02, C-03 byte-for-byte on stdout with stderr empty and status 0 (SC-001), `test_passthrough_byte_identical` (C-21), `test_crlf_and_missing_final_newline` (`\n`, `\r\n`, a lone `\r`, and a missing final terminator are all reproduced exactly — none added, none removed), `test_invalid_utf8_passed_through` (the raw byte `\xe9` survives unchanged, A-4), `test_empty_stdin` and `test_status_zero_on_success` (C-05) (FR-001, FR-002, FR-009, FR-015)
++- [X] T009 [P] [US1] Unit test `test_email_shapes` in `tests/test_redaction_rules.py` covering every row of the email table in contracts/redaction-rules.md: `jane@example.com` → `[EMAIL]`; `jane.doe+test@mail.example.com` → `[EMAIL]`; `mail jane@example.com.` → `mail [EMAIL].` (the sentence period stays); `a@1.2.3.4.example.com` → `[EMAIL]` once; `user@localhost` **unchanged** (domain needs at least one dot, research.md R6); `@property` unchanged; `jane@example.c` unchanged (last label shorter than two letters) (FR-004)
++- [X] T010 [P] [US1] Unit tests `test_ipv4_shapes`, `test_ipv4_out_of_range`, and `test_ipv4_flanked_by_digit_or_dot` in `tests/test_redaction_rules.py`: `0.0.0.0`, `255.255.255.255`, `192.168.0.10` → `[IP]`; `999.1.1.1`, `256.1.1.1`, `1.2.3`, `1.2.3.4.5` unchanged; `01.2.3.4` **entirely** unchanged (leading zero, and the inner `1.2.3.4` is blocked by the preceding digit); `v10.0.0.7-beta` → `v[IP]-beta` — **asserts the redaction**, not pass-through (FR-005, FR-013, research.md R7)
++- [X] T011 [P] [US1] Unit tests `test_card_groupings`, `test_luhn_failure_untouched`, `test_card_flanked_by_digit`, and `test_separator_between_adjacent_cards_preserved` in `tests/test_redaction_rules.py` covering every row of the card table: `4111111111111111`, `4111 1111 1111 1111`, `4111-1111-1111-1111` → `[CARD]`; `1234567890123` unchanged (Luhn fails); `4111  1111  1111  1111`, `4111 1111-1111 1111`, `4111--1111--1111--1111` unchanged; `1234114111111111111111` unchanged; `94111 1111 1111 1111` and `4111 1111 1111 11110` unchanged; `log 1 2 3 4111 1111 1111 1111 end` → `log 1 2 3 [CARD] end`; `4111 1111 1111 1111 4111 1111 1111 1111` → `[CARD] [CARD]` **with the separating space preserved** (Phase 0 regression, research.md R8); `x4111 1111 1111 1111` → `x[CARD]` (FR-006, FR-007, FR-008, FR-013)
++- [X] T012 [P] [US1] Unit tests `test_email_beats_ipv4`, `test_placeholder_not_rescanned`, and `test_counts_once_per_replacement` in `tests/test_redaction_rules.py`: an overlapping candidate is redacted exactly once under the winning kind in the order email → IPv4 → card; a line that literally contains `[EMAIL]` is passed through as ordinary text; a value appearing three times increments its counter three times, per replacement rather than per distinct value (FR-014, A-1, A-2)
++- [X] T013 [P] [US1] Unit tests `test_surrounding_text_preserved`, `test_no_fragment_of_match_survives`, and `test_format_specifiers_in_input_are_inert` in `tests/test_redaction_rules.py`: non-matched characters keep their original order and position; no digit of a redacted card and no character of a redacted address appears anywhere in the output; input containing `%s`, `{}`, and `%(x)d` is never interpreted as a format string (FR-008, SR-006, SR-002)
++- [X] T014 [P] [US1] Corpus tests `test_clean_corpus_unchanged`, `test_near_miss_corpus_untouched`, and `test_genuine_corpus_fully_redacted` in `tests/test_redaction_rules.py`: a corpus of lines with no personal data returns 100% byte-identical (SC-003); a corpus of near-misses (out-of-range quads, Luhn-failing runs, runs shorter than 13 or longer than 19 digits, mis-separated groupings, non-email `@` usages) has 0 redactions (SC-004); a corpus of genuine emails, IPv4 addresses, and cards in every grouping FR-006 allows is 100% redacted with no original value appearing in any form (SC-005)
++- [X] T015 [P] [US1] Create `tests/test_resource_bounds.py` with `test_adversarial_lines_are_linear`, marked `@pytest.mark.slow`, parametrised over the adversarial shapes `"a" * n`, `"a" * (n//2) + "@" + "1." * (n//4)`, `"1 " * (n//2)`, `"1-" * (n//2)`, `"." * n`, and `"4111 " * (n//5)` at doubling sizes, asserting both a generous wall-clock ceiling (a 1 MiB line under 10 s against a measured 3.4 s worst case) and that the time roughly doubles rather than quadruples as the size doubles. This is the tripwire for the quadratic email pattern found in Phase 0 — a regression here costs hours per line, not seconds (SR-005, research.md R5, R8, R13, R14)
++- [X] T016 [P] [US1] Contract tests in `tests/test_cli_stream.py` using the `run_cli` fixture: `test_module_invocation` and `test_reads_stdin_when_no_operands` (C-01), `test_worked_examples` asserting C-01, C-02, C-03 byte-for-byte on stdout with stderr empty and status 0 (SC-001), `test_passthrough_byte_identical` (C-21), `test_crlf_and_missing_final_newline` (`\n`, `\r\n`, a lone `\r`, and a missing final terminator are all reproduced exactly — none added, none removed), `test_invalid_utf8_passed_through` (the raw byte `\xe9` survives unchanged, A-4), `test_empty_stdin` and `test_status_zero_on_success` (C-05) (FR-001, FR-002, FR-009, FR-015)
+ 
+ ### Implementation for User Story 1
+ 
+-- [ ] T017 [US1] Implement the email alternative in `src/logredact/redact.py` as named group `email`, exactly `(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`: local part one or more of letters, digits and `. _ % + -`; exactly one `@`; dot-separated letter/digit/hyphen labels; last label at least two letters; **at least two labels** (R6). The leading negative lookbehind is **required for linear-time matching** (SR-005) and must not be removed — without it the pattern is quadratic and one 1 MiB line takes an extrapolated ~1.5 hours (FR-004, research.md R5)
+-- [ ] T018 [US1] Implement the IPv4 alternative in `src/logredact/redact.py` as named group `ip`: `(?<![0-9.])` + `OCTET` + `(?:\.OCTET){3}` + `(?![0-9.])`, where `OCTET = (?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])` — four dot-separated octets each 0–255 with no leading zeros beyond a single `0`, and neither end flanked by a digit or a dot. The octet branches are mutually exclusive, so the alternative is linear by construction (FR-005, FR-013, SR-005)
+-- [ ] T019 [US1] Implement the card alternative in `src/logredact/redact.py` as named group `card`: `(?<!\d)\d+(?:[ -]\d+)*`, matching a **maximal** run of digit groups joined by single spaces or single hyphens. Doubled separators deliberately do not match `[ -]`, which is what leaves `4111  1111  1111  1111` and `4111--1111--1111--1111` alone (FR-006, research.md R8)
+-- [ ] T020 [US1] Combine T017–T019 into one module-level compiled pattern in `src/logredact/redact.py`, written in precedence order `(?P<email>…)|(?P<ip>…)|(?P<card>…)`. The alternation order **is** the precedence; there is no enum, registry, or rule table (FR-014, A-2, data-model.md Redaction kind, research.md R4)
+-- [ ] T021 [US1] Implement card candidate selection in `src/logredact/redact.py`: within a matched run, a candidate is a contiguous sequence of **whole groups** whose total digit count is **13 to 19**, whose internal separators are all the **same** single space or single hyphen, and whose digits pass Luhn. Select **leftmost first, longest at that position**, replace with `[CARD]`, continue scanning after the replaced candidate, and reproduce every character of the run that is not part of a redacted candidate unchanged. Use the incremental two-parity Luhn sum in **O(1) extra memory** — appending a digit flips the doubling parity of every earlier digit, so `A' = B + digit` and `B' = A + doubled(digit)`, with `doubled(d) = 2*d - 9 if 2*d > 9 else 2*d`. Do **not** tokenise the run or join candidate strings: that design measured 15.8 s per adversarial 1 MiB line and allocated ~500,000 strings, breaking SC-010 (FR-006, FR-007, FR-008, FR-013, SR-005, SC-010, research.md R8)
+-- [ ] T022 [US1] Implement the replacement callback and `redact_line(text, tally) -> str` in `src/logredact/redact.py` using `pattern.sub(replacer, text)`: dispatch on `match.lastgroup` (`email`, `ip`, `card`), return the fixed placeholder, and increment the matching tally key once per replacement. `re.sub`'s own semantics deliver FR-014 — leftmost match, non-overlapping, alternatives tried in written order, replaced text never re-scanned — so add no bookkeeping of your own. Accumulate no match list, so memory stays bounded by one line (FR-014, FR-016, A-1, research.md R4)
+-- [ ] T023 [US1] Implement the standard-input line loop in `src/logredact/cli.py`: reconfigure `sys.stdin` to `encoding="utf-8", errors="surrogateescape", newline=""` and read with `stream.readline(MAX_LINE_CHARS + 1)` until it returns `""`. A chunk shorter than `MAX_LINE_CHARS + 1` is a complete line; read standard input only when there are no operands (FR-002, FR-016, SR-005, research.md R2, R3)
+-- [ ] T024 [US1] Write each redacted line to standard output in `src/logredact/cli.py` and return `EXIT_OK`, so a successful run writes the redacted input to stdout and **nothing else, ever** — no diagnostics, no tally on that stream (FR-008, FR-009, FR-015, contracts/cli.md Streams)
++- [X] T017 [US1] Implement the email alternative in `src/logredact/redact.py` as named group `email`, exactly `(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`: local part one or more of letters, digits and `. _ % + -`; exactly one `@`; dot-separated letter/digit/hyphen labels; last label at least two letters; **at least two labels** (R6). The leading negative lookbehind is **required for linear-time matching** (SR-005) and must not be removed — without it the pattern is quadratic and one 1 MiB line takes an extrapolated ~1.5 hours (FR-004, research.md R5)
++- [X] T018 [US1] Implement the IPv4 alternative in `src/logredact/redact.py` as named group `ip`: `(?<![0-9.])` + `OCTET` + `(?:\.OCTET){3}` + `(?![0-9.])`, where `OCTET = (?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])` — four dot-separated octets each 0–255 with no leading zeros beyond a single `0`, and neither end flanked by a digit or a dot. The octet branches are mutually exclusive, so the alternative is linear by construction (FR-005, FR-013, SR-005)
++- [X] T019 [US1] Implement the card alternative in `src/logredact/redact.py` as named group `card`: `(?<!\d)\d+(?:[ -]\d+)*`, matching a **maximal** run of digit groups joined by single spaces or single hyphens. Doubled separators deliberately do not match `[ -]`, which is what leaves `4111  1111  1111  1111` and `4111--1111--1111--1111` alone (FR-006, research.md R8)
++- [X] T020 [US1] Combine T017–T019 into one module-level compiled pattern in `src/logredact/redact.py`, written in precedence order `(?P<email>…)|(?P<ip>…)|(?P<card>…)`. The alternation order **is** the precedence; there is no enum, registry, or rule table (FR-014, A-2, data-model.md Redaction kind, research.md R4)
++- [X] T021 [US1] Implement card candidate selection in `src/logredact/redact.py`: within a matched run, a candidate is a contiguous sequence of **whole groups** whose total digit count is **13 to 19**, whose internal separators are all the **same** single space or single hyphen, and whose digits pass Luhn. Select **leftmost first, longest at that position**, replace with `[CARD]`, continue scanning after the replaced candidate, and reproduce every character of the run that is not part of a redacted candidate unchanged. Use the incremental two-parity Luhn sum in **O(1) extra memory** — appending a digit flips the doubling parity of every earlier digit, so `A' = B + digit` and `B' = A + doubled(digit)`, with `doubled(d) = 2*d - 9 if 2*d > 9 else 2*d`. Do **not** tokenise the run or join candidate strings: that design measured 15.8 s per adversarial 1 MiB line and allocated ~500,000 strings, breaking SC-010 (FR-006, FR-007, FR-008, FR-013, SR-005, SC-010, research.md R8)
++- [X] T022 [US1] Implement the replacement callback and `redact_line(text, tally) -> str` in `src/logredact/redact.py` using `pattern.sub(replacer, text)`: dispatch on `match.lastgroup` (`email`, `ip`, `card`), return the fixed placeholder, and increment the matching tally key once per replacement. `re.sub`'s own semantics deliver FR-014 — leftmost match, non-overlapping, alternatives tried in written order, replaced text never re-scanned — so add no bookkeeping of your own. Accumulate no match list, so memory stays bounded by one line (FR-014, FR-016, A-1, research.md R4)
++- [X] T023 [US1] Implement the standard-input line loop in `src/logredact/cli.py`: reconfigure `sys.stdin` to `encoding="utf-8", errors="surrogateescape", newline=""` and read with `stream.readline(MAX_LINE_CHARS + 1)` until it returns `""`. A chunk shorter than `MAX_LINE_CHARS + 1` is a complete line; read standard input only when there are no operands (FR-002, FR-016, SR-005, research.md R2, R3)
++- [X] T024 [US1] Write each redacted line to standard output in `src/logredact/cli.py` and return `EXIT_OK`, so a successful run writes the redacted input to stdout and **nothing else, ever** — no diagnostics, no tally on that stream (FR-008, FR-009, FR-015, contracts/cli.md Streams)
+ 
+ **Checkpoint**: User Story 1 is complete and independently testable — the MVP. `printf 'user jane@example.com from 10.0.0.7\n' | python -m logredact` emits `user [EMAIL] from [IP]\n` with status 0, and all three worked examples reproduce byte-for-byte.
+ 
+@@ -108,15 +108,15 @@ without `--count` and without any error case.
+ 
+ > **Write these tests FIRST and confirm they FAIL before implementing T028–T030.**
+ 
+-- [ ] T025 [P] [US2] Contract tests in `tests/test_cli_files.py`: `test_two_operands` (C-07), `test_operand_order` and `test_reverse_order` (operand order is honoured, never sorted — C-08), `test_repeated_operand` (the same name twice yields its redacted contents twice — C-10), and `test_stdin_not_read_when_operand_given` (with an operand present, piped stdin is neither blocked on nor consumed — C-09) (FR-001, FR-003)
+-- [ ] T026 [P] [US2] Contract tests `test_operands_unmodified` (operand content **and** mtime unchanged after the run) and `test_no_files_created_or_modified` (snapshot the working directory before and after; nothing created, no temporary file, no cache, no log file) in `tests/test_cli_files.py` (FR-017, SR-007)
+-- [ ] T027 [P] [US2] Contract test `test_no_path_construction` in `tests/test_cli_errors.py`: an operand containing `..`, an operand that is a symlink, and an operand containing a glob character (`*`) are each used **exactly as supplied** — not resolved, normalised, joined, or expanded — and the diagnostic for a failing one quotes the operand as written on the command line (SR-008)
++- [X] T025 [P] [US2] Contract tests in `tests/test_cli_files.py`: `test_two_operands` (C-07), `test_operand_order` and `test_reverse_order` (operand order is honoured, never sorted — C-08), `test_repeated_operand` (the same name twice yields its redacted contents twice — C-10), and `test_stdin_not_read_when_operand_given` (with an operand present, piped stdin is neither blocked on nor consumed — C-09) (FR-001, FR-003)
++- [X] T026 [P] [US2] Contract tests `test_operands_unmodified` (operand content **and** mtime unchanged after the run) and `test_no_files_created_or_modified` (snapshot the working directory before and after; nothing created, no temporary file, no cache, no log file) in `tests/test_cli_files.py` (FR-017, SR-007)
++- [X] T027 [P] [US2] Contract test `test_no_path_construction` in `tests/test_cli_errors.py`: an operand containing `..`, an operand that is a symlink, and an operand containing a glob character (`*`) are each used **exactly as supplied** — not resolved, normalised, joined, or expanded — and the diagnostic for a failing one quotes the operand as written on the command line (SR-008)
+ 
+ ### Implementation for User Story 2
+ 
+-- [ ] T028 [US2] Build the ordered input-source list in `src/logredact/cli.py` from the parsed operands: iterate in operand order with no sorting and no de-duplication, and read standard input **only** when the operand list is empty. The ordered `list[str]` argparse produces is the representation — no source class (FR-002, FR-003, data-model.md Input source)
+-- [ ] T029 [US2] Open each operand in `src/logredact/cli.py` with `open(operand, "r", encoding="utf-8", errors="surrogateescape", newline="")`, context-managed, passing the operand string **verbatim** — no `os.path.join`, no `resolve`, no `glob`, no normalisation — and never opening any operand for writing, creation, or truncation (SR-008, FR-017, data-model.md Input source)
+-- [ ] T030 [US2] Factor the T023/T024 line loop in `src/logredact/cli.py` so it runs over each source in turn with one shared tally and one shared output stream, making stdout the concatenation of the redacted sources in operand order (FR-003, FR-008)
++- [X] T028 [US2] Build the ordered input-source list in `src/logredact/cli.py` from the parsed operands: iterate in operand order with no sorting and no de-duplication, and read standard input **only** when the operand list is empty. The ordered `list[str]` argparse produces is the representation — no source class (FR-002, FR-003, data-model.md Input source)
++- [X] T029 [US2] Open each operand in `src/logredact/cli.py` with `open(operand, "r", encoding="utf-8", errors="surrogateescape", newline="")`, context-managed, passing the operand string **verbatim** — no `os.path.join`, no `resolve`, no `glob`, no normalisation — and never opening any operand for writing, creation, or truncation (SR-008, FR-017, data-model.md Input source)
++- [X] T030 [US2] Factor the T023/T024 line loop in `src/logredact/cli.py` so it runs over each source in turn with one shared tally and one shared output stream, making stdout the concatenation of the redacted sources in operand order (FR-003, FR-008)
+ 
+ **Checkpoint**: User Stories 1 and 2 both work independently — stdin redaction and multi-operand redaction, both at status 0.
+ 
+@@ -134,12 +134,12 @@ assert the exact stderr line while stdout is unaffected by the flag (C-04, C-06)
+ 
+ > **Write these tests FIRST and confirm they FAIL before implementing T032–T033.**
+ 
+-- [ ] T031 [P] [US3] Contract tests in `tests/test_cli_count.py`: `test_count_format` — `a@b.io 1.2.3.4\n` with `--count` gives stdout exactly `[EMAIL] [IP]\n` and stderr exactly `emails=1 ips=1 cards=0\n` (C-04); `test_zero_counts` — empty stdin gives stderr exactly `emails=0 ips=0 cards=0\n` and status 0 (C-06); `test_totals_across_operands` — totals are per run, not per file (Story 3 scenario 3); `test_no_stderr_without_count` — without the flag a successful run writes **nothing at all** to stderr (FR-011); `test_summary_after_output` — stdout is complete and flushed before the tally is written (A-3); `test_summary_not_in_redirected_stdout` (C-19); `test_summary_is_exactly_three_integers` — the line matches `^emails=\d+ ips=\d+ cards=\d+\n$` with no sample value, line number, or file name (SR-004, SC-008, SC-009)
++- [X] T031 [P] [US3] Contract tests in `tests/test_cli_count.py`: `test_count_format` — `a@b.io 1.2.3.4\n` with `--count` gives stdout exactly `[EMAIL] [IP]\n` and stderr exactly `emails=1 ips=1 cards=0\n` (C-04); `test_zero_counts` — empty stdin gives stderr exactly `emails=0 ips=0 cards=0\n` and status 0 (C-06); `test_totals_across_operands` — totals are per run, not per file (Story 3 scenario 3); `test_no_stderr_without_count` — without the flag a successful run writes **nothing at all** to stderr (FR-011); `test_summary_after_output` — stdout is complete and flushed before the tally is written (A-3); `test_summary_not_in_redirected_stdout` (C-19); `test_summary_is_exactly_three_integers` — the line matches `^emails=\d+ ips=\d+ cards=\d+\n$` with no sample value, line number, or file name (SR-004, SC-008, SC-009)
+ 
+ ### Implementation for User Story 3
+ 
+-- [ ] T032 [US3] Accumulate the run tally in `src/logredact/cli.py` as one mutable `dict[str, int]` initialised to `{"emails": 0, "ips": 0, "cards": 0}`, threaded into `redact_line` and incremented by the replacer, accumulated across **all** sources in the run with no per-file tally (FR-010, A-1, data-model.md Run tally)
+-- [ ] T033 [US3] After the last source, in `src/logredact/cli.py`, flush standard output and then — **only** when `--count` was given **and** the run is exiting 0 — write exactly `emails=N ips=N cards=N` plus a newline to standard error, using a fixed format string over the three `int` counters so nothing derived from the data can reach it (FR-010, FR-011, SR-004, A-3, research.md R10)
++- [X] T032 [US3] Accumulate the run tally in `src/logredact/cli.py` as one mutable `dict[str, int]` initialised to `{"emails": 0, "ips": 0, "cards": 0}`, threaded into `redact_line` and incremented by the replacer, accumulated across **all** sources in the run with no per-file tally (FR-010, A-1, data-model.md Run tally)
++- [X] T033 [US3] After the last source, in `src/logredact/cli.py`, flush standard output and then — **only** when `--count` was given **and** the run is exiting 0 — write exactly `emails=N ips=N cards=N` plus a newline to standard error, using a fixed format string over the three `int` counters so nothing derived from the data can reach it (FR-010, FR-011, SR-004, A-3, research.md R10)
+ 
+ **Checkpoint**: User Stories 1, 2, and 3 all work independently. `--count` reports run totals on stderr; stdout is unchanged by the flag.
+ 
+@@ -164,20 +164,20 @@ are not read (FR-018, mandatory). T035 and T036 pin both halves.
+ 
+ > **Write these tests FIRST and confirm they FAIL before implementing T040–T044.**
+ 
+-- [ ] T034 [P] [US4] Contract tests in `tests/test_cli_errors.py`: `test_rejected_options`, parametrised over `--verbose`, `-h`, `--help`, `--cou`, and `--count=1`, asserting stderr describes the rejected option, **stdout is empty**, nothing is read, and the status is 2 (C-15, SR-001, A-5); and `test_double_dash_separator` — `--` followed by `-weird.log` treats `-weird.log` as a file operand (C-20)
+-- [ ] T035 [P] [US4] Contract tests in `tests/test_cli_errors.py` for unreadable operands: `test_missing_file` (C-11), `test_directory_operand` (C-12), and `test_unreadable_permissions` (C-13) — each asserting stderr contains the operand name as written and the status is 2. `test_unreadable_permissions` **must** carry `@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permissions")`; the missing-path and directory cases carry the FR-012 coverage unconditionally (FR-012, SC-007, research.md R13)
+-- [ ] T036 [P] [US4] Contract tests in `tests/test_cli_errors.py` for continue-and-report: `test_continues_past_unreadable_operand` — operands `a.log missing.log b.log` give stdout redacted `a.log` **followed by redacted `b.log`**, stderr naming `missing.log`, status 2 (C-23); `test_reports_every_unreadable_operand` — one diagnostic per failing operand in operand order (C-24); `test_no_tally_when_an_operand_failed` — with `--count`, no `emails=…` line at all (C-26) (FR-012, research.md R10)
+-- [ ] T037 [P] [US4] Contract tests in `tests/test_cli_errors.py` for the line cap: `test_over_length_line` — a third line of 1 MiB + 1 characters gives the first two lines redacted on stdout, **no part** of the third line on stdout, stderr naming the source and reporting the length, status 2 (C-16); `test_line_exactly_at_cap` marked `@pytest.mark.slow` — a line of exactly 1 MiB including its terminator is redacted and emitted normally, status 0 (C-17); `test_no_tally_on_over_length` (C-18); `test_over_length_line_stops_remaining_operands` — a later readable operand is **not** read and none of it appears on stdout, the counterpart to C-23 that pins the deliberate asymmetry (C-25) (FR-018, SR-005)
+-- [ ] T038 [P] [US4] Contract tests in `tests/test_cli_errors.py` for diagnostic hygiene: `test_diagnostic_has_no_input_data` — no input line, matched email, IP, card, or fragment of one appears on stderr on any failure path; `test_no_traceback_on_any_error_path` — stderr contains no `Traceback` for every failure mode above (C-14); `test_shell_metacharacters_in_operand_name` — an operand containing `;`, `|`, `$(…)`, and backticks is treated as a plain file name; and the static check `test_no_subprocess_import` asserting the shipped package imports neither `subprocess` nor `os.system` and calls neither `eval` nor `exec` (SR-002, SR-003, SC-008)
+-- [ ] T039 [P] [US4] Contract tests in `tests/test_cli_errors.py`: `test_write_failure_fails_run` — with stdout pointed at a sink that fails on write or flush, the run writes `cannot write output: …` to stderr and exits 2, never reporting success (SR-009); and `test_broken_pipe_status_141` — stdout closed early (piped to `head -1`) gives no traceback on stderr and status 141 (C-22, A-7)
++- [X] T034 [P] [US4] Contract tests in `tests/test_cli_errors.py`: `test_rejected_options`, parametrised over `--verbose`, `-h`, `--help`, `--cou`, and `--count=1`, asserting stderr describes the rejected option, **stdout is empty**, nothing is read, and the status is 2 (C-15, SR-001, A-5); and `test_double_dash_separator` — `--` followed by `-weird.log` treats `-weird.log` as a file operand (C-20)
++- [X] T035 [P] [US4] Contract tests in `tests/test_cli_errors.py` for unreadable operands: `test_missing_file` (C-11), `test_directory_operand` (C-12), and `test_unreadable_permissions` (C-13) — each asserting stderr contains the operand name as written and the status is 2. `test_unreadable_permissions` **must** carry `@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permissions")`; the missing-path and directory cases carry the FR-012 coverage unconditionally (FR-012, SC-007, research.md R13)
++- [X] T036 [P] [US4] Contract tests in `tests/test_cli_errors.py` for continue-and-report: `test_continues_past_unreadable_operand` — operands `a.log missing.log b.log` give stdout redacted `a.log` **followed by redacted `b.log`**, stderr naming `missing.log`, status 2 (C-23); `test_reports_every_unreadable_operand` — one diagnostic per failing operand in operand order (C-24); `test_no_tally_when_an_operand_failed` — with `--count`, no `emails=…` line at all (C-26) (FR-012, research.md R10)
++- [X] T037 [P] [US4] Contract tests in `tests/test_cli_errors.py` for the line cap: `test_over_length_line` — a third line of 1 MiB + 1 characters gives the first two lines redacted on stdout, **no part** of the third line on stdout, stderr naming the source and reporting the length, status 2 (C-16); `test_line_exactly_at_cap` marked `@pytest.mark.slow` — a line of exactly 1 MiB including its terminator is redacted and emitted normally, status 0 (C-17); `test_no_tally_on_over_length` (C-18); `test_over_length_line_stops_remaining_operands` — a later readable operand is **not** read and none of it appears on stdout, the counterpart to C-23 that pins the deliberate asymmetry (C-25) (FR-018, SR-005)
++- [X] T038 [P] [US4] Contract tests in `tests/test_cli_errors.py` for diagnostic hygiene: `test_diagnostic_has_no_input_data` — no input line, matched email, IP, card, or fragment of one appears on stderr on any failure path; `test_no_traceback_on_any_error_path` — stderr contains no `Traceback` for every failure mode above (C-14); `test_shell_metacharacters_in_operand_name` — an operand containing `;`, `|`, `$(…)`, and backticks is treated as a plain file name; and the static check `test_no_subprocess_import` asserting the shipped package imports neither `subprocess` nor `os.system` and calls neither `eval` nor `exec` (SR-002, SR-003, SC-008)
++- [X] T039 [P] [US4] Contract tests in `tests/test_cli_errors.py`: `test_write_failure_fails_run` — with stdout pointed at a sink that fails on write or flush, the run writes `cannot write output: …` to stderr and exits 2, never reporting success (SR-009); and `test_broken_pipe_status_141` — stdout closed early (piped to `head -1`) gives no traceback on stderr and status 141 (C-22, A-7)
+ 
+ ### Implementation for User Story 4
+ 
+-- [ ] T040 [US4] Handle open and read failures in `src/logredact/cli.py`: catch `OSError` **narrowly at the open/read boundary only** — never a bare `except` and never an `except Exception` that neither re-raises nor reports — write one line per failing operand to stderr in the shape `python -m logredact: error: cannot read 'FILE': REASON` where `FILE` is the operand exactly as given and `REASON` is the OS `strerror`, set a single run-level boolean failure flag, and **continue to the next source**. Report a read failure on standard input the same way, naming the source `standard input` (FR-012, A-6, SR-003, Principle II, research.md R10)
+-- [ ] T041 [US4] Enforce the line cap in `src/logredact/cli.py`: a chunk from `readline(MAX_LINE_CHARS + 1)` of length exactly `MAX_LINE_CHARS + 1` is over-length — write `python -m logredact: error: SOURCE: line exceeds the maximum length of 1048576 characters` to stderr, where `SOURCE` is the operand as given or `standard input`, write **no part** of that line (redacted, unredacted, or truncated) to stdout, **stop the run immediately** without reading any later operand, write no tally, and return `EXIT_ERROR`. Keep the detection memory-bounded: never read the whole line before rejecting it (FR-018, SR-005, SC-010, research.md R2)
+-- [ ] T042 [US4] Handle output failures in `src/logredact/cli.py`: treat an `OSError` from a `write` or `flush` as a failed run with `python -m logredact: error: cannot write output: REASON` on stderr and status 2, and flush standard output explicitly before the tally **and** before returning success, so a buffered ENOSPC or EIO cannot surface after a 0 exit (SR-009, A-3, research.md R12)
+-- [ ] T043 [US4] Handle `BrokenPipeError` in `src/logredact/cli.py`: redirect the standard-output file descriptor to `os.devnull` with `os.dup2` so the interpreter cannot emit a second failure at shutdown, write nothing further, and exit `128 + signal.SIGPIPE` (141) with no traceback. Do not restore `SIGPIPE` to `SIG_DFL`, which would change interpreter-wide signal state (A-7, research.md R11)
+-- [ ] T044 [US4] Resolve the final status in `src/logredact/cli.py`: after all sources, return `EXIT_ERROR` if the T040 failure flag is set, otherwise `EXIT_OK`, and suppress the `--count` tally on **any** non-zero exit so a partial tally can never be mistaken for a complete one. Status 2 is a single failure status however many operands failed — not a count, and no distinct status per failure kind (FR-012, FR-015, A-5, research.md R10)
++- [X] T040 [US4] Handle open and read failures in `src/logredact/cli.py`: catch `OSError` **narrowly at the open/read boundary only** — never a bare `except` and never an `except Exception` that neither re-raises nor reports — write one line per failing operand to stderr in the shape `python -m logredact: error: cannot read 'FILE': REASON` where `FILE` is the operand exactly as given and `REASON` is the OS `strerror`, set a single run-level boolean failure flag, and **continue to the next source**. Report a read failure on standard input the same way, naming the source `standard input` (FR-012, A-6, SR-003, Principle II, research.md R10)
++- [X] T041 [US4] Enforce the line cap in `src/logredact/cli.py`: a chunk from `readline(MAX_LINE_CHARS + 1)` of length exactly `MAX_LINE_CHARS + 1` is over-length — write `python -m logredact: error: SOURCE: line exceeds the maximum length of 1048576 characters` to stderr, where `SOURCE` is the operand as given or `standard input`, write **no part** of that line (redacted, unredacted, or truncated) to stdout, **stop the run immediately** without reading any later operand, write no tally, and return `EXIT_ERROR`. Keep the detection memory-bounded: never read the whole line before rejecting it (FR-018, SR-005, SC-010, research.md R2)
++- [X] T042 [US4] Handle output failures in `src/logredact/cli.py`: treat an `OSError` from a `write` or `flush` as a failed run with `python -m logredact: error: cannot write output: REASON` on stderr and status 2, and flush standard output explicitly before the tally **and** before returning success, so a buffered ENOSPC or EIO cannot surface after a 0 exit (SR-009, A-3, research.md R12)
++- [X] T043 [US4] Handle `BrokenPipeError` in `src/logredact/cli.py`: redirect the standard-output file descriptor to `os.devnull` with `os.dup2` so the interpreter cannot emit a second failure at shutdown, write nothing further, and exit `128 + signal.SIGPIPE` (141) with no traceback. Do not restore `SIGPIPE` to `SIG_DFL`, which would change interpreter-wide signal state (A-7, research.md R11)
++- [X] T044 [US4] Resolve the final status in `src/logredact/cli.py`: after all sources, return `EXIT_ERROR` if the T040 failure flag is set, otherwise `EXIT_OK`, and suppress the `--count` tally on **any** non-zero exit so a partial tally can never be mistaken for a complete one. Status 2 is a single failure status however many operands failed — not a count, and no distinct status per failure kind (FR-012, FR-015, A-5, research.md R10)
+ 
+ **Checkpoint**: All four user stories are independently functional. Every invalid-input row of the plan.md Principle II table produces its stated diagnostic and status.
+ 
+@@ -185,13 +185,13 @@ are not read (FR-018, mandatory). T035 and T036 pin both halves.
+ 
+ ## Phase 7: Polish & Cross-Cutting Concerns
+ 
+-- [ ] T045 [P] Extend `tests/test_resource_bounds.py` with the memory bounds, both marked `@pytest.mark.slow`: `test_peak_memory_independent_of_input_size` — a run over an input at least 100x the tool's peak memory (~200 MiB of realistic log lines) completes with status 0 and peak RSS that does not grow with total input size (SC-006, FR-016); and `test_over_length_line_not_loaded_into_memory` — a single very long line (8 MiB, standing in for the 1 GB case) is rejected with status 2 at a traced peak of roughly 2 MiB, not the line's length (SC-010, SR-005)
+-- [ ] T046 Verify the requirement-to-test mapping in [plan.md](./plan.md) against the implemented suite: every FR-001…FR-018, SR-001…SR-009, and SC-001…SC-010 item has at least one **passing** test, and correct any test name that drifted from the table. An unmapped requirement blocks the implementation gate (SC-002, Principle III)
+-- [ ] T047 Run the full suite in `tests/` from the repository root — `pytest -q`, then `pytest -q -m "not slow"` — and report the result faithfully: every failing or skipped test must be named, with the root-only permission skip of T035 the only expected skip. Claiming completion while a test fails violates the constitution's Reporting rule (Principle III, Development Workflow and Quality Gates)
+-- [ ] T048 Walk [quickstart.md](./quickstart.md) end-to-end with `PYTHONPATH=src` and confirm every documented command produces its stated output, including the four smoke-check worked examples, the invalid-UTF-8 `od -c` check, the continue-past-unreadable run, and the two line-cap runs. Fix any drift between the guide and the delivered behaviour
+-- [ ] T049 [P] Check the measured performance tripwires from [research.md](./research.md) R14 still hold: at least 1 MB/s on realistic log text (measured 4.7 MB/s, ~50,000 lines/s), any adversarial 1 MiB line under 10 s (measured 3.4 s worst case), and ~2 MiB peak while rejecting an 8 MiB line. A regression here presents as a hang, not a slowdown
+-- [ ] T050 [P] Record the non-obvious rationale as comments in `src/logredact/redact.py` — why the email lookbehind exists (linear time, SR-005) and why the Luhn sum is incremental and two-parity (bounded time and memory, SC-010) — so a later reader does not "simplify" either one back into the Phase 0 defect (plan.md Complexity Tracking, Principle IV)
+-- [ ] T051 Review the delivered code in `src/logredact/` (`__init__.py`, `__main__.py`, `redact.py`, `cli.py`) against all five constitution principles: no third-party runtime import (I); no bare `except`, no swallowed error, no sentinel return (II); no unmapped requirement (III); no class, configuration object, per-file tally, accumulated match list, or other abstraction beyond the four source files (IV); no waived Security Baseline control, and SR-001…SR-009 each still covered by a passing test (V) (Review gate)
++- [X] T045 [P] Extend `tests/test_resource_bounds.py` with the memory bounds, both marked `@pytest.mark.slow`: `test_peak_memory_independent_of_input_size` — a run over an input at least 100x the tool's peak memory (~200 MiB of realistic log lines) completes with status 0 and peak RSS that does not grow with total input size (SC-006, FR-016); and `test_over_length_line_not_loaded_into_memory` — a single very long line (8 MiB, standing in for the 1 GB case) is rejected with status 2 at a traced peak of roughly 2 MiB, not the line's length (SC-010, SR-005)
++- [X] T046 Verify the requirement-to-test mapping in [plan.md](./plan.md) against the implemented suite: every FR-001…FR-018, SR-001…SR-009, and SC-001…SC-010 item has at least one **passing** test, and correct any test name that drifted from the table. An unmapped requirement blocks the implementation gate (SC-002, Principle III)
++- [X] T047 Run the full suite in `tests/` from the repository root — `pytest -q`, then `pytest -q -m "not slow"` — and report the result faithfully: every failing or skipped test must be named, with the root-only permission skip of T035 the only expected skip. Claiming completion while a test fails violates the constitution's Reporting rule (Principle III, Development Workflow and Quality Gates)
++- [X] T048 Walk [quickstart.md](./quickstart.md) end-to-end with `PYTHONPATH=src` and confirm every documented command produces its stated output, including the four smoke-check worked examples, the invalid-UTF-8 `od -c` check, the continue-past-unreadable run, and the two line-cap runs. Fix any drift between the guide and the delivered behaviour
++- [X] T049 [P] Check the measured performance tripwires from [research.md](./research.md) R14 still hold: at least 1 MB/s on realistic log text (measured 4.7 MB/s, ~50,000 lines/s), any adversarial 1 MiB line under 10 s (measured 3.4 s worst case), and ~2 MiB peak while rejecting an 8 MiB line. A regression here presents as a hang, not a slowdown
++- [X] T050 [P] Record the non-obvious rationale as comments in `src/logredact/redact.py` — why the email lookbehind exists (linear time, SR-005) and why the Luhn sum is incremental and two-parity (bounded time and memory, SC-010) — so a later reader does not "simplify" either one back into the Phase 0 defect (plan.md Complexity Tracking, Principle IV)
++- [X] T051 Review the delivered code in `src/logredact/` (`__init__.py`, `__main__.py`, `redact.py`, `cli.py`) against all five constitution principles: no third-party runtime import (I); no bare `except`, no swallowed error, no sentinel return (II); no unmapped requirement (III); no class, configuration object, per-file tally, accumulated match list, or other abstraction beyond the four source files (IV); no waived Security Baseline control, and SR-001…SR-009 each still covered by a passing test (V) (Review gate)
+ 
+ ---
+ 
+diff --git a/src/logredact/__init__.py b/src/logredact/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/src/logredact/__main__.py b/src/logredact/__main__.py
+new file mode 100644
+index 0000000..b798da5
+--- /dev/null
++++ b/src/logredact/__main__.py
+@@ -0,0 +1,5 @@
++"""Entry point for `python -m logredact` (FR-001)."""
++
++from .cli import main
++
++raise SystemExit(main())
+diff --git a/src/logredact/cli.py b/src/logredact/cli.py
+new file mode 100644
+index 0000000..03a4a18
+--- /dev/null
++++ b/src/logredact/cli.py
+@@ -0,0 +1,212 @@
++"""Command-line interface: argument allowlist, input sources, line loop, diagnostics, tally.
++
++Standard output carries the redacted input and nothing else, ever. Standard error carries
++diagnostics and the `--count` tally only, and never any input data (SR-003,
++contracts/cli.md Streams).
++"""
++
++import argparse
++import os
++import signal
++import sys
++
++from .redact import MAX_LINE_CHARS, redact_line
++
++EXIT_OK = 0
++EXIT_ERROR = 2
++EXIT_SIGPIPE = 128 + signal.SIGPIPE  # 141, the usual convention for a closed pipe (A-7)
++
++PROG = "python -m logredact"
++
++#: The name a diagnostic uses for standard input (A-6, FR-018).
++STDIN_NAME = "standard input"
++
++# Shared text-stream settings for every input and for standard output (research.md R3).
++# `surrogateescape` maps each undecodable byte to a lone surrogate and re-encodes it to the
++# identical byte on output (A-4); `newline=""` disables newline translation, so `\n`, `\r\n`, a
++# lone `\r` and a missing final terminator all survive unchanged (FR-009).
++STREAM_SETTINGS = {"encoding": "utf-8", "errors": "surrogateescape", "newline": ""}
++
++
++class _OverLengthLine(Exception):
++    """A line exceeded the cap, so the run must stop at once (FR-018).
++
++    Carried as an exception rather than a return code because it unwinds past the per-source
++    loop: FR-018 says the tool "MUST stop processing", so no later operand is read. Its argument
++    is the source's display name — never any part of the offending line (SR-003).
++    """
++
++
++def _error(message):
++    """Write one diagnostic line to standard error (Principle II, SR-003).
++
++    `message` is assembled from fixed literals plus, at most, the operand the caller supplied
++    and the operating system's own `strerror`. No input line, match, or fragment of one is ever
++    formatted into a diagnostic, and the input is never used as a format string (SR-002, SR-003).
++    """
++    sys.stderr.write(PROG + ": error: " + message + "\n")
++
++
++def _reason(exc):
++    """The operating system's message for an `OSError` — it names the file and the reason."""
++    return exc.strerror if exc.strerror else str(exc)
++
++
++def _report_unreadable(display_name, exc):
++    _error("cannot read '" + display_name + "': " + _reason(exc))
++
++
++def _write_tally(tally):
++    """Write the one-line run tally to standard error (FR-010, SR-004).
++
++    A fixed format string over the three `int` counters, so nothing derived from the data can
++    reach it: no sample value, no line number, no file name (research.md R10).
++    """
++    sys.stderr.write(
++        "emails=%d ips=%d cards=%d\n" % (tally["emails"], tally["ips"], tally["cards"])
++    )
++
++
++def _abandon_stdout():
++    """Point the standard-output descriptor at `os.devnull`.
++
++    After a failed write the unwritten data is still in the buffer, and after a closed pipe there
++    is no reader left. In both cases the interpreter would try to flush again during shutdown and
++    emit a second, unhandled failure — `Exception ignored in: <_io.TextIOWrapper ...>` — on
++    standard error, after the run had already reported the problem properly. Redirecting the
++    descriptor makes that final flush a no-op.
++
++    The standard Python idiom, in preference to restoring `SIGPIPE` to `SIG_DFL`, which would
++    change interpreter-wide signal state (research.md R11).
++    """
++    devnull = os.open(os.devnull, os.O_WRONLY)
++    try:
++        os.dup2(devnull, sys.stdout.fileno())
++    finally:
++        os.close(devnull)
++
++
++def _build_parser():
++    """The strict argument allowlist of SR-001.
++
++    `add_help=False` and `allow_abbrev=False` are required, not stylistic: the argparse defaults
++    would accept `--cou` as an abbreviation of `--count` and would make `-h` write help to
++    *standard output* and exit *0*, both of which SR-001 forbids (research.md R9).
++    """
++    parser = argparse.ArgumentParser(
++        prog=PROG,
++        add_help=False,
++        allow_abbrev=False,
++        usage="%(prog)s [--count] [FILE ...]",
++    )
++    parser.add_argument("--count", action="store_true")
++    parser.add_argument("files", nargs="*", metavar="FILE")
++    return parser
++
++
++def _redact_stream(stream, display_name, tally, out):
++    """Redact `stream` line by line onto `out`.
++
++    Returns `True` when the whole stream was processed and `False` when a read failed, in which
++    case the failure has already been reported and the rest of this source is skipped (FR-012,
++    A-6). Raises `_OverLengthLine` when a line exceeds the cap (FR-018).
++
++    `readline(MAX_LINE_CHARS + 1)` is what bounds peak memory to one line: it stops at the first
++    of a terminator, the limit, or EOF, so a chunk shorter than the limit is a complete line, a
++    chunk of exactly the limit is an over-length line, and no line is ever read beyond the cap
++    plus one `TextIOWrapper` read chunk before being rejected (FR-016, SR-005, research.md R2).
++    """
++    while True:
++        try:
++            chunk = stream.readline(MAX_LINE_CHARS + 1)
++        except OSError as exc:
++            # Caught narrowly, at the read boundary only, and always reported (Principle II).
++            _report_unreadable(display_name, exc)
++            return False
++        if chunk == "":
++            return True
++        if len(chunk) == MAX_LINE_CHARS + 1:
++            # No part of this line — redacted, unredacted, or truncated — is written (FR-018).
++            raise _OverLengthLine(display_name)
++        out.write(redact_line(chunk, tally))
++
++
++def _run(args, out):
++    """Redact every source onto `out` in operand order. Returns the exit status."""
++    # One mutable tally for the whole run, threaded into redact_line and incremented by the
++    # replacer. Accumulated across all sources: there is no per-file tally (FR-010, A-1).
++    tally = {"emails": 0, "ips": 0, "cards": 0}
++
++    # One run-level flag. Status 2 is a single failure status however many operands failed: not
++    # a count, and no distinct status per failure kind (A-5, FR-012, research.md R10).
++    failed = False
++
++    # The ordered operand list argparse produced *is* the representation: no sorting, no
++    # de-duplication, no source class. `None` stands for standard input, which is read only when
++    # there are no operands (FR-002, FR-003, data-model.md Input source).
++    try:
++        for operand in args.files if args.files else [None]:
++            if operand is None:
++                stream = sys.stdin
++                stream.reconfigure(**STREAM_SETTINGS)
++                if not _redact_stream(stream, STDIN_NAME, tally, out):
++                    failed = True
++                continue
++
++            try:
++                # The operand string is passed verbatim: no os.path.join, no resolve, no glob,
++                # no normalisation, and never opened for writing, creation or truncation
++                # (SR-008, FR-017).
++                handle = open(operand, "r", **STREAM_SETTINGS)
++            except OSError as exc:
++                # Reported and skipped: every remaining operand is still processed and the status
++                # is settled at the end of the run (FR-012, research.md R10). This is the
++                # deliberate counterpart to the over-length line below, which stops the run.
++                _report_unreadable(operand, exc)
++                failed = True
++                continue
++            with handle:
++                if not _redact_stream(handle, operand, tally, out):
++                    failed = True
++    except _OverLengthLine as over_length:
++        # Output already written for earlier lines remains written (FR-018), so flush it before
++        # reporting, and read no later operand.
++        out.flush()
++        _error(
++            str(over_length)
++            + ": line exceeds the maximum length of "
++            + str(MAX_LINE_CHARS)
++            + " characters"
++        )
++        return EXIT_ERROR
++
++    # Flush before the tally so a caller watching both streams sees the complete log first
++    # (A-3), and before returning success so a buffered ENOSPC or EIO cannot surface after a 0
++    # exit (SR-009, research.md R12).
++    out.flush()
++    if failed:
++        return EXIT_ERROR
++    # The tally is written only when --count was given *and* the run is exiting 0, so a partial
++    # tally can never be mistaken for a complete one (FR-010, FR-018, research.md R10).
++    if args.count:
++        _write_tally(tally)
++    return EXIT_OK
++
++
++def main(argv=None):
++    """Entry point. Returns the process exit status: 0, 2, or 141 and nothing else."""
++    args = _build_parser().parse_args(argv)
++    sys.stdout.reconfigure(**STREAM_SETTINGS)
++    try:
++        return _run(args, sys.stdout)
++    except BrokenPipeError:
++        # Standard output was closed early by the consumer. Not a successful run (A-7).
++        _abandon_stdout()
++        return EXIT_SIGPIPE
++    except OSError as exc:
++        # Reached only from a write or flush on standard output: every read is handled at its own
++        # boundary above. A run whose output was not fully written is never reported as a success
++        # (SR-009, research.md R12).
++        _error("cannot write output: " + _reason(exc))
++        _abandon_stdout()
++        return EXIT_ERROR
+diff --git a/src/logredact/redact.py b/src/logredact/redact.py
+new file mode 100644
+index 0000000..2fb9cf7
+--- /dev/null
++++ b/src/logredact/redact.py
+@@ -0,0 +1,197 @@
++"""Recognition and replacement rules.
++
++Pure: text in, redacted text out plus counter increments. No I/O happens here, which is what lets
++the recognition cases run as fast in-process unit tests (plan.md Structure Decision).
++
++The three fixed categories, their placeholders and their precedence are constants, not
++configuration: A-9 leaves nothing to configure, so no option, environment variable or file can
++change any value below (SR-005, FR-006, data-model.md Module-level constants).
++"""
++
++import re
++
++MAX_LINE_CHARS = 1 << 20
++"""1,048,576 characters *including* the line terminator. The cap is inclusive: a line of exactly
++1 MiB is accepted, one character more is refused (SR-005, FR-018)."""
++
++MIN_CARD_DIGITS = 13
++MAX_CARD_DIGITS = 19
++
++EMAIL_PLACEHOLDER = "[EMAIL]"
++IP_PLACEHOLDER = "[IP]"
++CARD_PLACEHOLDER = "[CARD]"
++
++
++# ===============================================================================================
++# Patterns
++# ===============================================================================================
++
++_EMAIL = (
++    # DO NOT REMOVE this lookbehind. It is required for linear-time matching (SR-005), not
++    # cosmetic. Without it the engine re-consumes the whole local-part run at every start
++    # position inside it, which is quadratic: measured 7,142 ms for an 80 KB line, extrapolating
++    # to ~1.5 hours for one 1 MiB line — a usable denial of service. With it, every position but
++    # the first character of a run fails in one comparison (measured 1.2 ms at 80 KB).
++    #
++    # It provably does not change which text matches: the local part must end at the `@`, so
++    # every start position inside one run reaches the same `@` and evaluates the same domain
++    # text. Rejecting all but the run's first start removes duplicate work, never a match.
++    # (research.md R5, contracts/redaction-rules.md)
++    r"(?<![A-Za-z0-9._%+-])"
++    r"[A-Za-z0-9._%+-]+"  # local part (FR-004)
++    r"@"
++    r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"  # dot-separated letter/digit/hyphen labels
++    r"\.[A-Za-z]{2,}"  # last label: at least two letters, and at least two labels (R6)
++)
++
++# Each octet is 0-255 with no leading zeros beyond a single `0` (FR-005). The branches are
++# mutually exclusive, so there is nothing to backtrack into: linear by construction (SR-005).
++_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])"
++
++_IPV4 = (
++    r"(?<![0-9.])"  # FR-013: not flanked by a digit or a dot
++    + _OCTET
++    + r"(?:\."
++    + _OCTET
++    + r"){3}"
++    r"(?![0-9.])"
++)
++
++# A *maximal* run of digit groups joined by single spaces or single hyphens. Doubled separators
++# deliberately do not match `[ -]`, which is what leaves `4111  1111  1111  1111` and
++# `4111--1111--1111--1111` alone (FR-006, research.md R8).
++#
++# `[0-9]` rather than `\d`: FR-006 says *decimal* digits and A-4 limits the rules to the ASCII
++# range, whereas `\d` would also match non-ASCII decimal digits, which `ord(ch) - 48` below
++# cannot score.
++_CARD_RUN = r"(?<![0-9])[0-9]+(?:[ -][0-9]+)*"
++
++#: One compiled pattern, three named alternatives **in precedence order**. The alternation order
++#: *is* the precedence — there is no enum, registry or rule table (FR-014, A-2, research.md R4).
++PATTERN = re.compile(
++    "(?P<email>" + _EMAIL + ")|(?P<ip>" + _IPV4 + ")|(?P<card>" + _CARD_RUN + ")"
++)
++
++
++# ===============================================================================================
++# Card candidate selection
++# ===============================================================================================
++
++
++def _longest_candidate(run, start, end):
++    """Length in characters of the longest card candidate starting at `run[start]`, else 0.
++
++    A candidate is a contiguous sequence of *whole* groups whose total digit count is 13 to 19,
++    whose internal separators are all the same single space or single hyphen, and whose digits
++    pass Luhn. `start` must be a group's first digit; a candidate may only end at a group's last
++    digit, which is exactly FR-013's "not flanked by a digit".
++
++    The Luhn sum is kept incrementally in two parities and in O(1) extra memory, because
++    appending a digit flips the doubling parity of every earlier digit:
++
++        A' = B + digit          A = sum with the rightmost digit *not* doubled (the real sum)
++        B' = A + doubled(digit) B = sum with the rightmost digit doubled
++
++    This is not a premature micro-optimisation. The straightforward version — tokenise the run,
++    join each candidate and re-checksum it — measured 15.8 s for one adversarial 1 MiB line and
++    allocated ~500,000 strings for it, breaking the fixed memory bound of SC-010. Do not
++    "simplify" it back (SR-005, SC-010, research.md R8).
++    """
++    a = 0
++    b = 0
++    digits = 0
++    separator = ""
++    best = 0
++    index = start
++    while index < end:
++        value = ord(run[index]) - 48
++        if 0 <= value <= 9:
++            a, b = b + value, a + (2 * value - 9 if value > 4 else 2 * value)
++            digits += 1
++            index += 1
++            if digits > MAX_CARD_DIGITS:
++                break
++            # A candidate must end at a group's last digit, so only consider it when the next
++            # character is not a digit.
++            if digits >= MIN_CARD_DIGITS and (
++                index >= end or not "0" <= run[index] <= "9"
++            ):
++                if a % 10 == 0:
++                    best = index - start
++        else:
++            # A separator. The first one crossed fixes the candidate's separator; a different
++            # one ends the candidate (FR-006 "the same separator character throughout").
++            character = run[index]
++            if separator == "":
++                separator = character
++            elif character != separator:
++                break
++            index += 1
++    return best
++
++
++def _redact_cards(run, tally):
++    """Replace every card candidate inside one matched digit run.
++
++    Candidates are selected leftmost first, longest at that position; scanning continues after
++    the replaced candidate. Every character of the run that is not part of a redacted candidate
++    is reproduced unchanged — including the separator between two adjacent cards, which an
++    earlier design swallowed (FR-008, Phase 0 regression, research.md R8).
++    """
++    end = len(run)
++    pieces = None  # built only once something is actually redacted
++    copied = 0  # how much of `run` has been copied into `pieces`
++    index = 0
++    while index < end:
++        length = _longest_candidate(run, index, end)
++        if length:
++            if pieces is None:
++                pieces = []
++            pieces.append(run[copied:index])
++            pieces.append(CARD_PLACEHOLDER)
++            tally["cards"] += 1
++            index += length
++            copied = index
++            # Step over the separator that follows the candidate; it is preserved, because the
++            # next copied slice starts at `copied`.
++            while index < end and not ("0" <= run[index] <= "9"):
++                index += 1
++        else:
++            # No candidate starts here: step to the first digit of the next group.
++            while index < end and "0" <= run[index] <= "9":
++                index += 1
++            while index < end and not ("0" <= run[index] <= "9"):
++                index += 1
++    if pieces is None:
++        return run
++    pieces.append(run[copied:])
++    return "".join(pieces)
++
++
++# ===============================================================================================
++# Replacement
++# ===============================================================================================
++
++
++def _replace(match, tally):
++    """Replace one match with its kind's placeholder, counting it once (A-1, FR-014)."""
++    kind = match.lastgroup
++    if kind == "email":
++        tally["emails"] += 1
++        return EMAIL_PLACEHOLDER
++    if kind == "ip":
++        tally["ips"] += 1
++        return IP_PLACEHOLDER
++    # A card run may contain zero, one or several candidates; each redaction counts once.
++    return _redact_cards(match.group(), tally)
++
++
++def redact_line(text, tally):
++    """Return `text` with every match replaced, incrementing `tally` once per replacement.
++
++    `re.sub`'s own semantics deliver FR-014 — leftmost match, non-overlapping matches,
++    alternatives tried in written order, and replaced text never re-scanned — so there is no
++    bookkeeping of our own here. No match list is accumulated, so memory stays bounded by one
++    line (FR-016, research.md R4).
++    """
++    return PATTERN.sub(lambda match: _replace(match, tally), text)
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000..ae07b4d
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,52 @@
++"""Shared test harness.
++
++The contract tests run the real command in a subprocess and compare **raw bytes** on stdout and
++stderr plus the exit status. Bytes rather than decoded text is deliberate: the byte-for-byte
++guarantees of FR-009 and the invalid-UTF-8 pass-through of A-4 cannot be asserted on a decoded
++string, because the decoding would hide exactly the difference under test (research.md R13).
++"""
++
++import os
++import subprocess
++import sys
++from pathlib import Path
++
++import pytest
++
++REPO_ROOT = Path(__file__).resolve().parent.parent
++SRC = REPO_ROOT / "src"
++
++#: Shape of a diagnostic prefix, as contracts/cli.md specifies it.
++ERROR_PREFIX = b"python -m logredact: error:"
++
++
++def cli_env():
++    """Environment for a child process running the tool: `src/` on PYTHONPATH (A-10)."""
++    env = dict(os.environ)
++    env["PYTHONPATH"] = str(SRC)
++    return env
++
++
++def cli_argv(*args):
++    """The argument vector for `python -m logredact ...`."""
++    return [sys.executable, "-m", "logredact", *args]
++
++
++@pytest.fixture
++def run_cli():
++    """Run `python -m logredact *args` and return `(status, stdout_bytes, stderr_bytes)`."""
++
++    def _run(*args, stdin=b"", cwd=None, timeout=300, stdout=None):
++        completed = subprocess.run(
++            cli_argv(*args),
++            input=stdin,
++            stdout=subprocess.PIPE if stdout is None else stdout,
++            stderr=subprocess.PIPE,
++            env=cli_env(),
++            cwd=None if cwd is None else str(cwd),
++            timeout=timeout,
++            check=False,
++        )
++        return completed.returncode, completed.stdout, completed.stderr
++
++    return _run
+diff --git a/tests/test_cli_count.py b/tests/test_cli_count.py
+new file mode 100644
+index 0000000..1241408
+--- /dev/null
++++ b/tests/test_cli_count.py
+@@ -0,0 +1,113 @@
++"""Contract tests for User Story 3 — the `--count` tally (FR-010, FR-011, SR-004, A-3)."""
++
++import re
++import subprocess
++
++from conftest import cli_argv, cli_env
++
++TALLY = re.compile(rb"^emails=\d+ ips=\d+ cards=\d+\n$")
++
++
++def test_count_format(run_cli):
++    """C-04: the worked example, byte-for-byte on both streams."""
++    status, stdout, stderr = run_cli("--count", stdin=b"a@b.io 1.2.3.4\n")
++    assert stdout == b"[EMAIL] [IP]\n"
++    assert stderr == b"emails=1 ips=1 cards=0\n"
++    assert status == 0
++
++
++def test_zero_counts(run_cli):
++    """C-06: empty input still reports an all-zero tally, status 0."""
++    status, stdout, stderr = run_cli("--count", stdin=b"")
++    assert (status, stdout, stderr) == (0, b"", b"emails=0 ips=0 cards=0\n")
++
++
++def test_totals_across_operands(run_cli, tmp_path):
++    """Story 3 scenario 3: totals are per run, not per file."""
++    a = tmp_path / "a.log"
++    b = tmp_path / "b.log"
++    a.write_bytes(b"jane@example.com 10.0.0.7\n")
++    b.write_bytes(b"jane@example.com 4111 1111 1111 1111\njane@example.com\n")
++
++    status, stdout, stderr = run_cli("--count", str(a), str(b))
++    assert status == 0
++    assert stdout == b"[EMAIL] [IP]\n[EMAIL] [CARD]\n[EMAIL]\n"
++    assert stderr == b"emails=3 ips=1 cards=1\n"
++
++    # the same operand twice counts twice (A-1)
++    status, _, stderr = run_cli("--count", str(a), str(a))
++    assert status == 0
++    assert stderr == b"emails=2 ips=2 cards=0\n"
++
++
++def test_no_stderr_without_count(run_cli, tmp_path):
++    """FR-011: without the flag, a successful run writes nothing at all to stderr."""
++    a = tmp_path / "a.log"
++    a.write_bytes(b"jane@example.com 10.0.0.7 4111 1111 1111 1111\n")
++    for args, stdin in (((str(a),), b""), ((), b"jane@example.com\n"), ((), b"")):
++        status, _, stderr = run_cli(*args, stdin=stdin)
++        assert status == 0
++        assert stderr == b""
++
++
++def test_summary_after_output():
++    """A-3: stdout is complete and flushed before the tally is written.
++
++    Both streams are merged into one pipe, so the order below is the order the writes happened.
++    """
++    completed = subprocess.run(
++        cli_argv("--count"),
++        input=b"jane@example.com\n10.0.0.7\n4111111111111111\n",
++        stdout=subprocess.PIPE,
++        stderr=subprocess.STDOUT,
++        env=cli_env(),
++        timeout=60,
++        check=False,
++    )
++    assert completed.returncode == 0
++    assert completed.stdout == b"[EMAIL]\n[IP]\n[CARD]\nemails=1 ips=1 cards=1\n"
++
++
++def test_summary_not_in_redirected_stdout(run_cli, tmp_path):
++    """C-19: with stdout redirected to a file, the tally is not in that file."""
++    out = tmp_path / "out.log"
++    with open(out, "wb") as sink:
++        completed = subprocess.run(
++            cli_argv("--count"),
++            input=b"jane@example.com 1.2.3.4\n",
++            stdout=sink,
++            stderr=subprocess.PIPE,
++            env=cli_env(),
++            timeout=60,
++            check=False,
++        )
++    assert completed.returncode == 0
++    assert out.read_bytes() == b"[EMAIL] [IP]\n"
++    assert b"emails=" not in out.read_bytes()
++    assert completed.stderr == b"emails=1 ips=1 cards=0\n"
++
++
++def test_summary_is_exactly_three_integers(run_cli, tmp_path):
++    """SR-004, SC-008, SC-009: no sample value, line number or file name reaches the tally."""
++    source = tmp_path / "payments.log"
++    source.write_bytes(
++        b"jane.doe@example.com paid with 4111 1111 1111 1111 from 192.168.0.10\n"
++        b"second line a@b.io 10.0.0.7 4111-1111-1111-1111\n"
++    )
++    status, _, stderr = run_cli("--count", str(source))
++    assert status == 0
++    assert TALLY.match(stderr), stderr
++    assert stderr == b"emails=2 ips=2 cards=2\n"
++
++    for leak in (
++        b"jane",
++        b"example.com",
++        b"4111",
++        b"192.168",
++        b"10.0.0.7",
++        b"payments.log",
++        b"line",
++        b"1:",
++        b"2:",
++    ):
++        assert leak not in stderr
+diff --git a/tests/test_cli_errors.py b/tests/test_cli_errors.py
+new file mode 100644
+index 0000000..8fb64c3
+--- /dev/null
++++ b/tests/test_cli_errors.py
+@@ -0,0 +1,529 @@
++"""Contract tests for User Story 4 — failure modes (FR-012, FR-018, SR-001…SR-003, SR-008).
++
++Contract IDs are from contracts/cli.md. Every failure mode asserts three things: the diagnostic
++names the source, nothing of the input leaks onto stderr, and the status is 2 (or 141 for a
++closed pipe).
++"""
++
++import ast
++import os
++import re
++import signal
++import subprocess
++import sys
++from pathlib import Path
++
++import pytest
++
++from conftest import SRC, cli_argv, cli_env
++
++A_CONTENT = b"first jane@example.com\n"
++A_REDACTED = b"first [EMAIL]\n"
++B_CONTENT = b"second 10.0.0.7\n"
++B_REDACTED = b"second [IP]\n"
++
++CAP = 1 << 20
++
++
++def write_pair(tmp_path):
++    a = tmp_path / "a.log"
++    b = tmp_path / "b.log"
++    a.write_bytes(A_CONTENT)
++    b.write_bytes(B_CONTENT)
++    return a, b
++
++
++def write_over_length(tmp_path, name="long.log"):
++    """Two ordinary lines, then a line of CAP + 1 characters including its terminator."""
++    path = tmp_path / name
++    path.write_bytes(A_CONTENT + B_CONTENT + b"x" * CAP + b"\n")
++    return path
++
++
++# ===============================================================================================
++# T027 — operands are used exactly as supplied (SR-008)
++# ===============================================================================================
++
++
++def test_no_path_construction(run_cli, tmp_path):
++    """SR-008: no resolution, normalisation, joining, or globbing of an operand.
++
++    The diagnostic for a failing operand quotes it exactly as written on the command line, which
++    is also how a caller recognises which of their arguments failed (FR-012).
++    """
++    nested = tmp_path / "sub"
++    nested.mkdir()
++    target = nested / "a.log"
++    target.write_bytes(A_CONTENT)
++
++    # 1. A relative operand containing `..` is passed to open() as given, not resolved away.
++    status, stdout, stderr = run_cli("../sub/a.log", cwd=nested)
++    assert (status, stdout, stderr) == (0, A_REDACTED, b"")
++
++    # ... and when such an operand fails, the diagnostic quotes it as written, not resolved.
++    status, stdout, stderr = run_cli("../sub/missing.log", cwd=nested)
++    assert status == 2
++    assert b"'../sub/missing.log'" in stderr
++    assert bytes(str(tmp_path), "utf-8") not in stderr
++    assert stdout == b""
++
++    # 2. A symlink is opened as supplied.
++    link = nested / "link.log"
++    link.symlink_to(target)
++    status, stdout, stderr = run_cli(str(link))
++    assert (status, stdout, stderr) == (0, A_REDACTED, b"")
++
++    # 3. A glob character is not expanded: `*.log` is a literal file name, so it does not exist
++    #    even though a.log and link.log are both present in the working directory.
++    status, stdout, stderr = run_cli("*.log", cwd=nested)
++    assert status == 2
++    assert b"'*.log'" in stderr
++    assert stdout == b""
++
++    # 4. A literal file whose name contains a glob character is read, again as supplied.
++    starred = nested / "*.log"
++    starred.write_bytes(A_CONTENT)
++    try:
++        status, stdout, stderr = run_cli("*.log", cwd=nested)
++        assert (status, stdout, stderr) == (0, A_REDACTED, b"")
++    finally:
++        os.unlink(starred)
++
++
++# ===============================================================================================
++# T034 — the argument allowlist (SR-001, A-5, C-15, C-20)
++# ===============================================================================================
++
++REJECTED_OPTIONS = ["--verbose", "-h", "--help", "--cou", "--count=1"]
++
++
++@pytest.mark.parametrize("option", REJECTED_OPTIONS)
++def test_rejected_options(option, tmp_path):
++    """C-15, SR-001: rejected on stderr, nothing on stdout, nothing read, status 2."""
++    payload = b"jane@example.com\n"
++    read_fd, write_fd = os.pipe()
++    os.write(write_fd, payload)
++    os.close(write_fd)
++    try:
++        completed = subprocess.run(
++            cli_argv(option),
++            stdin=read_fd,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            env=cli_env(),
++            timeout=60,
++            check=False,
++        )
++        assert completed.returncode == 2
++        assert completed.stdout == b""
++        assert option.split("=")[0].encode() in completed.stderr
++        assert b"usage: python -m logredact" in completed.stderr
++        assert b"Traceback" not in completed.stderr
++        # nothing was read: the payload is still queued in the pipe
++        assert os.read(read_fd, len(payload)) == payload
++    finally:
++        os.close(read_fd)
++
++
++def test_help_is_not_written_to_stdout(run_cli):
++    """SR-001: `-h`/`--help` must not write to stdout nor exit 0 (research.md R9)."""
++    for option in ("-h", "--help"):
++        status, stdout, stderr = run_cli(option)
++        assert status == 2
++        assert stdout == b""
++        assert stderr != b""
++
++
++def test_double_dash_separator(run_cli, tmp_path):
++    """C-20: `--` followed by `-weird.log` treats it as a file operand."""
++    weird = tmp_path / "-weird.log"
++    weird.write_bytes(A_CONTENT)
++    status, stdout, stderr = run_cli("--", "-weird.log", cwd=tmp_path)
++    assert (status, stdout, stderr) == (0, A_REDACTED, b"")
++
++    # and without `--` it is rejected as an unknown option, not silently treated as a file
++    status, stdout, stderr = run_cli("-weird.log", cwd=tmp_path)
++    assert status == 2
++    assert stdout == b""
++
++
++# ===============================================================================================
++# T035 — unreadable operands (FR-012, SC-007, C-11…C-13)
++# ===============================================================================================
++
++
++def test_missing_file(run_cli, tmp_path):
++    """C-11: a path that does not exist."""
++    missing = tmp_path / "does-not-exist.log"
++    status, stdout, stderr = run_cli(str(missing))
++    assert status == 2
++    assert stdout == b""
++    assert str(missing).encode() in stderr
++    assert b"No such file or directory" in stderr
++    assert b"Traceback" not in stderr
++
++
++def test_directory_operand(run_cli, tmp_path):
++    """C-12: a path naming a directory."""
++    status, stdout, stderr = run_cli(str(tmp_path))
++    assert status == 2
++    assert stdout == b""
++    assert str(tmp_path).encode() in stderr
++    assert b"Is a directory" in stderr
++    assert b"Traceback" not in stderr
++
++
++@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permissions")
++def test_unreadable_permissions(run_cli, tmp_path):
++    """C-13: a path whose permissions deny reading."""
++    denied = tmp_path / "denied.log"
++    denied.write_bytes(A_CONTENT)
++    os.chmod(denied, 0o000)
++    try:
++        status, stdout, stderr = run_cli(str(denied))
++        assert status == 2
++        assert stdout == b""
++        assert str(denied).encode() in stderr
++        assert b"Permission denied" in stderr
++        assert b"Traceback" not in stderr
++    finally:
++        os.chmod(denied, 0o600)
++
++
++# ===============================================================================================
++# T036 — continue past an unreadable operand (FR-012, research.md R10, C-23…C-26)
++# ===============================================================================================
++
++
++def test_continues_past_unreadable_operand(run_cli, tmp_path):
++    """C-23: `a.log missing.log b.log` still redacts both readable operands."""
++    a, b = write_pair(tmp_path)
++    missing = tmp_path / "missing.log"
++    status, stdout, stderr = run_cli(str(a), str(missing), str(b))
++    assert stdout == A_REDACTED + B_REDACTED
++    assert status == 2
++    assert b"missing.log" in stderr
++    assert b"Traceback" not in stderr
++
++
++def test_reports_every_unreadable_operand(run_cli, tmp_path):
++    """C-24: one diagnostic per failing operand, in operand order."""
++    a, _ = write_pair(tmp_path)
++    first = tmp_path / "missing1.log"
++    second = tmp_path / "missing2.log"
++    status, stdout, stderr = run_cli(str(first), str(second), str(a))
++    assert status == 2
++    assert stdout == A_REDACTED
++
++    lines = stderr.splitlines()
++    assert len(lines) == 2, stderr
++    assert b"missing1.log" in lines[0]
++    assert b"missing2.log" in lines[1]
++
++
++def test_no_tally_when_an_operand_failed(run_cli, tmp_path):
++    """C-26: with `--count`, a failed run writes no tally at all."""
++    a, _ = write_pair(tmp_path)
++    missing = tmp_path / "missing.log"
++    status, stdout, stderr = run_cli("--count", str(a), str(missing))
++    assert status == 2
++    assert stdout == A_REDACTED
++    assert b"emails=" not in stderr
++    assert b"missing.log" in stderr
++
++
++# ===============================================================================================
++# T037 — the line-length cap (FR-018, SR-005, C-16…C-18, C-25)
++# ===============================================================================================
++
++
++def test_over_length_line(run_cli, tmp_path):
++    """C-16: the first two lines appear; no part of the third does; status 2."""
++    long_log = write_over_length(tmp_path)
++    status, stdout, stderr = run_cli(str(long_log))
++    assert status == 2
++    assert stdout == A_REDACTED + B_REDACTED
++    assert b"x" not in stdout
++    assert str(long_log).encode() in stderr
++    assert b"line exceeds the maximum length of 1048576 characters" in stderr
++    assert b"Traceback" not in stderr
++
++
++@pytest.mark.slow
++def test_line_exactly_at_cap(run_cli, tmp_path):
++    """C-17: a line of exactly 1 MiB *including* its terminator is redacted normally."""
++    # the space matters: without it the filler would be part of the domain's last label, and
++    # `jane@example.comxxx…` is then one (correctly redacted) email address
++    value = b"jane@example.com "
++    filler = b"x" * (CAP - len(value) - 1)
++    at_cap = tmp_path / "at-cap.log"
++    at_cap.write_bytes(value + filler + b"\n")
++    assert len(at_cap.read_bytes()) == CAP
++
++    status, stdout, stderr = run_cli(str(at_cap))
++    assert status == 0
++    assert stdout == b"[EMAIL] " + filler + b"\n"
++    assert stderr == b""
++
++
++def test_no_tally_on_over_length(run_cli, tmp_path):
++    """C-18: no tally is written for a run that ends on an over-length line."""
++    long_log = write_over_length(tmp_path)
++    status, stdout, stderr = run_cli("--count", str(long_log))
++    assert status == 2
++    assert stdout == A_REDACTED + B_REDACTED
++    assert b"emails=" not in stderr
++
++
++def test_over_length_line_stops_remaining_operands(run_cli, tmp_path):
++    """C-25: the run stops at once — a later readable operand is never read.
++
++    This is the deliberate counterpart to C-23: FR-018 requires an over-length line to stop
++    processing, while an unreadable operand is skipped and the run continues (research.md R10).
++    """
++    long_log = write_over_length(tmp_path)
++    a, _ = write_pair(tmp_path)
++    status, stdout, stderr = run_cli(str(long_log), str(a))
++    assert status == 2
++    assert stdout == A_REDACTED + B_REDACTED  # the two short lines of long.log only
++    assert b"first [EMAIL]\nfirst [EMAIL]" not in stdout
++    assert stdout.count(A_REDACTED) == 1
++    assert str(long_log).encode() in stderr
++    assert str(a).encode() not in stderr
++
++
++# ===============================================================================================
++# T038 — diagnostic hygiene (SR-002, SR-003, SC-008, C-14)
++# ===============================================================================================
++
++SENSITIVE = b"jane.doe@example.com 192.168.0.10 4111 1111 1111 1111\n"
++LEAKS = [b"jane", b"example.com", b"192.168", b"4111", b"1111", b"doe"]
++
++
++def _failure_runs(tmp_path):
++    """Every handled failure path, as `(label, argv, stdin)` triples."""
++    sensitive = tmp_path / "sensitive.log"
++    sensitive.write_bytes(SENSITIVE)
++    over_length = tmp_path / "over.log"
++    over_length.write_bytes(SENSITIVE + b"x" * CAP + b"\n")
++    return [
++        ("missing operand", [str(tmp_path / "missing.log")], b""),
++        ("directory operand", [str(tmp_path)], b""),
++        ("rejected option", ["--verbose"], SENSITIVE),
++        ("over-length file", ["--count", str(over_length)], b""),
++        ("over-length stdin", ["--count"], SENSITIVE + b"x" * CAP + b"\n"),
++        ("missing then readable", [str(tmp_path / "gone.log"), str(sensitive)], b""),
++    ]
++
++
++def test_diagnostic_has_no_input_data(tmp_path):
++    """SR-003, SC-008: no input line, match, or fragment of one appears on stderr."""
++    for label, argv, stdin in _failure_runs(tmp_path):
++        completed = subprocess.run(
++            cli_argv(*argv),
++            input=stdin,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            env=cli_env(),
++            timeout=120,
++            check=False,
++        )
++        assert completed.returncode == 2, (label, completed.returncode)
++        for leak in LEAKS:
++            assert leak not in completed.stderr, (label, leak, completed.stderr)
++        assert b"[EMAIL]" not in completed.stderr, label
++        assert b"[CARD]" not in completed.stderr, label
++
++
++def test_no_traceback_on_any_error_path(tmp_path):
++    """C-14: stderr carries no Python traceback on any handled failure path."""
++    for label, argv, stdin in _failure_runs(tmp_path):
++        completed = subprocess.run(
++            cli_argv(*argv),
++            input=stdin,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            env=cli_env(),
++            timeout=120,
++            check=False,
++        )
++        assert b"Traceback" not in completed.stderr, (label, completed.stderr)
++        assert b"Exception ignored" not in completed.stderr, (label, completed.stderr)
++        assert b"Error:" not in completed.stderr, (label, completed.stderr)
++        assert completed.stderr.endswith(b"\n"), label
++
++
++def test_shell_metacharacters_in_operand_name(run_cli, tmp_path):
++    """SR-002: an operand is a plain file name, never anything a shell would interpret."""
++    name = "a;b|c$(id)`id`&d.log"
++    path = tmp_path / name
++    path.write_bytes(A_CONTENT)
++
++    status, stdout, stderr = run_cli(name, cwd=tmp_path)
++    assert (status, stdout, stderr) == (0, A_REDACTED, b"")
++
++    status, stdout, stderr = run_cli("missing;$(id)`id`.log", cwd=tmp_path)
++    assert status == 2
++    assert b"'missing;$(id)`id`.log'" in stderr
++    assert b"uid=" not in stderr
++    assert b"uid=" not in stdout
++
++
++def test_no_subprocess_import():
++    """SR-002: the shipped package starts no process and evaluates no code."""
++    forbidden_modules = {"subprocess", "shlex", "pty", "popen2", "commands"}
++    offences = []
++    for source_file in sorted(Path(SRC).rglob("*.py")):
++        tree = ast.parse(source_file.read_text(), filename=str(source_file))
++        for node in ast.walk(tree):
++            if isinstance(node, ast.Import):
++                for alias in node.names:
++                    if alias.name.split(".")[0] in forbidden_modules:
++                        offences.append((source_file.name, alias.name))
++            elif isinstance(node, ast.ImportFrom):
++                if (node.module or "").split(".")[0] in forbidden_modules:
++                    offences.append((source_file.name, node.module))
++            elif isinstance(node, ast.Call):
++                target = node.func
++                if isinstance(target, ast.Name) and target.id in {"eval", "exec", "compile"}:
++                    offences.append((source_file.name, target.id))
++                if isinstance(target, ast.Attribute) and target.attr in {
++                    "system",
++                    "popen",
++                    "spawn",
++                    "spawnl",
++                    "spawnv",
++                    "execv",
++                    "execl",
++                }:
++                    offences.append((source_file.name, target.attr))
++    assert offences == []
++
++
++def test_requirement_to_test_mapping():
++    """SC-002, Principle III: no requirement is left unmapped, and no name has drifted.
++
++    plan.md records the requirement-to-test mapping so an unmapped requirement is visible before
++    implementation starts. Checking it here turns the implementation gate into something that
++    fails loudly instead of something a reader has to re-verify by hand.
++    """
++    specs = Path(__file__).resolve().parent.parent / "specs" / "001-logredact-cli"
++    plan = (specs / "plan.md").read_text()
++
++    defined = set()
++    for source_file in sorted(Path(__file__).resolve().parent.glob("test_*.py")):
++        tree = ast.parse(source_file.read_text(), filename=str(source_file))
++        for node in tree.body:
++            if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
++                defined.add((source_file.name, node.name))
++    by_name = {}
++    for file_name, test_name in defined:
++        by_name.setdefault(test_name, set()).add(file_name)
++
++    expected = (
++        {"FR-%03d" % n for n in range(1, 19)}
++        | {"SR-%03d" % n for n in range(1, 10)}
++        | {"SC-%03d" % n for n in range(1, 11)}
++    )
++
++    mapped = set()
++    unknown = []
++    wrong_file = []
++    for row in plan.splitlines():
++        if not re.match(r"^\| (FR|SR|SC)-\d+", row):
++            continue
++        cells = row.split("|")
++        requirement = cells[1].strip().split()[0]
++        mapped.add(requirement)
++        cell = cells[2]
++        files = re.findall(r"test_[A-Za-z0-9_]+\.py", cell)
++        for name in sorted(set(re.findall(r"test_[A-Za-z0-9_]+", re.sub(r"test_[A-Za-z0-9_]+\.py", "", cell)))):
++            if name not in by_name:
++                unknown.append((requirement, name))
++            elif files and not (set(files) & by_name[name]):
++                wrong_file.append((requirement, name, sorted(by_name[name])))
++
++    assert unknown == [], unknown
++    assert wrong_file == [], wrong_file
++    assert expected - mapped == set(), sorted(expected - mapped)
++    # SC-002 is the only item the table maps to itself: it is this check.
++    unmapped_to_a_test = {
++        requirement
++        for requirement in expected
++        if not re.search(
++            r"^\| " + requirement + r"[^|]*\|[^|]*test_", plan, re.MULTILINE
++        )
++    }
++    assert unmapped_to_a_test == {"SC-002"}, sorted(unmapped_to_a_test)
++
++
++def test_only_standard_library_imports():
++    """Principle I: no third-party module is imported by shipped code."""
++    allowed = set(sys.stdlib_module_names) | {"logredact"}
++    offences = []
++    for source_file in sorted(Path(SRC).rglob("*.py")):
++        tree = ast.parse(source_file.read_text(), filename=str(source_file))
++        for node in ast.walk(tree):
++            if isinstance(node, ast.Import):
++                for alias in node.names:
++                    if alias.name.split(".")[0] not in allowed:
++                        offences.append((source_file.name, alias.name))
++            elif isinstance(node, ast.ImportFrom) and node.level == 0:
++                if (node.module or "").split(".")[0] not in allowed:
++                    offences.append((source_file.name, node.module))
++    assert offences == []
++
++
++# ===============================================================================================
++# T039 — write failures and a closed downstream pipe (SR-009, A-7, C-22)
++# ===============================================================================================
++
++
++@pytest.mark.skipif(not os.path.exists("/dev/full"), reason="needs /dev/full")
++def test_write_failure_fails_run(tmp_path):
++    """SR-009: a run whose output could not be written is never reported as success."""
++    with open("/dev/full", "wb") as sink:
++        completed = subprocess.run(
++            cli_argv("--count"),
++            input=b"jane@example.com\n" * 100,
++            stdout=sink,
++            stderr=subprocess.PIPE,
++            env=cli_env(),
++            timeout=60,
++            check=False,
++        )
++    assert completed.returncode == 2, completed.stderr
++    assert b"cannot write output" in completed.stderr
++    assert b"emails=" not in completed.stderr
++    assert b"Traceback" not in completed.stderr
++    assert b"Exception ignored" not in completed.stderr
++
++
++def test_broken_pipe_status_141(tmp_path):
++    """C-22, A-7: stdout closed early gives no traceback and status 141."""
++    source = tmp_path / "many.log"
++    source.write_bytes(b"jane@example.com\n" * 300000)
++
++    head = subprocess.Popen(
++        ["head", "-1"], stdin=subprocess.PIPE, stdout=subprocess.PIPE
++    )
++    with open(source, "rb") as handle:
++        tool = subprocess.Popen(
++            cli_argv(),
++            stdin=handle,
++            stdout=head.stdin,
++            stderr=subprocess.PIPE,
++            env=cli_env(),
++        )
++    head.stdin.close()
++    head_output = head.stdout.read()
++    head.stdout.close()
++    head.wait(timeout=60)
++    stderr = tool.communicate(timeout=120)[1]
++
++    assert head_output == b"[EMAIL]\n"
++    assert tool.returncode == 128 + signal.SIGPIPE
++    assert tool.returncode == 141
++    assert b"Traceback" not in stderr
++    assert b"Exception ignored" not in stderr
++    assert b"emails=" not in stderr
+diff --git a/tests/test_cli_files.py b/tests/test_cli_files.py
+new file mode 100644
+index 0000000..d115c74
+--- /dev/null
++++ b/tests/test_cli_files.py
+@@ -0,0 +1,138 @@
++"""Contract tests for User Story 2 — named FILE operands (FR-001, FR-003, FR-017, SR-007)."""
++
++import os
++import subprocess
++
++from conftest import cli_argv, cli_env
++
++A_CONTENT = b"first jane@example.com\n"
++A_REDACTED = b"first [EMAIL]\n"
++B_CONTENT = b"second 10.0.0.7\nthird 4111 1111 1111 1111\n"
++B_REDACTED = b"second [IP]\nthird [CARD]\n"
++
++
++def write_pair(tmp_path):
++    a = tmp_path / "a.log"
++    b = tmp_path / "b.log"
++    a.write_bytes(A_CONTENT)
++    b.write_bytes(B_CONTENT)
++    return a, b
++
++
++def test_two_operands(run_cli, tmp_path):
++    """C-07: stdout is redacted `a.log` immediately followed by redacted `b.log`."""
++    a, b = write_pair(tmp_path)
++    status, stdout, stderr = run_cli(str(a), str(b))
++    assert stdout == A_REDACTED + B_REDACTED
++    assert stderr == b""
++    assert status == 0
++
++
++def test_operand_order(run_cli, tmp_path):
++    """C-08: operand order is honoured, never sorted."""
++    a, b = write_pair(tmp_path)
++    status, stdout, _ = run_cli(str(a), str(b))
++    assert status == 0
++    assert stdout == A_REDACTED + B_REDACTED
++
++
++def test_reverse_order(run_cli, tmp_path):
++    """C-08: the reverse operand order gives the reverse output order."""
++    a, b = write_pair(tmp_path)
++    status, stdout, _ = run_cli(str(b), str(a))
++    assert status == 0
++    assert stdout == B_REDACTED + A_REDACTED
++
++
++def test_repeated_operand(run_cli, tmp_path):
++    """C-10: the same operand twice yields its redacted contents twice."""
++    a, _ = write_pair(tmp_path)
++    status, stdout, stderr = run_cli(str(a), str(a))
++    assert stdout == A_REDACTED + A_REDACTED
++    assert stderr == b""
++    assert status == 0
++
++
++def test_stdin_not_read_when_operand_given(tmp_path):
++    """C-09: with an operand present, piped stdin is neither blocked on nor consumed."""
++    a, _ = write_pair(tmp_path)
++    payload = b"ignored jane@example.com\n"
++    read_fd, write_fd = os.pipe()
++    os.write(write_fd, payload)
++    os.close(write_fd)
++    try:
++        completed = subprocess.run(
++            cli_argv(str(a)),
++            stdin=read_fd,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            env=cli_env(),
++            timeout=60,
++            check=False,
++        )
++        assert completed.returncode == 0
++        assert completed.stdout == A_REDACTED
++        assert completed.stderr == b""
++        # The payload is still queued in the pipe, so it was never consumed. Had the tool read
++        # it, every writer would be closed and this read would return b"" at EOF.
++        assert os.read(read_fd, len(payload)) == payload
++    finally:
++        os.close(read_fd)
++
++
++def test_operands_unmodified(run_cli, tmp_path):
++    """FR-017: operand content and mtime are unchanged after the run."""
++    a, b = write_pair(tmp_path)
++    before = {p: (p.read_bytes(), os.stat(p).st_mtime_ns) for p in (a, b)}
++
++    status, stdout, _ = run_cli(str(a), str(b))
++    assert status == 0
++    assert stdout == A_REDACTED + B_REDACTED
++
++    for path, (content, mtime) in before.items():
++        assert path.read_bytes() == content
++        assert os.stat(path).st_mtime_ns == mtime
++
++
++def _snapshot(root):
++    entries = {}
++    for current, directories, files in os.walk(root):
++        directories.sort()
++        for name in sorted(files) + sorted(directories):
++            path = os.path.join(current, name)
++            info = os.stat(path, follow_symlinks=False)
++            entries[os.path.relpath(path, root)] = (info.st_size, info.st_mtime_ns)
++    return entries
++
++
++def test_no_files_created_or_modified(run_cli, tmp_path):
++    """SR-007: nothing is created — no temporary file, no cache, no log file."""
++    a, b = write_pair(tmp_path)
++    before = _snapshot(tmp_path)
++
++    status, stdout, _ = run_cli(str(a), str(b), "--count", cwd=tmp_path)
++    assert status == 0
++    assert stdout == A_REDACTED + B_REDACTED
++
++    assert _snapshot(tmp_path) == before
++
++
++def test_empty_operand_file(run_cli, tmp_path):
++    """An empty file contributes nothing and is not an error (FR-015)."""
++    empty = tmp_path / "empty.log"
++    empty.write_bytes(b"")
++    a, _ = write_pair(tmp_path)
++    status, stdout, stderr = run_cli(str(empty), str(a), str(empty))
++    assert (status, stdout, stderr) == (0, A_REDACTED, b"")
++
++
++def test_operand_without_final_newline_concatenates_exactly(run_cli, tmp_path):
++    """FR-008, FR-009: no terminator is added between operands."""
++    first = tmp_path / "first.log"
++    second = tmp_path / "second.log"
++    first.write_bytes(b"no newline jane@example.com")
++    second.write_bytes(b"next 10.0.0.7\n")
++    status, stdout, stderr = run_cli(str(first), str(second))
++    assert stdout == b"no newline [EMAIL]next [IP]\n"
++    assert stderr == b""
++    assert status == 0
+diff --git a/tests/test_cli_stream.py b/tests/test_cli_stream.py
+new file mode 100644
+index 0000000..8178315
+--- /dev/null
++++ b/tests/test_cli_stream.py
+@@ -0,0 +1,119 @@
++"""Contract tests for User Story 1 — the piped stream (FR-001, FR-002, FR-009, FR-015).
++
++Everything here runs the real `python -m logredact` in a subprocess and compares raw bytes, which
++is the only way to verify FR-001 and the byte-for-byte guarantees against the delivered interface
++(research.md R13).
++"""
++
++import pytest
++
++
++def test_module_invocation(run_cli):
++    """C-01: the tool is invocable as `python -m logredact` (FR-001)."""
++    status, stdout, stderr = run_cli(stdin=b"user jane@example.com from 10.0.0.7\n")
++    assert (status, stdout, stderr) == (0, b"user [EMAIL] from [IP]\n", b"")
++
++
++def test_reads_stdin_when_no_operands(run_cli):
++    """C-01: with no operand the input comes from standard input (FR-002)."""
++    status, stdout, stderr = run_cli(stdin=b"host 10.0.0.7\n")
++    assert status == 0
++    assert stdout == b"host [IP]\n"
++    assert stderr == b""
++
++
++WORKED_EXAMPLES = [
++    # C-01
++    (b"user jane@example.com from 10.0.0.7\n", b"user [EMAIL] from [IP]\n"),
++    # C-02 — the Luhn-failing 13-digit run is untouched
++    (
++        b"paid with 4111 1111 1111 1111, ref 1234567890123\n",
++        b"paid with [CARD], ref 1234567890123\n",
++    ),
++    # C-03 — the out-of-range quad is untouched
++    (b"host 999.1.1.1 and 192.168.0.10\n", b"host 999.1.1.1 and [IP]\n"),
++]
++
++
++@pytest.mark.parametrize("stdin,expected", WORKED_EXAMPLES)
++def test_worked_examples(run_cli, stdin, expected):
++    """SC-001: all three worked examples reproduce byte-for-byte, stderr empty, status 0."""
++    status, stdout, stderr = run_cli(stdin=stdin)
++    assert stdout == expected
++    assert stderr == b""
++    assert status == 0
++
++
++PASSTHROUGH = [
++    b"GET /health 200 in 3ms\n",
++    b"2026-11-05T10:00:00Z INFO service started\n",
++    b"release v1.2.3-rc4 deployed\n",
++    b"[EMAIL] already present\n",
++    b"ref 1234567890123 rejected\n",
++    b"host 999.1.1.1 unreachable\n",
++    b"user@localhost connected\n",
++]
++
++
++def test_passthrough_byte_identical(run_cli):
++    """C-21: input with no redactable values comes back byte-for-byte (FR-009)."""
++    payload = b"".join(PASSTHROUGH)
++    status, stdout, stderr = run_cli(stdin=payload)
++    assert stdout == payload
++    assert stderr == b""
++    assert status == 0
++
++
++TERMINATOR_CASES = [
++    b"a@b.io\n",
++    b"a@b.io\r\n",
++    b"a@b.io\r",
++    b"a@b.io",
++    b"one\ntwo\r\nthree\rfour",
++    b"\n\n\n",
++    b"\r\n\r\n",
++]
++
++
++@pytest.mark.parametrize("stdin", TERMINATOR_CASES)
++def test_crlf_and_missing_final_newline(run_cli, stdin):
++    """FR-009: `\\n`, `\\r\\n`, a lone `\\r` and a missing final terminator are all exact."""
++    status, stdout, stderr = run_cli(stdin=stdin)
++    expected = stdin.replace(b"a@b.io", b"[EMAIL]")
++    assert stdout == expected
++    assert stderr == b""
++    assert status == 0
++
++
++def test_invalid_utf8_passed_through(run_cli):
++    """A-4: bytes that are not valid UTF-8 survive unchanged."""
++    stdin = b"caf\xe9 jane@example.com \xff\xfe\n"
++    status, stdout, stderr = run_cli(stdin=stdin)
++    assert stdout == b"caf\xe9 [EMAIL] \xff\xfe\n"
++    assert b"\xe9" in stdout
++    assert stderr == b""
++    assert status == 0
++
++
++def test_empty_stdin(run_cli):
++    """C-05: empty input gives empty output and status 0."""
++    status, stdout, stderr = run_cli(stdin=b"")
++    assert (status, stdout, stderr) == (0, b"", b"")
++
++
++def test_status_zero_on_success(run_cli):
++    """C-05, FR-015: any run that is not an error exits 0."""
++    for stdin in (b"", b"\n", b"nothing to redact\n", b"jane@example.com\n"):
++        status, _, stderr = run_cli(stdin=stdin)
++        assert status == 0
++        assert stderr == b""
++
++
++def test_many_lines_in_one_stream(run_cli):
++    """Lines are processed independently and concatenated in order (FR-008, FR-016)."""
++    stdin = b"".join(b"line %d jane@example.com\n" % n for n in range(500))
++    expected = b"".join(b"line %d [EMAIL]\n" % n for n in range(500))
++    status, stdout, stderr = run_cli(stdin=stdin)
++    assert stdout == expected
++    assert stderr == b""
++    assert status == 0
+diff --git a/tests/test_redaction_rules.py b/tests/test_redaction_rules.py
+new file mode 100644
+index 0000000..e3c7f93
+--- /dev/null
++++ b/tests/test_redaction_rules.py
+@@ -0,0 +1,388 @@
++"""Unit tests for the recognition rules (FR-004…008, FR-013, FR-014, SR-002, SR-006).
++
++These call `redact_line()` directly, which is fast and lets the exact string and the exact tally
++be asserted (research.md R13). Every table row in contracts/redaction-rules.md appears below.
++"""
++
++import pytest
++
++from logredact.redact import (
++    CARD_PLACEHOLDER,
++    EMAIL_PLACEHOLDER,
++    IP_PLACEHOLDER,
++    redact_line,
++)
++
++
++def redact(text):
++    """Redact `text`, discarding the tally."""
++    return redact_line(text, new_tally())
++
++
++def redact_counting(text):
++    """Redact `text`, returning `(output, tally)`."""
++    tally = new_tally()
++    return redact_line(text, tally), tally
++
++
++def new_tally():
++    return {"emails": 0, "ips": 0, "cards": 0}
++
++
++# --- Luhn-valid card numbers, one per length FR-006 allows (13…19) --------------------------
++
++VALID_CARDS = [
++    "4222222222222",        # 13
++    "30569309025904",       # 14
++    "378282246310005",      # 15
++    "4111111111111111",     # 16
++    "41111111111111113",    # 17
++    "411111111111111118",   # 18
++    "4111111111111111110",  # 19
++]
++
++
++# ===========================================================================================
++# T009 — email shapes (FR-004)
++# ===========================================================================================
++
++EMAIL_ROWS = [
++    ("jane@example.com", EMAIL_PLACEHOLDER),
++    ("jane.doe+test@mail.example.com", EMAIL_PLACEHOLDER),
++    # the sentence period is not part of the match
++    ("mail jane@example.com.", "mail " + EMAIL_PLACEHOLDER + "."),
++    # email precedence: redacted once, as one email, not carved into an IPv4 address
++    ("a@1.2.3.4.example.com", EMAIL_PLACEHOLDER),
++    # a domain needs at least one dot (research.md R6)
++    ("user@localhost", "user@localhost"),
++    # no local part
++    ("@property", "@property"),
++    # last label shorter than two letters
++    ("jane@example.c", "jane@example.c"),
++]
++
++
++@pytest.mark.parametrize("text,expected", EMAIL_ROWS)
++def test_email_shapes(text, expected):
++    assert redact(text) == expected
++
++
++# ===========================================================================================
++# T010 — IPv4 shapes (FR-005, FR-013, research.md R7)
++# ===========================================================================================
++
++
++@pytest.mark.parametrize("text", ["0.0.0.0", "255.255.255.255", "192.168.0.10"])
++def test_ipv4_shapes(text):
++    assert redact(text) == IP_PLACEHOLDER
++
++
++@pytest.mark.parametrize("text", ["999.1.1.1", "256.1.1.1", "1.2.3", "1.2.3.4.5"])
++def test_ipv4_out_of_range(text):
++    assert redact(text) == text
++
++
++def test_ipv4_flanked_by_digit_or_dot():
++    # leading zero is not a valid octet, and the inner 1.2.3.4 is blocked by the preceding digit
++    assert redact("01.2.3.4") == "01.2.3.4"
++    # flanked by `v` and `-`, neither a digit nor a dot, so FR-013 does not block it
++    assert redact("v10.0.0.7-beta") == "v" + IP_PLACEHOLDER + "-beta"
++
++
++# ===========================================================================================
++# T011 — card groupings, Luhn, flanking, separator preservation
++#        (FR-006, FR-007, FR-008, FR-013)
++# ===========================================================================================
++
++
++@pytest.mark.parametrize(
++    "text",
++    [
++        "4111111111111111",
++        "4111 1111 1111 1111",
++        "4111-1111-1111-1111",
++    ],
++)
++def test_card_groupings(text):
++    assert redact(text) == CARD_PLACEHOLDER
++
++
++@pytest.mark.parametrize("text", VALID_CARDS)
++def test_card_every_allowed_length(text):
++    assert redact(text) == CARD_PLACEHOLDER
++
++
++@pytest.mark.parametrize(
++    "text",
++    [
++        "1234567890123",          # 13 digits, Luhn fails
++        "4111  1111  1111  1111",  # doubled separators
++        "4111 1111-1111 1111",    # mixed separators
++        "4111--1111--1111--1111",  # doubled separators
++    ],
++)
++def test_luhn_failure_untouched(text):
++    assert redact(text) == text
++
++
++@pytest.mark.parametrize(
++    "text",
++    [
++        "1234114111111111111111",  # 22-digit group; the valid 16-digit substring is flanked
++        "94111 1111 1111 1111",    # the valid card would start mid-group
++        "4111 1111 1111 11110",    # the valid card would end mid-group
++    ],
++)
++def test_card_flanked_by_digit(text):
++    assert redact(text) == text
++
++
++def test_card_sub_candidate_after_bare_numbers():
++    """A card that follows other bare numbers is still a card (research.md R8)."""
++    assert (
++        redact("log 1 2 3 4111 1111 1111 1111 end")
++        == "log 1 2 3 " + CARD_PLACEHOLDER + " end"
++    )
++
++
++def test_card_not_blocked_by_a_non_digit():
++    assert redact("x4111 1111 1111 1111") == "x" + CARD_PLACEHOLDER
++
++
++def test_separator_between_adjacent_cards_preserved():
++    """Phase 0 regression: the separator between two adjacent cards was being swallowed.
++
++    `[CARD][CARD]` instead of `[CARD] [CARD]` is an FR-008 violation (research.md R8).
++    """
++    out, tally = redact_counting("4111 1111 1111 1111 4111 1111 1111 1111")
++    assert out == CARD_PLACEHOLDER + " " + CARD_PLACEHOLDER
++    assert tally["cards"] == 2
++
++    out, tally = redact_counting("4111-1111-1111-1111-4111-1111-1111-1111")
++    assert out == CARD_PLACEHOLDER + "-" + CARD_PLACEHOLDER
++    assert tally["cards"] == 2
++
++
++# ===========================================================================================
++# T012 — precedence, no re-scanning, counting (FR-014, A-1, A-2)
++# ===========================================================================================
++
++
++def test_email_beats_ipv4():
++    out, tally = redact_counting("a@1.2.3.4.example.com")
++    assert out == EMAIL_PLACEHOLDER
++    assert tally == {"emails": 1, "ips": 0, "cards": 0}
++
++
++def test_placeholder_not_rescanned():
++    """A line that literally contains a placeholder is ordinary text (FR-014)."""
++    for text in ("[EMAIL]", "[IP]", "[CARD]", "already [EMAIL] and [CARD] here"):
++        out, tally = redact_counting(text)
++        assert out == text
++        assert tally == {"emails": 0, "ips": 0, "cards": 0}
++
++    # the output of a redaction, fed back in, is stable
++    once = redact("user jane@example.com from 10.0.0.7")
++    assert redact(once) == once
++
++
++def test_counts_once_per_replacement():
++    """Counts are per replacement made, not per distinct value (A-1)."""
++    out, tally = redact_counting("jane@example.com jane@example.com jane@example.com")
++    assert out == " ".join([EMAIL_PLACEHOLDER] * 3)
++    assert tally["emails"] == 3
++
++    out, tally = redact_counting("10.0.0.7 10.0.0.7")
++    assert out == IP_PLACEHOLDER + " " + IP_PLACEHOLDER
++    assert tally["ips"] == 2
++
++    out, tally = redact_counting(
++        "a@b.io 1.2.3.4 4111111111111111 a@b.io 1.2.3.4 4111111111111111"
++    )
++    assert tally == {"emails": 2, "ips": 2, "cards": 2}
++
++
++# ===========================================================================================
++# T013 — pass-through, complete replacement, inert format specifiers
++#        (FR-008, SR-006, SR-002)
++# ===========================================================================================
++
++
++def test_surrounding_text_preserved():
++    assert (
++        redact("user jane@example.com from 10.0.0.7\n")
++        == "user " + EMAIL_PLACEHOLDER + " from " + IP_PLACEHOLDER + "\n"
++    )
++    assert (
++        redact("paid with 4111 1111 1111 1111, ref 1234567890123\n")
++        == "paid with " + CARD_PLACEHOLDER + ", ref 1234567890123\n"
++    )
++    assert redact("  spaced\t\tand\ttabbed  \r\n") == "  spaced\t\tand\ttabbed  \r\n"
++
++
++def _fragments(value, minimum=3):
++    for size in range(minimum, len(value) + 1):
++        for start in range(len(value) - size + 1):
++            yield value[start : start + size]
++
++
++@pytest.mark.parametrize(
++    "value",
++    [
++        "jane.doe+test@sub.example.org",
++        "192.168.0.10",
++        "4111 1111 1111 1111",
++        "4111-1111-1111-1111",
++        "378282246310005",
++    ],
++)
++def test_no_fragment_of_match_survives(value):
++    """SR-006: no digits, characters, or length information from the original survive."""
++    out = redact("<<" + value + ">>")
++    assert out in (
++        "<<" + EMAIL_PLACEHOLDER + ">>",
++        "<<" + IP_PLACEHOLDER + ">>",
++        "<<" + CARD_PLACEHOLDER + ">>",
++    )
++    for digit in "0123456789":
++        assert digit not in out
++    for fragment in _fragments(value):
++        assert fragment not in out
++    # the placeholder is a fixed literal, so the output length is the placeholder's length and
++    # carries no information about how long the original value was
++    assert len(out) - len("<<>>") in (
++        len(EMAIL_PLACEHOLDER),
++        len(IP_PLACEHOLDER),
++        len(CARD_PLACEHOLDER),
++    )
++
++
++@pytest.mark.parametrize(
++    "text",
++    [
++        "100%s of requests",
++        "template {} and {0} and {name}",
++        "printf %(x)d style",
++        "%n %s %% $(whoami) `id`",
++        "{email} 100%% jane@example.com",
++    ],
++)
++def test_format_specifiers_in_input_are_inert(text):
++    """SR-002: no part of the input is ever interpreted as a format string."""
++    out = redact(text)
++    expected = text.replace("jane@example.com", EMAIL_PLACEHOLDER)
++    assert out == expected
++
++
++# ===========================================================================================
++# T014 — corpora (SC-003, SC-004, SC-005)
++# ===========================================================================================
++
++CLEAN_CORPUS = [
++    "GET /health 200 in 3ms\n",
++    "2026-11-05T10:00:00Z INFO service started\n",
++    "2026-11-05 10:00:00 WARN disk usage at 91%\n",
++    "cache hit ratio 0.97, evictions 12\n",
++    "user_id=42 action=login result=ok\n",
++    "[EMAIL] placeholder already present in the input\n",
++    "path=/var/log/app.log size=4096\n",
++    "latency p50=12ms p99=340ms\n",
++    "release v1.2.3-rc4 deployed\n",
++    "connection pool size 10 max 100 idle 5\n",
++    "checksum 0xdeadbeef verified\n",
++    "retry 3 of 5 after 250 ms\n",
++    "",
++    "\n",
++    "\r\n",
++    "no trailing newline here",
++    "unicode: café naïve ✓\n",
++]
++
++NEAR_MISS_CORPUS = [
++    # out-of-range or mis-shaped dotted quads
++    "host 999.1.1.1 unreachable\n",
++    "host 256.1.1.1 unreachable\n",
++    "mask 1.2.3 incomplete\n",
++    "oid 1.2.3.4.5 too long\n",
++    "octal 01.2.3.4 leading zero\n",
++    # Luhn-failing digit runs
++    "ref 1234567890123 rejected\n",
++    "ref 4111 1111 1111 1112 rejected\n",
++    "ref 4111111111111112 rejected\n",
++    # runs shorter than 13 or longer than 19 digits
++    "ref 411111111111 short\n",
++    "ref 41111111111111111101 long\n",
++    "ref 41111111111111111103333 long\n",
++    # mis-separated groupings
++    "ref 4111  1111  1111  1111 doubled\n",
++    "ref 4111 1111-1111 1111 mixed\n",
++    "ref 4111--1111--1111--1111 doubled\n",
++    "ref 4111_1111_1111_1111 underscores\n",
++    # a valid card flanked by digits is not a card
++    "ref 1234114111111111111111 flanked\n",
++    "ref 94111 1111 1111 1111 flanked\n",
++    "ref 4111 1111 1111 11110 flanked\n",
++    # non-email uses of `@`
++    "@property decorator\n",
++    "user@localhost connected\n",
++    "jane@example.c truncated\n",
++    "@ alone and a@ and @b\n",
++    "git log HEAD@{2} range\n",
++]
++
++GENUINE_VALUES = [
++    "jane@example.com",
++    "jane.doe+test@mail.example.com",
++    "a@b.io",
++    "first.last%tag+x_y-z@a-b.sub.example.co.uk",
++    "0.0.0.0",
++    "255.255.255.255",
++    "192.168.0.10",
++    "10.0.0.7",
++    "4111111111111111",
++    "4111 1111 1111 1111",
++    "4111-1111-1111-1111",
++    "4222222222222",
++    "30569309025904",
++    "378282246310005",
++    "41111111111111113",
++    "411111111111111118",
++    "4111111111111111110",
++]
++
++PLACEHOLDERS = (EMAIL_PLACEHOLDER, IP_PLACEHOLDER, CARD_PLACEHOLDER)
++
++
++def test_clean_corpus_unchanged():
++    """SC-003: 100% of lines with no personal data come back byte-for-byte identical."""
++    unchanged = [line for line in CLEAN_CORPUS if redact(line) == line]
++    assert len(unchanged) == len(CLEAN_CORPUS), [
++        line for line in CLEAN_CORPUS if redact(line) != line
++    ]
++
++
++def test_near_miss_corpus_untouched():
++    """SC-004: 0 of the near-miss values are redacted."""
++    redacted = []
++    total = new_tally()
++    for line in NEAR_MISS_CORPUS:
++        out, tally = redact_counting(line)
++        if out != line:
++            redacted.append((line, out))
++        for key in total:
++            total[key] += tally[key]
++    assert redacted == []
++    assert total == {"emails": 0, "ips": 0, "cards": 0}
++
++
++def test_genuine_corpus_fully_redacted():
++    """SC-005: 100% are redacted and none appears in any form in the output."""
++    survivors = []
++    for value in GENUINE_VALUES:
++        out = redact("value=" + value + "|end\n")
++        if not any(out == "value=" + p + "|end\n" for p in PLACEHOLDERS):
++            survivors.append((value, out))
++            continue
++        if any(fragment in out for fragment in _fragments(value)):
++            survivors.append((value, out))
++    assert survivors == []
+diff --git a/tests/test_resource_bounds.py b/tests/test_resource_bounds.py
+new file mode 100644
+index 0000000..947cf08
+--- /dev/null
++++ b/tests/test_resource_bounds.py
+@@ -0,0 +1,188 @@
++"""Resource bounds: linear time and bounded memory (SR-005, SC-006, SC-010).
++
++These are the tripwires for the two Phase 0 defects. A regression in the email pattern does not
++present as a slowdown but as a hang: the unguarded pattern took an extrapolated ~1.5 hours on a
++single 1 MiB line (research.md R5, R14). Every test here is marked `slow` but is kept runnable,
++never skipped.
++"""
++
++import io
++import os
++import subprocess
++import sys
++import time
++import tracemalloc
++
++import pytest
++
++from conftest import cli_argv, cli_env
++from logredact.cli import STREAM_SETTINGS, main
++from logredact.redact import redact_line
++
++#: Doubling sizes, topping out at the 1 MiB line cap.
++SIZES = [262144, 524288, 1048576]
++
++#: The adversarial line shapes research.md R5 and R8 measured.
++SHAPES = {
++    "no-at-run": lambda n: "a" * n,
++    "at-then-dots": lambda n: "a" * (n // 2) + "@" + "1." * (n // 4),
++    "space-digits": lambda n: "1 " * (n // 2),
++    "hyphen-digits": lambda n: "1-" * (n // 2),
++    "dots": lambda n: "." * n,
++    "card-prefix": lambda n: "4111 " * (n // 5),
++}
++
++#: Generous ceiling for one 1 MiB line: measured worst case was 3.4 s (research.md R14).
++CEILING_SECONDS = 10.0
++
++
++def _time_redaction(text):
++    tally = {"emails": 0, "ips": 0, "cards": 0}
++    started = time.monotonic()
++    redact_line(text, tally)
++    return time.monotonic() - started
++
++
++@pytest.mark.slow
++@pytest.mark.parametrize("shape", sorted(SHAPES))
++def test_adversarial_lines_are_linear(shape):
++    """Time must roughly double as the line doubles, never quadruple (SR-005)."""
++    build = SHAPES[shape]
++    elapsed = [_time_redaction(build(size)) for size in SIZES]
++
++    assert elapsed[-1] < CEILING_SECONDS, (shape, dict(zip(SIZES, elapsed)))
++
++    floor = 0.002  # below this the measurement is timer noise, not work
++    for previous, current in zip(elapsed, elapsed[1:]):
++        if previous < floor:
++            continue
++        assert current / previous < 3.0, (shape, dict(zip(SIZES, elapsed)))
++
++
++#: Realistic log line, as research.md R14 measured throughput on.
++REALISTIC_LINE = b"user jane@example.com from 10.0.0.7 card 4111 1111 1111 1111 ok\n"
++
++#: Address-space ceiling for the large run. Measured: a 200 MiB input completes under 48 MiB.
++ADDRESS_SPACE_CAP = 64 * 1024 * 1024
++
++_FEEDER = """
++import sys
++target = int(sys.argv[1])
++block = sys.stdin.buffer.read()
++written = 0
++out = sys.stdout.buffer
++try:
++    while written < target:
++        out.write(block)
++        written += len(block)
++    out.flush()
++except BrokenPipeError:
++    pass
++"""
++
++
++def _run_capped(total_bytes, block):
++    """Feed `total_bytes` of `block` through the tool, with its address space capped.
++
++    The cap is the instrument. A child's `ru_maxrss` is useless here because Linux copies the
++    parent's high-water mark across fork, so a child of pytest reports pytest's peak; an
++    enforced `RLIMIT_AS` is immune to that. If peak memory grew with input size, a 200 MiB input
++    could not complete under a 64 MiB ceiling at all.
++    """
++
++    def cap_address_space():
++        import resource
++
++        resource.setrlimit(resource.RLIMIT_AS, (ADDRESS_SPACE_CAP, ADDRESS_SPACE_CAP))
++
++    feeder = subprocess.Popen(
++        [sys.executable, "-c", _FEEDER, str(total_bytes)],
++        stdin=subprocess.PIPE,
++        stdout=subprocess.PIPE,
++    )
++    feeder.stdin.write(block)
++    feeder.stdin.close()
++    tool = subprocess.Popen(
++        cli_argv("--count"),
++        stdin=feeder.stdout,
++        stdout=subprocess.DEVNULL,
++        stderr=subprocess.PIPE,
++        env=cli_env(),
++        preexec_fn=cap_address_space,
++    )
++    feeder.stdout.close()
++    stderr = tool.communicate(timeout=900)[1]
++    feeder.kill()
++    feeder.wait(timeout=60)
++    return tool.returncode, stderr
++
++
++def _traced_peak(payload, monkeypatch):
++    """Traced peak allocation of one in-process run over `payload`.
++
++    Tracing starts after `payload` exists, so the figure is what the run itself allocates. The
++    sink is `os.devnull`, not a buffer, so the output cannot pollute the measurement.
++    """
++    source = io.TextIOWrapper(io.BytesIO(payload), **STREAM_SETTINGS)
++    with open(os.devnull, "w", **STREAM_SETTINGS) as sink:
++        monkeypatch.setattr(sys, "stdin", source)
++        monkeypatch.setattr(sys, "stdout", sink)
++        tracemalloc.start()
++        try:
++            tracemalloc.reset_peak()
++            status = main([])
++            _, peak = tracemalloc.get_traced_memory()
++        finally:
++            tracemalloc.stop()
++    return status, peak
++
++
++@pytest.mark.slow
++def test_peak_memory_independent_of_input_size(monkeypatch):
++    """SC-006, FR-016: peak memory is bounded by a line and does not grow with input size."""
++    # 1. ~200 MiB of realistic log lines — around 100x the tool's peak — completes with status 0
++    #    through an address space capped far below the input size.
++    total = 200 * 1024 * 1024
++    block = REALISTIC_LINE * 1000
++    status, stderr = _run_capped(total, block)
++    expected = (total // len(block) + 1) * 1000
++    assert status == 0, stderr
++    assert stderr == b"emails=%d ips=%d cards=%d\n" % (expected, expected, expected)
++
++    # 2. And the traced peak itself is flat: 10x the input allocates no more.
++    small_status, small_peak = _traced_peak(REALISTIC_LINE * 32768, monkeypatch)
++    large_status, large_peak = _traced_peak(REALISTIC_LINE * 327680, monkeypatch)
++    assert (small_status, large_status) == (0, 0)
++    assert large_peak < small_peak * 1.5, (small_peak, large_peak)
++    assert large_peak < 4 * 1024 * 1024, large_peak
++
++
++@pytest.mark.slow
++def test_over_length_line_not_loaded_into_memory(monkeypatch):
++    """SC-010, SR-005: an over-length line is refused without being read into memory.
++
++    An 8 MiB single line stands in for the spec's 1 GB case. Tracing starts *after* the input is
++    built, so the peak below is what the run itself allocates: research.md R2 measured 2.01 MiB,
++    i.e. the cap plus one 8 KiB read chunk, not the length of the offending line.
++    """
++    line_bytes = 8 * 1024 * 1024
++    source = io.BytesIO(b"x" * line_bytes + b"\n")
++    sink = io.BytesIO()
++    errors = io.StringIO()
++    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(source, **STREAM_SETTINGS))
++    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(sink, **STREAM_SETTINGS))
++    monkeypatch.setattr(sys, "stderr", errors)
++
++    tracemalloc.start()
++    try:
++        tracemalloc.reset_peak()
++        status = main([])
++        _, peak = tracemalloc.get_traced_memory()
++    finally:
++        tracemalloc.stop()
++
++    assert status == 2
++    assert sink.getvalue() == b""
++    assert "line exceeds the maximum length" in errors.getvalue()
++    assert "standard input" in errors.getvalue()
++    assert peak < line_bytes // 2, peak

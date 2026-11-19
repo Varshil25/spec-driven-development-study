@@ -1,0 +1,149 @@
+<!--
+SYNC IMPACT REPORT (temporary scratch material for amendment review; remove before commit)
+
+Version change: none (unfilled template) → 1.0.0
+Rationale: Initial ratification. The prior file contained only unreplaced placeholder
+tokens, so no governance existed to amend. MAJOR version established at 1.0.0.
+
+Modified principles:
+- [PRINCIPLE_1_NAME] → I. Standard Library Only
+- [PRINCIPLE_2_NAME] → II. Fail Loudly
+- [PRINCIPLE_3_NAME] → III. Every Requirement Is Testable
+- [PRINCIPLE_4_NAME] → IV. Simplicity
+- [PRINCIPLE_5_NAME] → REMOVED (user specified exactly four principles)
+
+Added sections:
+- Additional Constraints (from [SECTION_2_NAME]/[SECTION_2_CONTENT])
+- Development Workflow and Quality Gates (from [SECTION_3_NAME]/[SECTION_3_CONTENT])
+- Governance (populated from [GOVERNANCE_RULES])
+
+Removed sections:
+- Fifth Core Principle slot (template provided five; four were specified)
+
+Follow-up TODOs:
+- TODO(PROJECT_NAME): No formal project name is derivable from the repository (no README,
+  no packaging metadata). The title uses a generic placeholder name and SHOULD be updated
+  to the real project name, as a PATCH amendment, once one is chosen.
+-->
+
+# Python Project Constitution
+
+## Core Principles
+
+### I. Standard Library Only
+
+The runtime MUST depend only on the Python standard library. No third-party package may be
+imported by any module that ships as part of the project's runtime behavior. Adding a runtime
+dependency requires a constitution amendment, not a code review approval.
+
+Development-only tooling (test runners, linters, formatters) is exempt and MUST be declared
+separately from runtime requirements so the exemption cannot leak into shipped code. `pytest`
+is the sanctioned development dependency.
+
+Rationale: A stdlib-only runtime installs and runs anywhere Python does, with no supply chain
+to audit, no version resolution to maintain, and no dependency that can break the project
+without the project changing.
+
+### II. Fail Loudly
+
+Invalid input, unmet preconditions, and unreachable states MUST produce a clear, specific
+diagnostic message naming what was wrong. A silent wrong answer is the most severe class of
+defect this project recognizes.
+
+- Command-line entry points MUST write diagnostics to stderr and exit with a non-zero status.
+- Library and service entry points MUST raise an exception or return an explicit error
+  response; they MUST NOT return a sentinel value that a caller can mistake for success.
+- Bare `except:` and `except Exception: pass` are prohibited. Catching an exception requires
+  either handling it or re-raising with added context.
+- Defaulting, coercing, or truncating invalid input in order to continue is prohibited.
+
+Rationale: A crash with a message costs one debugging session. A plausible wrong answer costs
+every decision made downstream of it, and gives no signal that it has done so.
+
+### III. Every Requirement Is Testable
+
+Every functional requirement in a specification MUST map to at least one automated `pytest`
+test that fails when the requirement is unmet. A requirement that cannot be expressed as such
+a test is not yet specified well enough to implement and MUST be rewritten or dropped.
+
+- The mapping from requirement to test MUST be discoverable — by test name, by docstring, or
+  by an explicit reference to the requirement identifier.
+- A requirement with no corresponding test is an incomplete implementation, regardless of
+  whether the behavior works when exercised by hand.
+- Error paths required by Principle II are functional requirements and MUST be tested for both
+  the message and the exit status or error response.
+
+Rationale: Requirements verified only by inspection decay silently. A test is the only form of
+a requirement that keeps asserting itself after everyone has stopped reading the spec.
+
+### IV. Simplicity
+
+The implementation MUST be the smallest design that satisfies the specification. Generality
+beyond the specified requirements is a defect, not foresight.
+
+- No abstraction may be introduced for a single caller or a single implementation.
+- No configuration option, plugin seam, or extension point may be added without a specified
+  requirement that needs it.
+- No speculative capability for anticipated future requirements. The future requirement will
+  arrive with its own specification and its own tests.
+- When two designs both satisfy the spec, the one with fewer modules, fewer parameters, and
+  fewer branches wins.
+
+Rationale: Every unused degree of freedom is code that must be read, tested, and kept correct
+while earning nothing. The specification defines "done"; exceeding it is cost without value.
+
+## Additional Constraints
+
+- **Language**: Python 3. The minimum supported version MUST be stated once, in project
+  metadata, and MUST NOT be exceeded by any module's syntax or stdlib usage.
+- **Test framework**: `pytest`. Tests live under a `tests/` directory and are runnable with a
+  bare `pytest` invocation from the repository root, with no environment setup beyond an
+  interpreter and `pytest` itself.
+- **Runtime dependency manifest**: MUST remain empty. A non-empty runtime dependency list is a
+  Principle I violation and MUST block merge.
+- **Error output channel**: Diagnostics to stderr; program results to stdout. The two MUST NOT
+  be interleaved on the same stream, so that output remains machine-consumable.
+
+## Development Workflow and Quality Gates
+
+1. **Specify before implementing.** Functional requirements are written and reviewed before
+   code. Each requirement is stated so that Principle III's test mapping is possible.
+2. **Test with the change.** Every change that adds or alters behavior lands with the tests
+   that cover it, in the same change set. Behavior changes without test changes MUST be
+   justified in the change description or rejected.
+3. **Full suite green.** `pytest` MUST pass in full before any change is merged. A skipped or
+   disabled test MUST carry a written reason and a condition for re-enabling it.
+4. **Review gates.** A reviewer MUST verify, and MUST block merge on failure of, each of:
+   - no new third-party runtime import (Principle I);
+   - every new failure mode produces a message and a non-zero exit or error response
+     (Principle II);
+   - every new or changed requirement has a test that fails without the change
+     (Principle III);
+   - no abstraction, option, or extension point that no current requirement needs
+     (Principle IV).
+5. **Justify complexity in writing.** A change that appears to violate Principle IV MUST carry
+   the requirement that forces it. Absent that requirement, the simpler design is adopted.
+
+## Governance
+
+This constitution supersedes all other development practices, conventions, and preferences for
+this project. Where a style guide, a tool default, or a reviewer's preference conflicts with a
+principle here, this document wins.
+
+**Amendment procedure**: Amendments MUST be proposed as a change to this file, stating the
+motivating problem, the exact text added, removed, or rewritten, and the migration required of
+existing code. An amendment MUST NOT be adopted in the same change set as code that depends on
+it; governance changes land first. Adoption requires explicit approval from the project owner.
+
+**Versioning policy**: This constitution is versioned as MAJOR.MINOR.PATCH.
+
+- MAJOR: a principle is removed, or redefined in a way that makes previously compliant code
+  non-compliant.
+- MINOR: a principle or section is added, or existing guidance is materially expanded.
+- PATCH: clarification, rewording, or correction that does not change what is required.
+
+**Compliance review**: Every pull request MUST be reviewed against the gates in *Development
+Workflow and Quality Gates*. Non-compliance blocks merge; it is not recorded as a follow-up.
+Any exception MUST be documented in this file with its scope and expiry, or it does not exist.
+
+**Version**: 1.0.0 | **Ratified**: 2026-11-16 | **Last Amended**: 2026-11-16

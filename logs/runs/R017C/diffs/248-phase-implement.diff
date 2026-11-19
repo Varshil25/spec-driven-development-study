@@ -1,0 +1,2693 @@
+diff --git a/README.md b/README.md
+index ddb1e47..9d71735 100644
+--- a/README.md
++++ b/README.md
+@@ -32,8 +32,8 @@ Full argument, exit-status, and failure-message contract:
+ | Method | Path | Operation | Success |
+ |---|---|---|---|
+ | `POST` | `/pastes` | Create a paste | `201` |
+-| `GET` | `/pastes/<id>` | Read metadata and content | `200` |
+-| `GET` | `/pastes/<id>/raw` | Read the content as plain text | `200` |
++| `GET` | `/pastes/<id>` | Read metadata and content — `X-Paste-Password` if protected | `200`, `403` |
++| `GET` | `/pastes/<id>/raw` | Read the content as plain text — `X-Paste-Password` if protected | `200`, `403` |
+ | `DELETE` | `/pastes/<id>` | Revoke, via the `X-Delete-Token` header | `204` |
+ 
+ Every other request — unknown path, unsupported method on a known path, unknown
+@@ -44,7 +44,8 @@ Errors are always JSON: `{"error": "<message>"}`.
+ curl -s -X POST http://127.0.0.1:8080/pastes -d '{"content": "hello", "expires_in": 3600}'
+ # {"id": "...", "delete_token": "...", "url": "/pastes/..."}
+ 
+-curl -s http://127.0.0.1:8080/pastes/$ID        # {"id", "content", "created_at", "expires_at"}
++curl -s http://127.0.0.1:8080/pastes/$ID
++# {"id", "content", "created_at", "expires_at", "burn_after_reading", "protected"}
+ curl -s http://127.0.0.1:8080/pastes/$ID/raw    # hello
+ curl -s -X DELETE -H "X-Delete-Token: $TOKEN" http://127.0.0.1:8080/pastes/$ID
+ ```
+@@ -54,9 +55,46 @@ curl -s -X DELETE -H "X-Delete-Token: $TOKEN" http://127.0.0.1:8080/pastes/$ID
+ from 1 to 2 592 000; absent means the paste never expires. Other fields are ignored.
+ The `delete_token` is returned exactly once, in the `201` — no read ever discloses it.
+ 
++Two further optional fields protect a paste:
++
++- `burn_after_reading` — `true` or `false` only (anything else is `400`). A paste
++  marked `true` is **one-time**: its first successful read, in either form, returns it
++  exactly as an ordinary paste and then destroys it. Every later request for that
++  identifier — read, raw read, or revocation — is `404`. A read refused for a missing
++  or wrong password does *not* consume it. Absent means `false`.
++- `password` — text of 1 to 128 **characters** (the bound is characters, not encoded
++  bytes, so a 128-character password of emoji is accepted; anything else is `400`).
++  Reading the paste in either form then requires the `X-Paste-Password` header
++  holding exactly that value; a missing, empty, or wrong value is `403`. Revocation
++  still needs only the `X-Delete-Token` — the password never substitutes for it and
++  is not read on that route.
++
++```bash
++curl -s -X POST http://127.0.0.1:8080/pastes \
++     -d '{"content": "recovery code 4821", "burn_after_reading": true, "password": "hunter2"}'
++
++curl -s -H "X-Paste-Password: hunter2" http://127.0.0.1:8080/pastes/$ID/raw  # once only
++```
++
++The `201` body is unchanged — `{id, delete_token, url}` and nothing else. It never
++echoes the password nor reports either option. The structured read gains exactly two
++fields, `burn_after_reading` and `protected`, both present on every successful read
++including for pastes using neither option; `protected` reports only *whether* a
++password is required. The raw read is byte-for-byte unchanged, flags and all.
++
++An unknown, expired, revoked, or already-consumed identifier is `404` whatever
++password is supplied — never `403` — so a refusal never confirms that an identifier
++is real.
++
++There is **no way to change or recover a paste password.** Pastes are immutable; a
++forgotten password means the text is unreachable, and the only remaining operation is
++revocation with the delete token.
++
+ Full request and response contract, including every error message and the precedence
+ rules between statuses:
+-[`specs/001-pastebin-service/contracts/http-api.md`](specs/001-pastebin-service/contracts/http-api.md).
++[`specs/001-pastebin-service/contracts/http-api.md`](specs/001-pastebin-service/contracts/http-api.md)
++and the delta in
++[`specs/002-burn-and-password-pastes/contracts/http-api.md`](specs/002-burn-and-password-pastes/contracts/http-api.md).
+ 
+ ## Tests
+ 
+@@ -69,8 +107,12 @@ over real HTTP and runs `python -m pastebin` as a subprocess for the startup cas
+ like the runtime, it uses only the standard library plus `pytest`.
+ 
+ `tests/test_requirement_coverage.py` is the gate that keeps the requirement-to-test
+-mapping honest: it fails if any requirement id (`FR-001` … `FR-029`, `SR-001` …
+-`SR-012`) is referenced by no test name or docstring.
++mapping honest: it fails if any requirement id (`FR-001` … `FR-054`, `SR-001` …
++`SR-020`) is referenced by no test name or docstring.
++
++The suite spends roughly ten seconds inside PBKDF2. The iteration count is
++deliberately **not** lowered for tests: the configuration under test is the one that
++ships.
+ 
+ ## Layout
+ 
+@@ -85,7 +127,9 @@ src/pastebin/
+ 
+ Design documents live under `specs/001-pastebin-service/`: the specification, the
+ plan and its research decisions, the data model, the two contracts above, and a
+-runnable `quickstart.md`.
++runnable `quickstart.md`. `specs/002-burn-and-password-pastes/` holds the delta for
++burn-after-reading and password protection; it added no module, route, CLI option, or
++file on disk.
+ 
+ ## Storage and security notes
+ 
+@@ -102,3 +146,23 @@ lock as the removal. An identifier from a request is matched against
+ to lie inside the data directory. Expiry is computed per request against the current
+ clock — there is no sweeper and no startup scan. Nothing the service returns contains
+ a revocation secret, a filesystem path, or a stack trace.
++
++A paste password is never stored in recoverable form. The record holds only a
++verifier — `hashlib.pbkdf2_hmac("sha256", …)` at 600 000 iterations with a 16-byte
++salt drawn per paste from `secrets` and a 32-byte derived key — so two pastes created
++with the same password have unrelated stored hashes. Verification re-derives from the
++supplied text and compares the two digests with `hmac.compare_digest`, server-side, on
++every read of both forms; nothing is cached and no cookie or session is ever issued.
++No response, header, or error message contains a password, a salt, a stored hash, or
++the hashing parameters.
++
++A one-time paste is claimed with a single `os.unlink` under the same lock revocation
++holds: of N concurrent readers exactly one wins the directory entry, and the content
++is read into memory before the claim and written to the socket only after it, so a
++loser discards its copy without writing a byte. The password is checked *before* the
++claim, so a reader who cannot prove they hold it never consumes the single read. If
++the protection state of a stored record cannot be determined — a malformed flag or
++verifier, including an absurd iteration count — the paste reports `404` rather than
++being served unprotected or served twice. A record carrying neither key is a
++pre-feature record and reads back as neither one-time nor protected, with no
++migration.
+diff --git a/specs/002-burn-and-password-pastes/quickstart.md b/specs/002-burn-and-password-pastes/quickstart.md
+index 049c1cb..abdc452 100644
+--- a/specs/002-burn-and-password-pastes/quickstart.md
++++ b/specs/002-burn-and-password-pastes/quickstart.md
+@@ -143,9 +143,16 @@ PY
+ 128 characters is `201`; 129 is `400`; 128 **multi-byte** characters is `201` (the bound is
+ characters, not encoded bytes).
+ 
+-**Precedence** (FR-036): a submission with `"burn_after_reading": "yes"` **and** 70 000 bytes of
++**Precedence** (FR-036): a submission with `"burn_after_reading": "yes"` **and** 66 000 bytes of
+ content is `400`, not `413`. The same submission with valid new fields is `413`.
+ 
++The size must sit between the two caps — over the 65 536-byte **content** limit but under the
++66 560-byte **declared `Content-Length`** limit — or the framing guard answers first. A body
++carrying 70 000 bytes of content declares ~70 030 bytes, so it is refused `413` **unread** by the
++framing rule (contracts/http-api.md, third precedence row) before any field is validated. That is
++the pre-existing FR-029 behaviour and is unchanged by this feature; FR-036 governs only
++submissions whose body is actually read.
++
+ ## Scenario 6 — Concurrency (FR-047, SR-016, SC-015)
+ 
+ ```bash
+diff --git a/specs/002-burn-and-password-pastes/tasks.md b/specs/002-burn-and-password-pastes/tasks.md
+index dc614d2..c705270 100644
+--- a/specs/002-burn-and-password-pastes/tasks.md
++++ b/specs/002-burn-and-password-pastes/tasks.md
+@@ -38,8 +38,8 @@ repository root. **No file is added to `src/`.** Three files are added to `tests
+ **Purpose**: Establish the green baseline this feature must not break, and land the constants
+ every later task refers to.
+ 
+-- [ ] T001 Confirm the pre-feature baseline is green: from the repository root run `PYTHONPATH=src python3 -m pytest -q` and record the passing test count and zero skips/xfails in the task notes — this is the SC-020 reference point that every later run is compared against
+-- [ ] T002 Add the feature's constants and error messages to `src/pastebin/models.py` beside the existing limits and `MSG_*` block: `PASSWORD_MIN_CHARS = 1`, `PASSWORD_MAX_CHARS = 128`, `PBKDF2_ALGORITHM = "pbkdf2_sha256"`, `PBKDF2_ITERATIONS = 600_000`, `PBKDF2_SALT_BYTES = 16`, `PBKDF2_DKLEN = 32`, `PBKDF2_MAX_ITERATIONS = 10_000_000` (the stored-`iterations` upper bound, R-17/SR-018), `MSG_BURN_TYPE = "burn_after_reading must be true or false"`, `MSG_PASSWORD = "password must be a string of 1 to 128 characters"`, `MSG_BAD_PASSWORD = "invalid paste password"`. `MAX_BODY_BYTES` stays `66560` — unchanged (R-22)
++- [X] T001 Confirm the pre-feature baseline is green: from the repository root run `PYTHONPATH=src python3 -m pytest -q` and record the passing test count and zero skips/xfails in the task notes — this is the SC-020 reference point that every later run is compared against
++- [X] T002 Add the feature's constants and error messages to `src/pastebin/models.py` beside the existing limits and `MSG_*` block: `PASSWORD_MIN_CHARS = 1`, `PASSWORD_MAX_CHARS = 128`, `PBKDF2_ALGORITHM = "pbkdf2_sha256"`, `PBKDF2_ITERATIONS = 600_000`, `PBKDF2_SALT_BYTES = 16`, `PBKDF2_DKLEN = 32`, `PBKDF2_MAX_ITERATIONS = 10_000_000` (the stored-`iterations` upper bound, R-17/SR-018), `MSG_BURN_TYPE = "burn_after_reading must be true or false"`, `MSG_PASSWORD = "password must be a string of 1 to 128 characters"`, `MSG_BAD_PASSWORD = "invalid paste password"`. `MAX_BODY_BYTES` stays `66560` — unchanged (R-22)
+ 
+ **Checkpoint**: Constants exist; nothing observable has changed; the suite is still green.
+ 
+@@ -52,17 +52,17 @@ test harness that every user story below builds on.
+ 
+ **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
+ 
+-- [ ] T003 Extend `validate_create_payload` in `src/pastebin/models.py` to return the 4-tuple `(content, expires_in, burn_after_reading, password)` and add validation rules 11-13 **after** the `expires_in` rules and **before** the content-size rule (R-22, data-model.md "Creation validation rules"): rule 11 — if `burn_after_reading` is present, `type(...) is bool` else `ValidationError(400, MSG_BURN_TYPE)`; rule 12 — if `password` is present, `type(...) is str` else `ValidationError(400, MSG_PASSWORD)`; rule 13 — if `password` is present, `1 <= len(password) <= 128` **characters** (`len()` on the `str`, never on its UTF-8 encoding) else `ValidationError(400, MSG_PASSWORD)`. Move the existing `len(content.encode("utf-8")) > MAX_CONTENT_BYTES → 413` rule to **last** so an invalid new field is `400` rather than `413` (FR-031, FR-033, FR-036). An explicit `null` for either field is rejected, never treated as absence. Keys other than `content`, `expires_in`, `burn_after_reading`, and `password` stay uninspected (FR-009)
+-- [ ] T004 Implement `hash_password(password: str) -> dict` in `src/pastebin/models.py` (add `import hashlib`): draw a salt with `secrets.token_bytes(PBKDF2_SALT_BYTES)`, derive with `hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS, dklen=PBKDF2_DKLEN)`, and return exactly `{"algorithm": PBKDF2_ALGORITHM, "iterations": PBKDF2_ITERATIONS, "salt": salt.hex(), "hash": derived.hex()}` — 32 lowercase hex characters of salt, 64 of hash. The plaintext is never retained, logged, or returned (SR-013, R-16)
+-- [ ] T005 Implement `verify_password(verifier: dict, supplied: str) -> bool` in `src/pastebin/models.py`: re-derive with the verifier's stored `salt` (decoded via `bytes.fromhex`) and stored `iterations`, then compare the two 32-byte **derived digests** with `hmac.compare_digest` — never the raw passwords, never `==`/`!=` (add `import hmac`). Returns a bare `bool` (SR-014, R-18)
+-- [ ] T006 Implement the stored-record interpretation helpers in `src/pastebin/models.py` — a module-level sentinel `RECORD_UNUSABLE`, plus `stored_burn_flag(record)` and `stored_password_verifier(record)` — applying the data-model.md "Stored-record interpretation rules" verbatim: `burn_after_reading` absent ⇒ `False`; present and `type(...) is bool` ⇒ that value; anything else ⇒ `RECORD_UNUSABLE`. `password` absent or `None` ⇒ `None` (unprotected); a `dict` whose key set is **exactly** `{"algorithm", "iterations", "salt", "hash"}` with `algorithm == PBKDF2_ALGORITHM`, `type(iterations) is int` within `[1, PBKDF2_MAX_ITERATIONS]`, `salt` 32 lowercase hex characters and `hash` 64 lowercase hex characters ⇒ that verifier; anything else ⇒ `RECORD_UNUSABLE`. Use `type(...) is bool` / `type(...) is int`, never `isinstance` (R-10, R-17, FR-051, FR-052, SR-018, SR-020)
+-- [ ] T007 Apply those rules inside `PasteStore._load` in `src/pastebin/store.py`, after the existing `RECORD_FIELDS` check: if either helper returns `RECORD_UNUSABLE`, return `None` so the paste reports `404` exactly as any unparseable record already does. `RECORD_FIELDS` is **not** extended — the two keys stay optional, which is what keeps pre-feature records valid with no migration and no startup scan (FR-051, SR-020, R-17)
+-- [ ] T008 Add `consume_record(self, paste_id: str) -> bool` to `PasteStore` in `src/pastebin/store.py`: under the **existing** `self._lock` (the same one `delete_record` holds — no new lock, no per-identifier registry), resolve the path through `self._record_path`, return `False` if it is `None`, then `os.unlink(path)` returning `True`; return `False` on `FileNotFoundError`; let every other `OSError` propagate. The `unlink` **is** the atomic claim — of N concurrent callers exactly one gets `True` (FR-044, FR-047, SR-016, R-20)
+-- [ ] T009 Add `_paste_password(self) -> str | None` to `PastebinHandler` in `src/pastebin/server.py`: read `self.headers.get("X-Paste-Password")` (the first value when the header repeats), return `None` when absent or empty, otherwise recover the author's text with `value.encode("latin-1").decode("utf-8")`, returning `None` on `UnicodeEncodeError` or `UnicodeDecodeError` so an undecodable value is treated as a wrong password and never as a `500` (FR-034, FR-040, R-19)
+-- [ ] T010 Persist the two new keys in `PastebinHandler._handle_create` in `src/pastebin/server.py`: unpack the 4-tuple from `models.validate_create_payload`, add `"burn_after_reading": burn_after_reading or False` and `"password": models.hash_password(password) if password is not None else None` to the record dict passed to `write_record`. The `201` body stays **exactly** `{id, delete_token, url}` — no flag, no echo of the password (FR-030, FR-032, FR-035, SR-013)
+-- [ ] T011 Add password-aware request helpers to `tests/conftest.py`: a `password: str | None = None` keyword on `Service.request` and `Service.get` that attaches `X-Paste-Password` when given, and a `record_file(paste_id) -> dict` helper that reads and parses `<data_dir>/<id>.json` straight off disk so tests can assert on the stored verifier. `Service.create` already forwards `**extra` into the payload, so `password=` and `burn_after_reading=` need nothing further (R-26)
+-- [ ] T012 Extend `scan_response` in `tests/conftest.py` so the leakage guarantee is suite-wide (SR-019, SC-017): maintain a module-level `USED_PASSWORDS: set[str]` that tests register passwords in, and assert no response's headers or body ever contains any registered password, any stored `salt` or `hash` value read back off disk, or the strings `pbkdf2` / `iterations` — the same mechanism that already makes the `delete_token` guarantee suite-wide
+-- [ ] T013 Extend the coverage gate in `tests/test_requirement_coverage.py`: change `REQUIRED_IDS` to `[f"FR-{n:03d}" for n in range(1, 55)] + [f"SR-{n:03d}" for n in range(1, 21)]` and update the three docstrings to name `FR-001 … FR-054` and `SR-001 … SR-012` → `SR-020`. `ID_RE` already matches three-digit ids, so only the two `range()` bounds change (SC-021, R-26). **Expected transient state**: from here until Phase 6 completes, `test_SC_008_every_requirement_id_is_referenced_by_a_test` fails and names the ids still without tests — that is the gate working. Use `python3 -m pytest -q --deselect tests/test_requirement_coverage.py` at the intermediate checkpoints below, and the full command from Phase 7 onward
++- [X] T003 Extend `validate_create_payload` in `src/pastebin/models.py` to return the 4-tuple `(content, expires_in, burn_after_reading, password)` and add validation rules 11-13 **after** the `expires_in` rules and **before** the content-size rule (R-22, data-model.md "Creation validation rules"): rule 11 — if `burn_after_reading` is present, `type(...) is bool` else `ValidationError(400, MSG_BURN_TYPE)`; rule 12 — if `password` is present, `type(...) is str` else `ValidationError(400, MSG_PASSWORD)`; rule 13 — if `password` is present, `1 <= len(password) <= 128` **characters** (`len()` on the `str`, never on its UTF-8 encoding) else `ValidationError(400, MSG_PASSWORD)`. Move the existing `len(content.encode("utf-8")) > MAX_CONTENT_BYTES → 413` rule to **last** so an invalid new field is `400` rather than `413` (FR-031, FR-033, FR-036). An explicit `null` for either field is rejected, never treated as absence. Keys other than `content`, `expires_in`, `burn_after_reading`, and `password` stay uninspected (FR-009)
++- [X] T004 Implement `hash_password(password: str) -> dict` in `src/pastebin/models.py` (add `import hashlib`): draw a salt with `secrets.token_bytes(PBKDF2_SALT_BYTES)`, derive with `hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS, dklen=PBKDF2_DKLEN)`, and return exactly `{"algorithm": PBKDF2_ALGORITHM, "iterations": PBKDF2_ITERATIONS, "salt": salt.hex(), "hash": derived.hex()}` — 32 lowercase hex characters of salt, 64 of hash. The plaintext is never retained, logged, or returned (SR-013, R-16)
++- [X] T005 Implement `verify_password(verifier: dict, supplied: str) -> bool` in `src/pastebin/models.py`: re-derive with the verifier's stored `salt` (decoded via `bytes.fromhex`) and stored `iterations`, then compare the two 32-byte **derived digests** with `hmac.compare_digest` — never the raw passwords, never `==`/`!=` (add `import hmac`). Returns a bare `bool` (SR-014, R-18)
++- [X] T006 Implement the stored-record interpretation helpers in `src/pastebin/models.py` — a module-level sentinel `RECORD_UNUSABLE`, plus `stored_burn_flag(record)` and `stored_password_verifier(record)` — applying the data-model.md "Stored-record interpretation rules" verbatim: `burn_after_reading` absent ⇒ `False`; present and `type(...) is bool` ⇒ that value; anything else ⇒ `RECORD_UNUSABLE`. `password` absent or `None` ⇒ `None` (unprotected); a `dict` whose key set is **exactly** `{"algorithm", "iterations", "salt", "hash"}` with `algorithm == PBKDF2_ALGORITHM`, `type(iterations) is int` within `[1, PBKDF2_MAX_ITERATIONS]`, `salt` 32 lowercase hex characters and `hash` 64 lowercase hex characters ⇒ that verifier; anything else ⇒ `RECORD_UNUSABLE`. Use `type(...) is bool` / `type(...) is int`, never `isinstance` (R-10, R-17, FR-051, FR-052, SR-018, SR-020)
++- [X] T007 Apply those rules inside `PasteStore._load` in `src/pastebin/store.py`, after the existing `RECORD_FIELDS` check: if either helper returns `RECORD_UNUSABLE`, return `None` so the paste reports `404` exactly as any unparseable record already does. `RECORD_FIELDS` is **not** extended — the two keys stay optional, which is what keeps pre-feature records valid with no migration and no startup scan (FR-051, SR-020, R-17)
++- [X] T008 Add `consume_record(self, paste_id: str) -> bool` to `PasteStore` in `src/pastebin/store.py`: under the **existing** `self._lock` (the same one `delete_record` holds — no new lock, no per-identifier registry), resolve the path through `self._record_path`, return `False` if it is `None`, then `os.unlink(path)` returning `True`; return `False` on `FileNotFoundError`; let every other `OSError` propagate. The `unlink` **is** the atomic claim — of N concurrent callers exactly one gets `True` (FR-044, FR-047, SR-016, R-20)
++- [X] T009 Add `_paste_password(self) -> str | None` to `PastebinHandler` in `src/pastebin/server.py`: read `self.headers.get("X-Paste-Password")` (the first value when the header repeats), return `None` when absent or empty, otherwise recover the author's text with `value.encode("latin-1").decode("utf-8")`, returning `None` on `UnicodeEncodeError` or `UnicodeDecodeError` so an undecodable value is treated as a wrong password and never as a `500` (FR-034, FR-040, R-19)
++- [X] T010 Persist the two new keys in `PastebinHandler._handle_create` in `src/pastebin/server.py`: unpack the 4-tuple from `models.validate_create_payload`, add `"burn_after_reading": burn_after_reading or False` and `"password": models.hash_password(password) if password is not None else None` to the record dict passed to `write_record`. The `201` body stays **exactly** `{id, delete_token, url}` — no flag, no echo of the password (FR-030, FR-032, FR-035, SR-013)
++- [X] T011 Add password-aware request helpers to `tests/conftest.py`: a `password: str | None = None` keyword on `Service.request` and `Service.get` that attaches `X-Paste-Password` when given, and a `record_file(paste_id) -> dict` helper that reads and parses `<data_dir>/<id>.json` straight off disk so tests can assert on the stored verifier. `Service.create` already forwards `**extra` into the payload, so `password=` and `burn_after_reading=` need nothing further (R-26)
++- [X] T012 Extend `scan_response` in `tests/conftest.py` so the leakage guarantee is suite-wide (SR-019, SC-017): maintain a module-level `USED_PASSWORDS: set[str]` that tests register passwords in, and assert no response's headers or body ever contains any registered password, any stored `salt` or `hash` value read back off disk, or the strings `pbkdf2` / `iterations` — the same mechanism that already makes the `delete_token` guarantee suite-wide
++- [X] T013 Extend the coverage gate in `tests/test_requirement_coverage.py`: change `REQUIRED_IDS` to `[f"FR-{n:03d}" for n in range(1, 55)] + [f"SR-{n:03d}" for n in range(1, 21)]` and update the three docstrings to name `FR-001 … FR-054` and `SR-001 … SR-012` → `SR-020`. `ID_RE` already matches three-digit ids, so only the two `range()` bounds change (SC-021, R-26). **Expected transient state**: from here until Phase 6 completes, `test_SC_008_every_requirement_id_is_referenced_by_a_test` fails and names the ids still without tests — that is the gate working. Use `python3 -m pytest -q --deselect tests/test_requirement_coverage.py` at the intermediate checkpoints below, and the full command from Phase 7 onward
+ 
+ **Checkpoint**: Foundation ready. Validation, hashing, verification, record interpretation, the
+ atomic claim, the header decoder, and the test harness all exist. Creation already stores both
+@@ -85,21 +85,21 @@ is returned exactly as for an ordinary paste, then read it again and confirm `40
+ > `tests/test_burn.py`, so they are sequential with one another; they are parallel with the
+ > User Story 2 test tasks, which live in a different file.
+ 
+-- [ ] T014 [US1] Create `tests/test_burn.py` with the module docstring naming its requirement cluster, and the FR-030 tests: create with `true`, with `false`, and with the field absent — assert `201` for all three, that the `false` and absent cases read repeatedly and report `"burn_after_reading": false`, and that the `true` case reports `true` on its single read
+-- [ ] T015 [US1] Add the FR-031 table test to `tests/test_burn.py` over `"true"`, `"false"`, `0`, `1`, `-1`, `null`, `[]`, `{}`, `1.0` — assert `400` for each, the body is `{"error": "burn_after_reading must be true or false"}`, and a before/after `os.listdir` snapshot of the data directory is unchanged (nothing created)
+-- [ ] T016 [US1] Add the FR-044 / FR-045 tests to `tests/test_burn.py` (SC-011): a one-time paste read structured-first is byte-identical to the same read of an equivalent ordinary paste apart from the two flags, then the record file is gone from the data directory and the structured read, the raw read, and a `DELETE` with the **correct** token are all `404`; repeat with the raw read first, asserting the `/raw` body is byte-for-byte the content with no trailing newline
+-- [ ] T017 [US1] Add the FR-046 test to `tests/test_burn.py` (SC-014): against one one-time paste issue a `DELETE` with a wrong token (`403`), a `DELETE` with no token (`403`), `GET /pastes/<id>/other` (`404`), `GET /pastes/<id>/` (`404`), `GET /pastes/<id>/raw/` (`404`), and `PUT` / `PATCH` / `HEAD` on `/pastes/<id>` (`404`) — then assert the paste **still** returns its full content on its first successful read
+-- [ ] T018 [US1] Add the FR-049 test to `tests/test_burn.py`: a one-time paste created with `expires_in: 1`, never read, is `404` in both read forms once its expiry instant has passed; the control — an unexpired one-time paste — is consumed normally
+-- [ ] T019 [US1] Add the FR-047 / SR-016 concurrency tests to `tests/test_burn.py` (SC-015), modelled on the existing concurrent-revocation test: N (≥ 20) threads issuing the same read against one one-time paste — assert exactly one `200` carrying the complete, untruncated content, `N-1` `404`s, no `403` and no `500`; run it for the structured form, for the raw form, and for a mixed read/revocation race where the paste is gone afterwards either way and the content is returned at most once
+-- [ ] T020 [US1] Add the SR-017 bypass table to `tests/test_burn.py`: after a one-time paste has been consumed, assert `HEAD`, `PUT`, `PATCH`, `OPTIONS`, `DELETE` with the correct token, `/pastes/<id>/raw/`, `/pastes/<id>/anything`, a percent-encoded id, and a double-encoded id all return no content and none is `200`
+-- [ ] T021 [US1] Add the SR-020 fail-closed test to `tests/test_burn.py`: monkeypatch `server.store.consume_record` (reachable via the `Service.store` property) to raise `OSError` *after* the liveness check — assert the response is `500` with exactly `{"error": "internal error"}`, carries no content and no diagnostics, and that no second disclosure of the content ever occurs
+-- [ ] T022 [US1] Add the FR-054 error-body test to `tests/test_burn.py`: every error this story can produce (`400`, `404`, `500`) parses as JSON whose key set is exactly `{"error"}` mapping to a non-empty, non-echoing message
++- [X] T014 [US1] Create `tests/test_burn.py` with the module docstring naming its requirement cluster, and the FR-030 tests: create with `true`, with `false`, and with the field absent — assert `201` for all three, that the `false` and absent cases read repeatedly and report `"burn_after_reading": false`, and that the `true` case reports `true` on its single read
++- [X] T015 [US1] Add the FR-031 table test to `tests/test_burn.py` over `"true"`, `"false"`, `0`, `1`, `-1`, `null`, `[]`, `{}`, `1.0` — assert `400` for each, the body is `{"error": "burn_after_reading must be true or false"}`, and a before/after `os.listdir` snapshot of the data directory is unchanged (nothing created)
++- [X] T016 [US1] Add the FR-044 / FR-045 tests to `tests/test_burn.py` (SC-011): a one-time paste read structured-first is byte-identical to the same read of an equivalent ordinary paste apart from the two flags, then the record file is gone from the data directory and the structured read, the raw read, and a `DELETE` with the **correct** token are all `404`; repeat with the raw read first, asserting the `/raw` body is byte-for-byte the content with no trailing newline
++- [X] T017 [US1] Add the FR-046 test to `tests/test_burn.py` (SC-014): against one one-time paste issue a `DELETE` with a wrong token (`403`), a `DELETE` with no token (`403`), `GET /pastes/<id>/other` (`404`), `GET /pastes/<id>/` (`404`), `GET /pastes/<id>/raw/` (`404`), and `PUT` / `PATCH` / `HEAD` on `/pastes/<id>` (`404`) — then assert the paste **still** returns its full content on its first successful read
++- [X] T018 [US1] Add the FR-049 test to `tests/test_burn.py`: a one-time paste created with `expires_in: 1`, never read, is `404` in both read forms once its expiry instant has passed; the control — an unexpired one-time paste — is consumed normally
++- [X] T019 [US1] Add the FR-047 / SR-016 concurrency tests to `tests/test_burn.py` (SC-015), modelled on the existing concurrent-revocation test: N (≥ 20) threads issuing the same read against one one-time paste — assert exactly one `200` carrying the complete, untruncated content, `N-1` `404`s, no `403` and no `500`; run it for the structured form, for the raw form, and for a mixed read/revocation race where the paste is gone afterwards either way and the content is returned at most once
++- [X] T020 [US1] Add the SR-017 bypass table to `tests/test_burn.py`: after a one-time paste has been consumed, assert `HEAD`, `PUT`, `PATCH`, `OPTIONS`, `DELETE` with the correct token, `/pastes/<id>/raw/`, `/pastes/<id>/anything`, a percent-encoded id, and a double-encoded id all return no content and none is `200`
++- [X] T021 [US1] Add the SR-020 fail-closed test to `tests/test_burn.py`: monkeypatch `server.store.consume_record` (reachable via the `Service.store` property) to raise `OSError` *after* the liveness check — assert the response is `500` with exactly `{"error": "internal error"}`, carries no content and no diagnostics, and that no second disclosure of the content ever occurs
++- [X] T022 [US1] Add the FR-054 error-body test to `tests/test_burn.py`: every error this story can produce (`400`, `404`, `500`) parses as JSON whose key set is exactly `{"error"}` mapping to a non-empty, non-echoing message
+ 
+ ### Implementation for User Story 1
+ 
+-- [ ] T023 [US1] Rework `PastebinHandler._handle_read` in `src/pastebin/server.py` to the documented evaluation order (contracts/http-api.md "Read evaluation order", R-21): `read_record` → `404`; then, if `models.stored_burn_flag(record)` is true, `self._store.consume_record(paste_id)` → `404` when it returns `False` (another reader won the race, or it vanished); only then write the body. The body gains `"burn_after_reading"` (from the record) and `"protected"` (`record.get("password") is not None`), for a six-key response — `delete_token` is still absent (FR-037, FR-038, FR-044, FR-045, FR-047). An `OSError` out of `consume_record` propagates to the existing generic `500` path, never to a served body (SR-020)
+-- [ ] T024 [US1] Apply the same claim-before-serve order to `PastebinHandler._handle_raw` in `src/pastebin/server.py`: the content is read into memory **before** the claim and written to the socket **only after** it succeeds, so a losing racer discards its copy without writing a byte. The success response is otherwise completely unchanged — `200`, `text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`, body byte-for-byte the content, and **no** response header carrying either flag (FR-039, FR-044, FR-047, SR-016)
+-- [ ] T025 [US1] Update the three structured-read key-set assertions that SC-020 permits and no others — `tests/test_read.py:33`, `tests/test_create.py:101`, and `tests/test_persistence.py:33` — from `{"id", "content", "created_at", "expires_at"}` to `{"id", "content", "created_at", "expires_at", "burn_after_reading", "protected"}`. No test is deleted, weakened, skipped, or marked `xfail`
++- [X] T023 [US1] Rework `PastebinHandler._handle_read` in `src/pastebin/server.py` to the documented evaluation order (contracts/http-api.md "Read evaluation order", R-21): `read_record` → `404`; then, if `models.stored_burn_flag(record)` is true, `self._store.consume_record(paste_id)` → `404` when it returns `False` (another reader won the race, or it vanished); only then write the body. The body gains `"burn_after_reading"` (from the record) and `"protected"` (`record.get("password") is not None`), for a six-key response — `delete_token` is still absent (FR-037, FR-038, FR-044, FR-045, FR-047). An `OSError` out of `consume_record` propagates to the existing generic `500` path, never to a served body (SR-020)
++- [X] T024 [US1] Apply the same claim-before-serve order to `PastebinHandler._handle_raw` in `src/pastebin/server.py`: the content is read into memory **before** the claim and written to the socket **only after** it succeeds, so a losing racer discards its copy without writing a byte. The success response is otherwise completely unchanged — `200`, `text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`, body byte-for-byte the content, and **no** response header carrying either flag (FR-039, FR-044, FR-047, SR-016)
++- [X] T025 [US1] Update the three structured-read key-set assertions that SC-020 permits and no others — `tests/test_read.py:33`, `tests/test_create.py:101`, and `tests/test_persistence.py:33` — from `{"id", "content", "created_at", "expires_at"}` to `{"id", "content", "created_at", "expires_at", "burn_after_reading", "protected"}`. No test is deleted, weakened, skipped, or marked `xfail`
+ 
+ **Checkpoint**: User Story 1 is fully functional and independently testable. Run
+ `PYTHONPATH=src python3 -m pytest -q --deselect tests/test_requirement_coverage.py` — the whole
+@@ -124,22 +124,22 @@ testable with no burn-after-reading paste involved.
+ > `tests/test_password.py`, so they are sequential with one another; they are parallel with the
+ > User Story 1 test tasks in `tests/test_burn.py`.
+ 
+-- [ ] T026 [US2] Create `tests/test_password.py` with the module docstring naming its requirement cluster, and the FR-032 tests: create with a 1-character password and with a 128-character password — assert `201` for both and that reading each requires exactly that password
+-- [ ] T027 [US2] Add the FR-033 table test to `tests/test_password.py` over `""`, 129 characters, `null`, `5`, `true`, `[]`, `{}` — assert `400` with `{"error": "password must be a string of 1 to 128 characters"}` and nothing created; then the discriminating case: **128 multi-byte characters** (e.g. 128 × `"🔑"`, 512 UTF-8 bytes) is `201`, which is what proves the bound is counted in characters and not in encoded bytes
+-- [ ] T028 [US2] Add the FR-034 round-trip test to `tests/test_password.py` (SC-013): passwords containing spaces, punctuation, emoji, combining marks, and non-ASCII letters each grant `200` when the identical value is supplied, in **both** read forms, with the returned content byte-equal to what was submitted
+-- [ ] T029 [US2] Add the FR-040 refusal table to `tests/test_password.py`: for both read forms, a missing header, an empty header value, a wrong-case value, a value with trailing whitespace, a truncated value, a correct-prefix value, and an over-long value are each `403`; the correct value is `200`
+-- [ ] T030 [US2] Add the FR-041 test to `tests/test_password.py` (SC-012): after each `403`, the body is exactly `{"error": "invalid paste password"}`, contains no substring of the content, and the paste still returns its full content to a subsequent correct-password read in either form
+-- [ ] T031 [US2] Add the FR-042 test to `tests/test_password.py`: reading an **unprotected** paste with a password header present — both a plausible value and garbage — returns `200` with `"protected": false` and bytes identical to a read with no header at all
+-- [ ] T032 [US2] Add the FR-050 test to `tests/test_password.py`: revoking a protected paste with the correct token and **no** password header is `204`, and later reads are `404`; a correct password with a wrong token is `403`; the password supplied in place of the token is `403`. The password never substitutes for the token and is never required alongside it
+-- [ ] T033 [US2] Add the FR-035 / FR-038 / SR-013 storage tests to `tests/test_password.py` (SC-017): the `201` body is exactly `{id, delete_token, url}` for every combination of the two options and contains no trace of the password; reading the record file off disk via the `record_file` helper asserts `password.algorithm == "pbkdf2_sha256"`, `iterations == 600000`, `salt` is 32 hex characters, `hash` is 64 hex characters, and the plaintext appears nowhere under the data directory; `protected` in the structured read is a bare boolean. **Discriminating case**: two pastes created with the *same* password have different `salt` **and** different `hash`, and the hash is not any hex or base64 encoding of the password
+-- [ ] T034 [US2] Add the SR-014 tests to `tests/test_password.py`, modelled on the existing `test_SR_002_implementation_uses_hmac_compare_digest` source scan: assert `hmac.compare_digest(` appears in the verification path of `src/pastebin/models.py`, and that no line under `src/pastebin/` compares an expression matching `password` / `hash` / `digest` with `==` or `!=`. Behavioural companion: a password differing only in its final character, and a password that is a correct prefix of the stored one, are both `403`
+-- [ ] T035 [US2] Add the SR-015 tests to `tests/test_password.py`: two successive correct reads of the same paste each require the header, and a correct read followed by a header-less read of that same paste is `403` — nothing is cached; no `Set-Cookie` is ever sent and no cookie, session, or `Authorization` header changes any outcome; a correct read of paste A grants no access to paste B
+-- [ ] T036 [US2] Add the SR-018 / SR-019 tests to `tests/test_password.py`: monkeypatch `models.hash_password` to raise and assert an invalid-shape `password` still returns `400`, proving validation precedes hashing; a read with **no** password header performs no KDF run (monkeypatch `models.verify_password` to raise and assert the `403` still arrives); the `403` message is a fixed constant that does not vary with the supplied value and does not reveal whether a password was supplied; and no response contains the password, the stored salt or hash, or the strings `pbkdf2` / `iterations`
++- [X] T026 [US2] Create `tests/test_password.py` with the module docstring naming its requirement cluster, and the FR-032 tests: create with a 1-character password and with a 128-character password — assert `201` for both and that reading each requires exactly that password
++- [X] T027 [US2] Add the FR-033 table test to `tests/test_password.py` over `""`, 129 characters, `null`, `5`, `true`, `[]`, `{}` — assert `400` with `{"error": "password must be a string of 1 to 128 characters"}` and nothing created; then the discriminating case: **128 multi-byte characters** (e.g. 128 × `"🔑"`, 512 UTF-8 bytes) is `201`, which is what proves the bound is counted in characters and not in encoded bytes
++- [X] T028 [US2] Add the FR-034 round-trip test to `tests/test_password.py` (SC-013): passwords containing spaces, punctuation, emoji, combining marks, and non-ASCII letters each grant `200` when the identical value is supplied, in **both** read forms, with the returned content byte-equal to what was submitted
++- [X] T029 [US2] Add the FR-040 refusal table to `tests/test_password.py`: for both read forms, a missing header, an empty header value, a wrong-case value, a value with trailing whitespace, a truncated value, a correct-prefix value, and an over-long value are each `403`; the correct value is `200`
++- [X] T030 [US2] Add the FR-041 test to `tests/test_password.py` (SC-012): after each `403`, the body is exactly `{"error": "invalid paste password"}`, contains no substring of the content, and the paste still returns its full content to a subsequent correct-password read in either form
++- [X] T031 [US2] Add the FR-042 test to `tests/test_password.py`: reading an **unprotected** paste with a password header present — both a plausible value and garbage — returns `200` with `"protected": false` and bytes identical to a read with no header at all
++- [X] T032 [US2] Add the FR-050 test to `tests/test_password.py`: revoking a protected paste with the correct token and **no** password header is `204`, and later reads are `404`; a correct password with a wrong token is `403`; the password supplied in place of the token is `403`. The password never substitutes for the token and is never required alongside it
++- [X] T033 [US2] Add the FR-035 / FR-038 / SR-013 storage tests to `tests/test_password.py` (SC-017): the `201` body is exactly `{id, delete_token, url}` for every combination of the two options and contains no trace of the password; reading the record file off disk via the `record_file` helper asserts `password.algorithm == "pbkdf2_sha256"`, `iterations == 600000`, `salt` is 32 hex characters, `hash` is 64 hex characters, and the plaintext appears nowhere under the data directory; `protected` in the structured read is a bare boolean. **Discriminating case**: two pastes created with the *same* password have different `salt` **and** different `hash`, and the hash is not any hex or base64 encoding of the password
++- [X] T034 [US2] Add the SR-014 tests to `tests/test_password.py`, modelled on the existing `test_SR_002_implementation_uses_hmac_compare_digest` source scan: assert `hmac.compare_digest(` appears in the verification path of `src/pastebin/models.py`, and that no line under `src/pastebin/` compares an expression matching `password` / `hash` / `digest` with `==` or `!=`. Behavioural companion: a password differing only in its final character, and a password that is a correct prefix of the stored one, are both `403`
++- [X] T035 [US2] Add the SR-015 tests to `tests/test_password.py`: two successive correct reads of the same paste each require the header, and a correct read followed by a header-less read of that same paste is `403` — nothing is cached; no `Set-Cookie` is ever sent and no cookie, session, or `Authorization` header changes any outcome; a correct read of paste A grants no access to paste B
++- [X] T036 [US2] Add the SR-018 / SR-019 tests to `tests/test_password.py`: monkeypatch `models.hash_password` to raise and assert an invalid-shape `password` still returns `400`, proving validation precedes hashing; a read with **no** password header performs no KDF run (monkeypatch `models.verify_password` to raise and assert the `403` still arrives); the `403` message is a fixed constant that does not vary with the supplied value and does not reveal whether a password was supplied; and no response contains the password, the stored salt or hash, or the strings `pbkdf2` / `iterations`
+ 
+ ### Implementation for User Story 2
+ 
+-- [ ] T037 [US2] Add the password gate to `PastebinHandler._handle_read` in `src/pastebin/server.py`, **after** the `404` checks and **before** the burn claim: if `record.get("password") is not None`, read the supplied value with `self._paste_password()` and respond `403` with `models.MSG_BAD_PASSWORD` when it is `None` (absent, empty, or undecodable — no KDF run) or when `models.verify_password(verifier, supplied)` is false. Nothing before the `200` discloses any part of the content or its length (FR-040, FR-041, SR-015, SR-019)
+-- [ ] T038 [US2] Add the identical gate, in the identical position, to `PastebinHandler._handle_raw` in `src/pastebin/server.py` — the check runs server-side on **every** read in **both** forms, with the failure body staying JSON (`{"error": …}`) even though the success body is plain text (FR-040, SR-015)
++- [X] T037 [US2] Add the password gate to `PastebinHandler._handle_read` in `src/pastebin/server.py`, **after** the `404` checks and **before** the burn claim: if `record.get("password") is not None`, read the supplied value with `self._paste_password()` and respond `403` with `models.MSG_BAD_PASSWORD` when it is `None` (absent, empty, or undecodable — no KDF run) or when `models.verify_password(verifier, supplied)` is false. Nothing before the `200` discloses any part of the content or its length (FR-040, FR-041, SR-015, SR-019)
++- [X] T038 [US2] Add the identical gate, in the identical position, to `PastebinHandler._handle_raw` in `src/pastebin/server.py` — the check runs server-side on **every** read in **both** forms, with the failure body staying JSON (`{"error": …}`) even though the success body is plain text (FR-040, SR-015)
+ 
+ **Checkpoint**: User Stories 1 AND 2 both work independently. Run
+ `PYTHONPATH=src python3 -m pytest -q --deselect tests/test_requirement_coverage.py` — green.
+@@ -160,13 +160,13 @@ Separately confirm an identifier that was never issued, and an expired one, are
+ 
+ ### Tests for User Story 3 ⚠️
+ 
+-- [ ] T039 [P] [US3] Add the FR-043 twelve-case table to `tests/test_password.py` (SC-016): {an identifier that was never issued, an expired protected paste, a revoked protected paste, a consumed one-time protected paste} × {no header, wrong password, correct password} — assert `404` in all twelve and `403` in none, so no response lets a caller tell a real identifier from an invented one
+-- [ ] T040 [P] [US3] Add the combined-paste tests to `tests/test_burn.py`: a paste created with **both** options returns `403` for a no-password read and for a wrong-password read and is **still readable** afterwards by a holder of the password; the correct-password read then returns the content with both flags `true` in the structured form; and every later request in either form — including one supplying the correct password — is `404`. Run the sequence once with the structured read as the consuming one and once with the raw read
+-- [ ] T041 [P] [US3] Add the combined SR-015 / SR-017 table to `tests/test_password.py`: for a paste that is both one-time and protected, assert that `HEAD`, `PUT`, `PATCH`, `OPTIONS`, `DELETE`, `/pastes/<id>/raw/`, `/pastes/<id>/anything`, a percent-encoded id, and a double-encoded id return no content, are never `200`, and — critically — never consume it; the paste still reads once afterwards with its password
++- [X] T039 [P] [US3] Add the FR-043 twelve-case table to `tests/test_password.py` (SC-016): {an identifier that was never issued, an expired protected paste, a revoked protected paste, a consumed one-time protected paste} × {no header, wrong password, correct password} — assert `404` in all twelve and `403` in none, so no response lets a caller tell a real identifier from an invented one
++- [X] T040 [P] [US3] Add the combined-paste tests to `tests/test_burn.py`: a paste created with **both** options returns `403` for a no-password read and for a wrong-password read and is **still readable** afterwards by a holder of the password; the correct-password read then returns the content with both flags `true` in the structured form; and every later request in either form — including one supplying the correct password — is `404`. Run the sequence once with the structured read as the consuming one and once with the raw read
++- [X] T041 [P] [US3] Add the combined SR-015 / SR-017 table to `tests/test_password.py`: for a paste that is both one-time and protected, assert that `HEAD`, `PUT`, `PATCH`, `OPTIONS`, `DELETE`, `/pastes/<id>/raw/`, `/pastes/<id>/anything`, a percent-encoded id, and a double-encoded id return no content, are never `200`, and — critically — never consume it; the paste still reads once afterwards with its password
+ 
+ ### Implementation for User Story 3
+ 
+-- [ ] T042 [US3] Factor the shared prelude of `_handle_read` and `_handle_raw` in `src/pastebin/server.py` into one helper — `_resolve_read(self, paste_id) -> dict | None` — that performs steps 1-5 of the normative order in exactly one place (`404` unknown/unusable/expired → `403` password → claim → `404` on a lost claim), sending the error response itself and returning `None` when it did. Both handlers then call it and differ only in how they render the record. The order is defined once, so the two routes cannot drift (R-21, FR-043, FR-046, SR-015, SR-017)
++- [X] T042 [US3] Factor the shared prelude of `_handle_read` and `_handle_raw` in `src/pastebin/server.py` into one helper — `_resolve_read(self, paste_id) -> dict | None` — that performs steps 1-5 of the normative order in exactly one place (`404` unknown/unusable/expired → `403` password → claim → `404` on a lost claim), sending the error response itself and returning `None` when it did. Both handlers then call it and differ only in how they render the record. The order is defined once, so the two routes cannot drift (R-21, FR-043, FR-046, SR-015, SR-017)
+ 
+ **Checkpoint**: All three behavioural stories work and compose. Run
+ `PYTHONPATH=src python3 -m pytest -q --deselect tests/test_requirement_coverage.py` — green.
+@@ -188,14 +188,14 @@ reports both flags `false`, and is still revocable with its original token.
+ 
+ > All live in `tests/test_compat.py`, so they are sequential with one another.
+ 
+-- [ ] T043 [US4] Create `tests/test_compat.py` with the module docstring naming its requirement cluster, and the FR-037 tests: `burn_after_reading` and `protected` are present on **every** successful structured read — including a paste created with neither option, where both are `false` — both are bare booleans, and `delete_token` is still absent from the body and from every response header
+-- [ ] T044 [US4] Add the FR-039 tests to `tests/test_compat.py`: for a paste that is both protected and one-time, the `/raw` success body is byte-equal to the submitted content with nothing added, and no response header on that route carries either flag; the header set is identical to the 001 expectation (`Content-Type: text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`)
+-- [ ] T045 [US4] Add the FR-036 precedence tests to `tests/test_compat.py`: a submission carrying an invalid new field **and** 70 000 bytes of content is `400`, not `413`; the control — the same body with valid new fields — is `413`; and a declared `Content-Length` over 66 560 is still `413` with the body unread
+-- [ ] T046 [US4] Add the FR-051 legacy-record test to `tests/test_compat.py` (SC-019): hand-write a record file carrying only `id`, `content`, `created_at`, `expires_at`, and `delete_token` (mode `0600`, a valid 22-character id), then assert it reads back with identical content, `created_at`, and `expires_at`, requires no password, reports both flags `false`, serves its `/raw` form, and is still revocable with its original token
+-- [ ] T047 [US4] Add the FR-052 restart test to `tests/test_compat.py` (SC-018): create a one-time paste and a protected paste, call `Service.restart()`, then assert the first is still one-time (reads once, then `404`), the second still requires the same password (`403` without it, `200` with it), and both original delete tokens still revoke
+-- [ ] T048 [US4] Add the FR-048 durability test to `tests/test_compat.py` (SC-018): consume a one-time paste, `Service.restart()`, then assert `404` from the structured read, the raw read, and a `DELETE` with the correct token
+-- [ ] T049 [US4] Add the FR-053 test to `tests/test_compat.py`: a create-and-read cycle using neither new field and no password header produces statuses, headers, and body shapes identical to the 001 expectations — the only difference anywhere is the two added flags in the structured read. Back it with an explicit assertion that the `201` key set, the `/raw` header set, the `204` revocation, and every error message are unchanged
+-- [ ] T050 [US4] Add the SR-020 planted-record table to `tests/test_compat.py`: write records by hand whose `burn_after_reading` is `"true"` / `0` / `null` / `[]`, and whose `password` is a string, a list, an object missing a key, an object with an extra key, an object with `algorithm: "md5"`, a non-hex `salt`, a short `hash`, and `iterations: 10**12` — assert each is `404` from both read forms (never `200`, never served unprotected, never served twice), and that the `iterations: 10**12` case responds promptly rather than executing the KDF
++- [X] T043 [US4] Create `tests/test_compat.py` with the module docstring naming its requirement cluster, and the FR-037 tests: `burn_after_reading` and `protected` are present on **every** successful structured read — including a paste created with neither option, where both are `false` — both are bare booleans, and `delete_token` is still absent from the body and from every response header
++- [X] T044 [US4] Add the FR-039 tests to `tests/test_compat.py`: for a paste that is both protected and one-time, the `/raw` success body is byte-equal to the submitted content with nothing added, and no response header on that route carries either flag; the header set is identical to the 001 expectation (`Content-Type: text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`)
++- [X] T045 [US4] Add the FR-036 precedence tests to `tests/test_compat.py`: a submission carrying an invalid new field **and** 70 000 bytes of content is `400`, not `413`; the control — the same body with valid new fields — is `413`; and a declared `Content-Length` over 66 560 is still `413` with the body unread
++- [X] T046 [US4] Add the FR-051 legacy-record test to `tests/test_compat.py` (SC-019): hand-write a record file carrying only `id`, `content`, `created_at`, `expires_at`, and `delete_token` (mode `0600`, a valid 22-character id), then assert it reads back with identical content, `created_at`, and `expires_at`, requires no password, reports both flags `false`, serves its `/raw` form, and is still revocable with its original token
++- [X] T047 [US4] Add the FR-052 restart test to `tests/test_compat.py` (SC-018): create a one-time paste and a protected paste, call `Service.restart()`, then assert the first is still one-time (reads once, then `404`), the second still requires the same password (`403` without it, `200` with it), and both original delete tokens still revoke
++- [X] T048 [US4] Add the FR-048 durability test to `tests/test_compat.py` (SC-018): consume a one-time paste, `Service.restart()`, then assert `404` from the structured read, the raw read, and a `DELETE` with the correct token
++- [X] T049 [US4] Add the FR-053 test to `tests/test_compat.py`: a create-and-read cycle using neither new field and no password header produces statuses, headers, and body shapes identical to the 001 expectations — the only difference anywhere is the two added flags in the structured read. Back it with an explicit assertion that the `201` key set, the `/raw` header set, the `204` revocation, and every error message are unchanged
++- [X] T050 [US4] Add the SR-020 planted-record table to `tests/test_compat.py`: write records by hand whose `burn_after_reading` is `"true"` / `0` / `null` / `[]`, and whose `password` is a string, a list, an object missing a key, an object with an extra key, an object with `algorithm: "md5"`, a non-hex `salt`, a short `hash`, and `iterations: 10**12` — assert each is `404` from both read forms (never `200`, never served unprotected, never served twice), and that the `iterations: 10**12` case responds promptly rather than executing the KDF
+ 
+ **Checkpoint**: All four user stories are independently functional. The whole suite — including
+ `tests/test_requirement_coverage.py` with its extended ranges — must now be green.
+@@ -204,13 +204,13 @@ reports both flags `false`, and is still revocable with its original token.
+ 
+ ## Phase 7: Polish & Cross-Cutting Concerns
+ 
+-- [ ] T051 [P] Update `README.md`: add `burn_after_reading` and `password` to the `POST /pastes` field description, add `X-Paste-Password` to the Routes table rows for both `GET` endpoints, update the structured-read key list on line 47 to the six fields, add `403` to the status column for the `GET` rows, and extend the storage-and-security notes with the PBKDF2 verifier and the single-read destruction. The README must not document a password-change or recovery operation — neither exists
+-- [ ] T052 Run the full suite from the repository root: `PYTHONPATH=src python3 -m pytest -q` — it MUST pass with **zero** failures, zero skips, and zero `xfail`s (Constitution, Development Workflow). Compare the passing count against the T001 baseline and account for every added test
+-- [ ] T053 Confirm the SC-021 gate is green on its own: `PYTHONPATH=src python3 -m pytest -q tests/test_requirement_coverage.py` — every `FR-001 … FR-054` and `SR-001 … SR-020` is referenced by at least one test by id, and no test references an id that is not a requirement
+-- [ ] T054 Run all 8 scenarios in [quickstart.md](./quickstart.md) manually against a real server started with `PYTHONPATH=src python3 -m pastebin serve --port 8080 --data "$DATA"`, and confirm each behaves exactly as stated — including Scenario 8's `grep -ril 'hunter2' "$DATA"` printing nothing
+-- [ ] T055 SC-020 review: run `git diff tests/` and confirm the **only** changes to the 001 suite are the three key-set assertions from T025 plus the additive helpers in `tests/conftest.py` and the two `range()` bounds in `tests/test_requirement_coverage.py`. No existing test is deleted, weakened, skipped, or marked expected-to-fail
+-- [ ] T056 [P] Principle I check: confirm `pyproject.toml` still declares **zero** runtime dependencies, and that the only module added to the runtime import set across `src/pastebin/` is `hashlib` (`hmac` and `secrets` were already in use)
+-- [ ] T057 Principle II / IV review of `src/pastebin/`: confirm no bare `except:` and no `except Exception: pass` was introduced, that every new rejection names what was rejected without echoing it, and that the feature added zero new modules, routes, CLI options, locks, and on-disk files — as Complexity Tracking in [plan.md](./plan.md) records
++- [X] T051 [P] Update `README.md`: add `burn_after_reading` and `password` to the `POST /pastes` field description, add `X-Paste-Password` to the Routes table rows for both `GET` endpoints, update the structured-read key list on line 47 to the six fields, add `403` to the status column for the `GET` rows, and extend the storage-and-security notes with the PBKDF2 verifier and the single-read destruction. The README must not document a password-change or recovery operation — neither exists
++- [X] T052 Run the full suite from the repository root: `PYTHONPATH=src python3 -m pytest -q` — it MUST pass with **zero** failures, zero skips, and zero `xfail`s (Constitution, Development Workflow). Compare the passing count against the T001 baseline and account for every added test
++- [X] T053 Confirm the SC-021 gate is green on its own: `PYTHONPATH=src python3 -m pytest -q tests/test_requirement_coverage.py` — every `FR-001 … FR-054` and `SR-001 … SR-020` is referenced by at least one test by id, and no test references an id that is not a requirement
++- [X] T054 Run all 8 scenarios in [quickstart.md](./quickstart.md) manually against a real server started with `PYTHONPATH=src python3 -m pastebin serve --port 8080 --data "$DATA"`, and confirm each behaves exactly as stated — including Scenario 8's `grep -ril 'hunter2' "$DATA"` printing nothing
++- [X] T055 SC-020 review: run `git diff tests/` and confirm the **only** changes to the 001 suite are the three key-set assertions from T025 plus the additive helpers in `tests/conftest.py` and the two `range()` bounds in `tests/test_requirement_coverage.py`. No existing test is deleted, weakened, skipped, or marked expected-to-fail
++- [X] T056 [P] Principle I check: confirm `pyproject.toml` still declares **zero** runtime dependencies, and that the only module added to the runtime import set across `src/pastebin/` is `hashlib` (`hmac` and `secrets` were already in use)
++- [X] T057 Principle II / IV review of `src/pastebin/`: confirm no bare `except:` and no `except Exception: pass` was introduced, that every new rejection names what was rejected without echoing it, and that the feature added zero new modules, routes, CLI options, locks, and on-disk files — as Complexity Tracking in [plan.md](./plan.md) records
+ 
+ ---
+ 
+diff --git a/src/pastebin/models.py b/src/pastebin/models.py
+index f8f6b50..508d567 100644
+--- a/src/pastebin/models.py
++++ b/src/pastebin/models.py
+@@ -7,6 +7,8 @@ filesystem and no socket; everything here is pure.
+ from __future__ import annotations
+ 
+ import datetime
++import hashlib
++import hmac
+ import json
+ import re
+ import secrets
+@@ -24,6 +26,26 @@ MAX_BODY_BYTES = 66560
+ MIN_EXPIRES_IN = 1
+ MAX_EXPIRES_IN = 2_592_000
+ 
++#: Inclusive bounds for ``password``, measured in **characters** — never in the
++#: bytes it encodes to, so a 128-character password of multi-byte characters is
++#: accepted (FR-033).
++PASSWORD_MIN_CHARS = 1
++PASSWORD_MAX_CHARS = 128
++
++#: Password verifier parameters (SR-013, R-16). 600 000 iterations is the current
++#: OWASP recommendation for PBKDF2-HMAC-SHA256. These are the parameters that ship,
++#: and they are *not* lowered for tests: the configuration under test is the one in
++#: production (R-26).
++PBKDF2_ALGORITHM = "pbkdf2_sha256"
++PBKDF2_ITERATIONS = 600_000
++PBKDF2_SALT_BYTES = 16
++PBKDF2_DKLEN = 32
++
++#: Upper bound on a *stored* record's ``iterations`` (R-17, SR-018). A record
++#: claiming 10**12 iterations would otherwise wedge a request thread for hours; it is
++#: rejected as unusable instead, long before any key derivation starts.
++PBKDF2_MAX_ITERATIONS = 10_000_000
++
+ #: ISO 8601 UTC, whole-second precision, ``Z`` suffix (FR-015).
+ TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+ 
+@@ -50,6 +72,11 @@ MSG_TOO_LARGE = f"content exceeds the maximum size of {MAX_CONTENT_BYTES} bytes"
+ MSG_NOT_FOUND = "not found"
+ MSG_BAD_TOKEN = "invalid delete token"
+ MSG_INTERNAL = "internal error"
++MSG_BURN_TYPE = "burn_after_reading must be true or false"
++MSG_PASSWORD = "password must be a string of 1 to 128 characters"
++#: A fixed string: it does not vary with the supplied value, and does not reveal
++#: whether a password was supplied at all (SR-019).
++MSG_BAD_PASSWORD = "invalid paste password"
+ 
+ 
+ # --- Time -------------------------------------------------------------------------
+@@ -122,10 +149,15 @@ class ValidationError(Exception):
+         self.message = message
+ 
+ 
+-def validate_create_payload(body: bytes) -> tuple[str, int | None]:
+-    """Validate a ``POST /pastes`` body and return ``(content, expires_in)``.
++def validate_create_payload(
++    body: bytes,
++) -> tuple[str, int | None, bool | None, str | None]:
++    """Validate a ``POST /pastes`` body.
++
++    Returns ``(content, expires_in, burn_after_reading, password)``, where the last
++    three are ``None`` when the corresponding key was absent.
+ 
+-    Implements rules 4-11 of the data-model validation table in the documented order;
++    Implements rules 4-14 of the data-model validation table in the documented order;
+     framing rules 1-3 are enforced in ``server`` before any body byte is read.
+     Raises :class:`ValidationError` on the first rule that fails.
+     """
+@@ -170,10 +202,166 @@ def validate_create_payload(body: bytes) -> tuple[str, int | None]:
+             raise ValidationError(400, MSG_EXPIRES_IN)
+         expires_in = candidate
+ 
+-    # Rule 11 — encoded size. Last, so that an oversized-but-otherwise-valid body
+-    # still yields 413 rather than 400 (FR-027).
++    # Rule 11 — ``burn_after_reading``, when present, is exactly a ``bool``.
++    # ``type(...) is bool`` rather than ``isinstance``, and deliberately not a
++    # truthiness test: ``0``, ``1``, ``"true"``, ``[]``, and ``{}`` are all rejected
++    # rather than coerced, because a best-guess coercion here would silently make a
++    # paste one-time — or fail to (R-10, FR-031, Constitution Principle II). An
++    # explicit ``null`` is rejected rather than treated as absence.
++    burn_after_reading: bool | None = None
++    if "burn_after_reading" in payload:
++        candidate = payload["burn_after_reading"]
++        if type(candidate) is not bool:
++            raise ValidationError(400, MSG_BURN_TYPE)
++        burn_after_reading = candidate
++
++    # Rules 12 and 13 — ``password``, when present, is a ``str`` of 1 to 128
++    # characters. The bound is counted with ``len()`` on the ``str`` — never on its
++    # UTF-8 encoding — so a 128-character password of multi-byte characters is
++    # accepted, which is what FR-033 requires. An explicit ``null`` is rejected
++    # rather than treated as absence.
++    password: str | None = None
++    if "password" in payload:
++        candidate = payload["password"]
++        if type(candidate) is not str:
++            raise ValidationError(400, MSG_PASSWORD)
++        if not (PASSWORD_MIN_CHARS <= len(candidate) <= PASSWORD_MAX_CHARS):
++            raise ValidationError(400, MSG_PASSWORD)
++        password=[REDACTED:assigned_secret]
++
++    # Rule 14 — encoded size. Last, so that an oversized-but-otherwise-valid body
++    # still yields 413 rather than 400 (FR-027), while a submission carrying an
++    # invalid *new* field yields 400 even when its content is also oversized
++    # (FR-036). This position is load-bearing for both requirements.
+     if len(content.encode("utf-8")) > MAX_CONTENT_BYTES:
+         raise ValidationError(413, MSG_TOO_LARGE)
+ 
+-    # Keys other than ``content`` and ``expires_in`` are never inspected (FR-009).
+-    return content, expires_in
++    # Keys other than ``content``, ``expires_in``, ``burn_after_reading``, and
++    # ``password`` are never inspected (FR-009).
++    return content, expires_in, burn_after_reading, password
++
++
++# --- Password verifier ------------------------------------------------------------
++
++
++def hash_password(password: str) -> dict:
++    """Derive the stored, non-recoverable verifier for ``password`` (SR-013, R-16).
++
++    PBKDF2-HMAC-SHA256 at the shipped iteration count, with a fresh 16-byte salt from
++    ``secrets`` drawn **per paste** — so two pastes created with the same password
++    have unrelated salts and unrelated stored hashes.
++
++    The plaintext is used to derive the key and is then dropped: it is never
++    retained, never written to the record, never logged, and never returned (SR-019).
++    """
++    salt = secrets.token_bytes(PBKDF2_SALT_BYTES)
++    derived = hashlib.pbkdf2_hmac(
++        "sha256",
++        password.encode("utf-8"),
++        salt,
++        PBKDF2_ITERATIONS,
++        dklen=PBKDF2_DKLEN,
++    )
++    return {
++        "algorithm": PBKDF2_ALGORITHM,
++        "iterations": PBKDF2_ITERATIONS,
++        "salt": salt.hex(),
++        "hash": derived.hex(),
++    }
++
++
++def verify_password(verifier: dict, supplied: str) -> bool:
++    """True when ``supplied`` is the password ``verifier`` was derived from (SR-014).
++
++    The supplied text is re-derived with the verifier's **stored** salt and iteration
++    count, and the two 32-byte derived digests are compared with
++    ``hmac.compare_digest``. The comparison is over the digests, never over the raw
++    passwords — so neither the length nor any prefix of the stored password can be
++    inferred from how long a refusal takes (R-18).
++
++    ``verifier`` has already been validated by :func:`stored_password_verifier`, so
++    its salt is hex and its iteration count is within bounds before this runs.
++    """
++    derived = hashlib.pbkdf2_hmac(
++        "sha256",
++        supplied.encode("utf-8"),
++        bytes.fromhex(verifier["salt"]),
++        verifier["iterations"],
++        dklen=PBKDF2_DKLEN,
++    )
++    return hmac.compare_digest(derived, bytes.fromhex(verifier["hash"]))
++
++
++# --- Stored-record interpretation (data-model.md) ---------------------------------
++
++#: Returned by the helpers below when a stored field is present but malformed. It is
++#: distinct from ``None``, which means "absent, so off": the two directions are
++#: deliberately asymmetric. *Absent* means off, because that is exactly what every
++#: pre-feature record looks like (FR-051). *Malformed* means gone, because the only
++#: alternatives are serving a protected paste without checking a password or serving
++#: a one-time paste twice — both SR-017 violations (SR-020).
++RECORD_UNUSABLE = object()
++
++#: The exact key set a stored verifier must carry — no more, no fewer (SR-020).
++_VERIFIER_FIELDS = frozenset({"algorithm", "iterations", "salt", "hash"})
++
++#: Lowercase hex only. ``bytes.fromhex`` would accept uppercase and whitespace; this
++#: is an allowlist of exactly what :func:`hash_password` writes.
++_HEX_RE = re.compile(r"[0-9a-f]+")
++
++
++def _is_hex(value, length: int) -> bool:
++    return (
++        type(value) is str
++        and len(value) == length
++        and _HEX_RE.fullmatch(value) is not None
++    )
++
++
++def stored_burn_flag(record: dict):
++    """Interpret a record's ``burn_after_reading``: ``bool`` or ``RECORD_UNUSABLE``.
++
++    Absent ⇒ ``False`` (FR-051). Exactly ``True``/``False`` ⇒ that value (FR-052).
++    Anything else ⇒ ``RECORD_UNUSABLE`` (SR-020). ``type(...) is bool`` rather than
++    ``isinstance`` and never a truthiness test, for the same reason as rule 11.
++    """
++    if "burn_after_reading" not in record:
++        return False
++    value = record["burn_after_reading"]
++    if type(value) is not bool:
++        return RECORD_UNUSABLE
++    return value
++
++
++def stored_password_verifier(record: dict):
++    """Interpret a record's ``password``: a verifier, ``None``, or ``RECORD_UNUSABLE``.
++
++    Absent or ``null`` ⇒ ``None``, i.e. unprotected (FR-051). An object whose key set
++    is **exactly** ``{algorithm, iterations, salt, hash}``, with the algorithm this
++    service writes, an ``int`` iteration count within ``[1, PBKDF2_MAX_ITERATIONS]``,
++    a 32-character hex salt, and a 64-character hex hash ⇒ that verifier (FR-052).
++    Anything else ⇒ ``RECORD_UNUSABLE`` (SR-020).
++
++    The iteration bound is a control rather than a formality: a planted record
++    claiming ``10**12`` iterations would otherwise occupy a request thread for hours,
++    which SR-018 forbids. It is checked **here**, before any key derivation.
++    """
++    if record.get("password") is None:
++        return None
++    verifier = record["password"]
++    if type(verifier) is not dict:
++        return RECORD_UNUSABLE
++    if set(verifier) != _VERIFIER_FIELDS:
++        return RECORD_UNUSABLE
++    if verifier["algorithm"] != PBKDF2_ALGORITHM:
++        return RECORD_UNUSABLE
++    iterations = verifier["iterations"]
++    if type(iterations) is not int:
++        return RECORD_UNUSABLE
++    if not (1 <= iterations <= PBKDF2_MAX_ITERATIONS):
++        return RECORD_UNUSABLE
++    if not _is_hex(verifier["salt"], PBKDF2_SALT_BYTES * 2):
++        return RECORD_UNUSABLE
++    if not _is_hex(verifier["hash"], PBKDF2_DKLEN * 2):
++        return RECORD_UNUSABLE
++    return verifier
+diff --git a/src/pastebin/server.py b/src/pastebin/server.py
+index 6716757..5f7727f 100644
+--- a/src/pastebin/server.py
++++ b/src/pastebin/server.py
+@@ -217,6 +217,34 @@ class PastebinHandler(http.server.BaseHTTPRequestHandler):
+     def _store(self) -> store.PasteStore:
+         return self.server.store
+ 
++    def _paste_password(self) -> str | None:
++        """The author's password text from ``X-Paste-Password``, or ``None`` (R-19).
++
++        ``http.client``/``BaseHTTPRequestHandler`` decode header bytes as latin-1,
++        which is lossless but wrong for any non-ASCII password. Re-encoding to
++        latin-1 recovers the exact bytes the client sent, and decoding those as UTF-8
++        recovers the author's text — so a password containing emoji, combining marks,
++        or non-ASCII letters round-trips exactly (FR-034).
++
++        ``None`` means "no usable password was supplied" and covers three cases that
++        are deliberately indistinguishable to the caller: the header was absent, its
++        value was empty (a stored password is at least one character, so an empty
++        value can never match), or its bytes were not valid UTF-8. An undecodable
++        value is treated as a wrong password rather than as a server fault — it is
++        caller-controlled input, and a ``500`` would both be wrong and tell the
++        caller something about how the value was handled (FR-040).
++
++        When the header repeats, ``self.headers.get`` returns the first value, which
++        is what the contract specifies.
++        """
++        value = self.headers.get("X-Paste-Password")
++        if not value:
++            return None
++        try:
++            return value.encode("latin-1").decode("utf-8")
++        except (UnicodeEncodeError, UnicodeDecodeError):
++            return None
++
+     def _read_body(self) -> bytes | None:
+         """Framing guard, applied before any body byte is read (R-06, SR-005, FR-029).
+ 
+@@ -266,7 +294,9 @@ class PastebinHandler(http.server.BaseHTTPRequestHandler):
+             return
+ 
+         try:
+-            content, expires_in = models.validate_create_payload(body)
++            content, expires_in, burn_after_reading, password = (
++                models.validate_create_payload(body)
++            )
+         except models.ValidationError as error:
+             self._send_json_error(error.status, error.message)
+             return
+@@ -278,8 +308,18 @@ class PastebinHandler(http.server.BaseHTTPRequestHandler):
+             "created_at": models.format_timestamp(created),
+             "expires_at": models.compute_expires_at(created, expires_in),
+             "delete_token": models.new_delete_token(),
++            # Both keys are always written, so a record this service creates is
++            # explicit about both options. Absence is still honoured on read, which
++            # is what keeps pre-feature records valid (FR-051).
++            "burn_after_reading": burn_after_reading or False,
++            # Hashing happens only *after* validation has accepted the shape
++            # (SR-018). The plaintext goes no further than this call.
++            "password": models.hash_password(password) if password is not None else None,
+         }
+         paste_id = self._store.write_record(record)
++        # Exactly three fields, whatever options were used: the response never
++        # echoes the password, never reports whether the paste is protected, and
++        # never reports the one-time marking (FR-035, SR-013, SR-019).
+         self._send_json(
+             201,
+             {
+@@ -289,13 +329,74 @@ class PastebinHandler(http.server.BaseHTTPRequestHandler):
+             },
+         )
+ 
+-    def _handle_read(self, paste_id: str) -> None:
++    def _resolve_read(self, paste_id: str) -> dict | None:
++        """The normative read evaluation order, in exactly one place (R-21).
++
++        Both ``GET`` routes go through here, so they cannot drift apart:
++
++        ```text
++        1. identifier allowlist + resolved-path containment  → 404
++        2. record exists, parses, and is usable              → 404
++        3. record is live (not expired)                      → 404
++        4. protected ⇒ X-Paste-Password verifies             → 403
++        5. one-time ⇒ claim (os.unlink) succeeds             → 404
++        6. caller serves                                     → 200
++        ```
++
++        Steps 1-3 happen inside ``read_record``. Both boundaries below them are
++        load-bearing:
++
++        - **Steps 1-3 precede step 4** (FR-043): a ``403`` is only ever returned for
++          an identifier that really resolves to a live paste, so a refusal never
++          confirms that an invented identifier is real.
++        - **Step 4 precedes step 5** (FR-046): a reader who cannot prove they hold
++          the password never consumes the single read, so a stranger with the link
++          cannot destroy a paste they were never entitled to see.
++
++        Returns the record when the caller may serve it, or ``None`` after having
++        already sent the error response. Nothing sent from here discloses any part of
++        the content or its length. An ``OSError`` out of the claim is *not* caught:
++        it propagates to the generic ``500`` path, so a claim that failed
++        unexpectedly can never end in a served body (SR-020).
++        """
+         record = self._store.read_record(paste_id)
+         if record is None:
+             self._send_json_error(404, models.MSG_NOT_FOUND)
++            return None
++
++        verifier = models.stored_password_verifier(record)
++        if verifier is not None:
++            # The check runs here, server-side, on *every* read in *both* forms —
++            # never from a cookie, a session, or any other client-supplied claim
++            # (SR-015). The failure body stays JSON even on the raw route.
++            supplied = self._paste_password()
++            if supplied is None:
++                # Absent, empty, or undecodable. No key derivation is run for a
++                # request that supplied nothing to check, so an unauthenticated
++                # caller cannot provoke the KDF at all (SR-018).
++                self._send_json_error(403, models.MSG_BAD_PASSWORD)
++                return None
++            if not models.verify_password(verifier, supplied):
++                self._send_json_error(403, models.MSG_BAD_PASSWORD)
++                return None
++
++        if models.stored_burn_flag(record):
++            if not self._store.consume_record(paste_id):
++                # Another reader won the race, or a revocation did. Either way the
++                # paste no longer exists, which is exactly a 404 (FR-047).
++                self._send_json_error(404, models.MSG_NOT_FOUND)
++                return None
++
++        return record
++
++    def _handle_read(self, paste_id: str) -> None:
++        record = self._resolve_read(paste_id)
++        if record is None:
+             return
+-        # Exactly four fields. ``delete_token`` is never included in the body or in
+-        # any header (FR-012, FR-013, SR-009).
++        # Exactly six fields. ``delete_token`` is still never included in the body or
++        # in any header (FR-012, FR-013, FR-037, SR-009). ``protected`` reports only
++        # *whether* a password is required — never the password, the stored hash, the
++        # salt, or the hashing parameters (FR-038, SR-019).
+         self._send_json(
+             200,
+             {
+@@ -303,17 +404,20 @@ class PastebinHandler(http.server.BaseHTTPRequestHandler):
+                 "content": record["content"],
+                 "created_at": record["created_at"],
+                 "expires_at": record["expires_at"],
++                "burn_after_reading": models.stored_burn_flag(record),
++                "protected": record.get("password") is not None,
+             },
+         )
+ 
+     def _handle_raw(self, paste_id: str) -> None:
+-        record = self._store.read_record(paste_id)
++        record = self._resolve_read(paste_id)
+         if record is None:
+-            # The error shape stays JSON even though the success shape is plain text.
+-            self._send_json_error(404, models.MSG_NOT_FOUND)
++            # ``_resolve_read`` has already sent the error, whose shape stays JSON
++            # even though the success shape here is plain text.
+             return
+-        # Verbatim bytes: no trailing newline, no BOM, no JSON wrapper. The length is
+-        # the encoded byte count, never ``len(str)`` (FR-014, FR-016, R-13).
++        # Verbatim bytes: no trailing newline, no BOM, no JSON wrapper, and no header
++        # carrying either flag. The length is the encoded byte count, never
++        # ``len(str)`` (FR-014, FR-016, FR-039, R-13).
+         body = record["content"].encode("utf-8")
+         self._send_bytes(
+             200,
+diff --git a/src/pastebin/store.py b/src/pastebin/store.py
+index 7eb2ee2..814f52d 100644
+--- a/src/pastebin/store.py
++++ b/src/pastebin/store.py
+@@ -116,6 +116,13 @@ class PasteStore:
+         object, or missing any required field is treated as a paste that does not
+         exist: it never raises, never prevents startup, and never affects any other
+         paste (FR-024).
++
++        The same rule is extended to the two optional fields this feature adds: a
++        record whose ``burn_after_reading`` or ``password`` is present but malformed
++        is unusable, so the paste reports ``404`` exactly as any unparseable record
++        already does. ``RECORD_FIELDS`` is deliberately **not** extended — the two
++        keys stay optional, which is what keeps every pre-feature record valid with
++        no migration and no startup scan (FR-051, SR-020, R-17).
+         """
+         path = self._record_path(paste_id)
+         if path is None:
+@@ -133,6 +140,10 @@ class PasteStore:
+             return None
+         if any(field not in record for field in models.RECORD_FIELDS):
+             return None
++        if models.stored_burn_flag(record) is models.RECORD_UNUSABLE:
++            return None
++        if models.stored_password_verifier(record) is models.RECORD_UNUSABLE:
++            return None
+         return record
+ 
+     def read_record(self, paste_id: str) -> dict | None:
+@@ -148,6 +159,37 @@ class PasteStore:
+             return None
+         return record
+ 
++    # --- Claim --------------------------------------------------------------
++
++    def consume_record(self, paste_id: str) -> bool:
++        """Atomically claim a one-time paste; ``True`` iff this caller claimed it.
++
++        The ``unlink`` **is** the claim. ``os.unlink`` is atomic with respect to the
++        directory entry: of N concurrent calls naming the same path exactly one
++        succeeds and the rest raise ``ENOENT``, so that single syscall decides the
++        winner with nothing else needed (SR-016, FR-047, R-20).
++
++        It is taken under the store's **existing** lock — the same one
++        ``delete_record`` holds — so the two destructive paths share one
++        serialization point. No second lock and no per-identifier lock registry is
++        introduced (R-09's rejection stands).
++
++        ``False`` means the entry was already gone: another reader won the race, or
++        a revocation did. Every other ``OSError`` propagates rather than being
++        reported as a lost race, so a claim that fails for an unexpected reason can
++        never be mistaken for one that simply lost — the caller fails closed with a
++        generic ``500`` and serves nothing (SR-020, Constitution Principle II).
++        """
++        with self._lock:
++            path = self._record_path(paste_id)
++            if path is None:
++                return False
++            try:
++                os.unlink(path)
++            except FileNotFoundError:
++                return False
++            return True
++
+     # --- Delete -------------------------------------------------------------
+ 
+     def delete_record(self, paste_id: str, token: str) -> str:
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 64c838a..0c4a585 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -33,10 +33,33 @@ from pastebin import cli, server as server_module  # noqa: E402
+ #: single ``201`` that creates it and nowhere else.
+ ISSUED_TOKENS: set[str] = set()
+ 
++#: Every paste password and every stored salt/hash the suite has registered. None of
++#: these may appear in *any* response, ever — not in a body, not in a header, not in
++#: an error message (SR-019, SC-017). Tests register values with ``register_secret``;
++#: the scan below then enforces it for every response the suite produces, which is
++#: what makes the guarantee suite-wide rather than one test's observation.
++USED_PASSWORDS: set[str] = set()
++
++#: Hashing parameters must not be disclosed either (SR-019). These substrings would
++#: betray the algorithm and its configuration if they ever reached a caller.
++_SECRET_MARKERS = ("pbkdf2", "iterations")
++
+ _PYTHON_VERSION_RE = re.compile(r"[Pp]ython/?\d", re.ASCII)
+ _ABSOLUTE_PATH_RE = re.compile(r"/(?:tmp|root|home|etc|var|usr|private)/[A-Za-z0-9_.-]")
+ 
+ 
++def register_secret(*values: str) -> None:
++    """Register a password, salt, or hash that must never appear in a response.
++
++    Short values are skipped: a one-character password would match by coincidence in
++    almost any body and would turn the guarantee into noise. Those are covered by the
++    per-test assertions in ``tests/test_password.py`` instead.
++    """
++    for value in values:
++        if value and len(value) >= 4:
++            USED_PASSWORDS.add(value)
++
++
+ class Response:
+     """A captured HTTP response: status, headers, and the exact body bytes."""
+ 
+@@ -97,6 +120,19 @@ def scan_response(response: Response) -> Response:
+             assert token not in combined, (
+                 "SR-009/FR-013: a delete_token appeared outside the 201 that issued it"
+             )
++
++    # SR-019 / SC-017: a password, a stored salt, a stored hash, or a hashing
++    # parameter may appear in *no* response — including the 201 that creates the
++    # paste, which is why this block is outside the branch above.
++    for secret in USED_PASSWORDS:
++        assert secret not in combined, (
++            "SR-019: a password, salt, or stored hash appeared in a response"
++        )
++    lowered = combined.lower()
++    for marker in _SECRET_MARKERS:
++        assert marker not in lowered, (
++            f"SR-019: the hashing parameter {marker!r} appeared in a response"
++        )
+     return response
+ 
+ 
+@@ -171,7 +207,14 @@ class Service:
+         body: bytes | None = None,
+         headers: dict[str, str] | None = None,
+         timeout: float = 10.0,
++        password: str | None = None,
+     ) -> Response:
++        if password is not None:
++            # ``http.client`` encodes a str header as latin-1, so the bytes on the
++            # wire are the client's UTF-8 encoding of the password — exactly what a
++            # real client sends and what ``_paste_password`` recovers (R-19).
++            headers = dict(headers or {})
++            headers["X-Paste-Password"] = password.encode("utf-8").decode("latin-1")
+         connection = self._connect(timeout)
+         try:
+             connection.putrequest(method, path, skip_host=False, skip_accept_encoding=True)
+@@ -201,21 +244,50 @@ class Service:
+     ) -> Response:
+         return self.request("POST", path, body, headers)
+ 
+-    def get(self, path: str) -> Response:
+-        return self.request("GET", path)
++    def get(self, path: str, password: str | None = None) -> Response:
++        return self.request("GET", path, password=[REDACTED:assigned_secret])
+ 
+     def delete(self, path: str, token: str | None = None) -> Response:
+         headers = {} if token is None else {"X-Delete-Token": token}
+         return self.request("DELETE", path, None, headers)
+ 
+     def create(self, content: str = "hello", **extra) -> dict:
+-        """Create a paste and return the parsed ``201`` body. Fails loudly otherwise."""
++        """Create a paste and return the parsed ``201`` body. Fails loudly otherwise.
++
++        A ``password=`` keyword lands in the payload like any other field, and is
++        registered as a secret so no later response may contain it (SR-019).
++        """
+         payload = {"content": content}
+         payload.update(extra)
++        secret=[REDACTED:assigned_secret]("password")
++        if type(secret) is str:
++            register_secret(secret)
+         response = self.post_json(payload)
+         assert response.status == 201, (response.status, response.body)
+         return response.json()
+ 
++    # -- on-disk inspection --
++
++    def record_file(self, paste_id: str) -> dict:
++        """The stored record for ``paste_id``, parsed straight off disk.
++
++        Lets a test assert on what was *written* — the verifier's shape, and the
++        absence of the plaintext — rather than only on what is served back.
++        """
++        path = os.path.join(self.data_dir, paste_id + ".json")
++        with open(path, "rb") as handle:
++            record = json.loads(handle.read().decode("utf-8"))
++        verifier = record.get("password")
++        if type(verifier) is dict:
++            for key in ("salt", "hash"):
++                if type(verifier.get(key)) is str:
++                    register_secret(verifier[key])
++        return record
++
++    def record_exists(self, paste_id: str) -> bool:
++        """True when a record file for ``paste_id`` is still on disk."""
++        return os.path.exists(os.path.join(self.data_dir, paste_id + ".json"))
++
+     # -- raw framing control (SR-005) --
+ 
+     def send_raw(
+diff --git a/tests/test_burn.py b/tests/test_burn.py
+new file mode 100644
+index 0000000..e67a610
+--- /dev/null
++++ b/tests/test_burn.py
+@@ -0,0 +1,470 @@
++"""Burn-after-reading: a snippet that ceases to exist upon its first successful read.
++
++Covers FR-030, FR-031, FR-044, FR-045, FR-046, FR-047, FR-049, FR-054, SR-016,
++SR-017, SR-020, SC-011, SC-014, SC-015.
++
++The combined burn+password sequences live at the end of this module (User Story 3);
++the password requirements themselves are covered in ``tests/test_password.py``.
++"""
++
++from __future__ import annotations
++
++import os
++import threading
++import time
++
++import pytest
++
++#: Long enough that a truncated body is unmistakable, and that a partial write would
++#: have to cross several socket buffers to go unnoticed.
++LONG_CONTENT = "complete-or-nothing line\n" * 400
++
++#: Every method the service does not route. None may ever disclose content.
++UNROUTED_METHODS = ("PUT", "PATCH", "HEAD", "OPTIONS")
++
++
++def read_json(server, paste_id, **kwargs):
++    return server.get(f"/pastes/{paste_id}", **kwargs)
++
++
++def read_raw(server, paste_id, **kwargs):
++    return server.get(f"/pastes/{paste_id}/raw", **kwargs)
++
++
++# --- FR-030: the field is accepted, and absence means false ----------------------
++
++
++def test_FR_030_burn_after_reading_is_accepted_true_false_and_absent(server):
++    """FR-030: true, false, and absence are all accepted; absence means false."""
++    one_time = server.create("burns", burn_after_reading=True)
++    explicit_false = server.create("stays-a", burn_after_reading=False)
++    absent = server.create("stays-b")
++
++    for created in (one_time, explicit_false, absent):
++        assert server.record_exists(created["id"])
++
++    # The two non-burning pastes are readable repeatedly and report ``false``.
++    for created, text in ((explicit_false, "stays-a"), (absent, "stays-b")):
++        for _ in range(3):
++            response = read_json(server, created["id"])
++            assert response.status == 200
++            assert response.json()["content"] == text
++            assert response.json()["burn_after_reading"] is False
++
++    # The one-time paste reports ``true`` on the single read it has.
++    response = read_json(server, one_time["id"])
++    assert response.status == 200
++    assert response.json()["burn_after_reading"] is True
++
++
++def test_FR_030_explicit_false_behaves_exactly_as_absence(server):
++    """FR-030: `false` and an absent field are indistinguishable from outside."""
++    explicit = server.create("same-text", burn_after_reading=False)
++    absent = server.create("same-text")
++
++    first = read_json(server, explicit["id"]).json()
++    second = read_json(server, absent["id"]).json()
++
++    # Identical apart from the fields that are necessarily per-paste.
++    for body in (first, second):
++        body.pop("id")
++        body.pop("created_at")
++    assert first == second
++
++    # Both survive the read.
++    assert read_json(server, explicit["id"]).status == 200
++    assert read_json(server, absent["id"]).status == 200
++
++
++# --- FR-031: anything that is not a boolean is rejected ---------------------------
++
++
++@pytest.mark.parametrize(
++    "value",
++    ["true", "false", 0, 1, -1, None, [], {}, 1.0],
++    ids=["str-true", "str-false", "zero", "one", "minus-one", "null", "list", "object", "float"],
++)
++def test_FR_031_non_boolean_burn_after_reading_is_400_and_creates_nothing(server, value):
++    """FR-031: a non-boolean burn_after_reading is 400 and creates nothing."""
++    before = sorted(os.listdir(server.data_dir))
++
++    response = server.post_json({"content": "rejected", "burn_after_reading": value})
++
++    assert response.status == 400, (value, response.body)
++    assert response.json() == {"error": "burn_after_reading must be true or false"}
++    assert sorted(os.listdir(server.data_dir)) == before, (
++        "FR-031: a rejected submission must leave nothing on disk"
++    )
++
++
++# --- FR-044 / FR-045: return, then destroy ----------------------------------------
++
++
++def test_FR_044_structured_read_is_identical_to_an_ordinary_paste_then_destroys(server):
++    """FR-044, SC-011: the single read is an ordinary read; then the paste is gone."""
++    ordinary = server.create(LONG_CONTENT, expires_in=3600)
++    one_time = server.create(LONG_CONTENT, expires_in=3600, burn_after_reading=True)
++
++    ordinary_response = read_json(server, ordinary["id"])
++    burn_response = read_json(server, one_time["id"])
++
++    assert burn_response.status == ordinary_response.status == 200
++    assert burn_response.header("Content-Type") == ordinary_response.header("Content-Type")
++
++    expected = ordinary_response.json()
++    actual = burn_response.json()
++    # Everything matches apart from the identifier and the flag under test.
++    assert actual["content"] == expected["content"] == LONG_CONTENT
++    assert set(actual) == set(expected)
++    assert expected["burn_after_reading"] is False
++    assert actual["burn_after_reading"] is True
++    assert actual["protected"] == expected["protected"] is False
++
++    assert not server.record_exists(one_time["id"]), (
++        "FR-044: the record must be gone from the data directory after the read"
++    )
++
++
++def test_FR_045_every_later_request_is_404_after_the_single_read(server):
++    """FR-045: after the read, structured, raw, and revocation are all 404."""
++    created = server.create("one shot", burn_after_reading=True)
++    token = created["delete_token"]
++
++    assert read_json(server, created["id"]).status == 200
++
++    assert read_json(server, created["id"]).status == 404
++    assert read_raw(server, created["id"]).status == 404
++    revocation = server.delete(f"/pastes/{created['id']}", token)
++    assert revocation.status == 404, (
++        "FR-045: even the correct delete token must report 404 after consumption"
++    )
++    assert revocation.json() == {"error": "not found"}
++
++
++def test_FR_044_raw_read_consumes_and_returns_the_exact_bytes(server):
++    """FR-044, FR-045: a raw read consumes exactly as a structured read does."""
++    created = server.create(LONG_CONTENT, burn_after_reading=True)
++
++    response = read_raw(server, created["id"])
++
++    assert response.status == 200
++    assert response.header("Content-Type") == "text/plain; charset=utf-8"
++    assert response.header("X-Content-Type-Options") == "nosniff"
++    assert response.body == LONG_CONTENT.encode("utf-8"), (
++        "FR-039: the raw body is byte-for-byte the content, with no trailing newline"
++    )
++    assert not response.body.endswith(b"\n\n")
++
++    assert not server.record_exists(created["id"])
++    assert read_raw(server, created["id"]).status == 404
++    assert read_json(server, created["id"]).status == 404
++    assert server.delete(f"/pastes/{created['id']}", created["delete_token"]).status == 404
++
++
++# --- FR-046: no unsuccessful request consumes -------------------------------------
++
++
++def test_FR_046_refused_and_unrouted_requests_never_consume(server):
++    """FR-046, SC-014: a refused or unrouted request leaves the single read intact."""
++    created = server.create(LONG_CONTENT, burn_after_reading=True)
++    paste_id = created["id"]
++    path = f"/pastes/{paste_id}"
++
++    # A revocation with a wrong token, and one with no token at all.
++    assert server.delete(path, "x" * 43).status == 403
++    assert server.delete(path).status == 403
++
++    # Addresses that do not route.
++    assert server.get(f"{path}/other").status == 404
++    assert server.get(f"{path}/").status == 404
++    assert server.get(f"{path}/raw/").status == 404
++
++    # Methods that do not route.
++    for method in ("PUT", "PATCH", "HEAD"):
++        assert server.request(method, path).status == 404, method
++
++    # The paste is untouched: it still has its one read, with the whole content.
++    assert server.record_exists(paste_id)
++    response = read_json(server, paste_id)
++    assert response.status == 200
++    assert response.json()["content"] == LONG_CONTENT
++
++
++# --- FR-049: expiry applies independently of consumption --------------------------
++
++
++def test_FR_049_unread_one_time_paste_still_expires(server):
++    """FR-049: an unread one-time paste past its expiry is non-existent."""
++    expiring = server.create("gone by the clock", expires_in=1, burn_after_reading=True)
++    control = server.create("still here", burn_after_reading=True)
++
++    time.sleep(2.2)
++
++    assert read_json(server, expiring["id"]).status == 404
++    assert read_raw(server, expiring["id"]).status == 404
++
++    # The control proves the clock, not the feature, removed the first one.
++    assert read_json(server, control["id"]).status == 200
++    assert read_json(server, control["id"]).status == 404
++
++
++# --- FR-047 / SR-016: the claim is atomic -----------------------------------------
++
++
++def _race(server, paste_id, reader, thread_count=24):
++    """Run ``thread_count`` simultaneous reads; return the list of responses."""
++    barrier = threading.Barrier(thread_count)
++    responses = []
++    lock = threading.Lock()
++
++    def run() -> None:
++        barrier.wait()
++        response = reader(server, paste_id)
++        with lock:
++            responses.append(response)
++
++    threads = [threading.Thread(target=run) for _ in range(thread_count)]
++    for thread in threads:
++        thread.start()
++    for thread in threads:
++        thread.join(timeout=60)
++
++    assert len(responses) == thread_count
++    return responses
++
++
++def test_FR_047_concurrent_structured_reads_yield_exactly_one_200(server):
++    """FR-047, SR-016, SC-015: N concurrent reads → one complete 200, N-1 404s."""
++    created = server.create(LONG_CONTENT, burn_after_reading=True)
++
++    responses = _race(server, created["id"], read_json)
++    statuses = [response.status for response in responses]
++
++    assert statuses.count(200) == 1, statuses
++    assert statuses.count(404) == len(statuses) - 1, statuses
++    assert 403 not in statuses
++    assert 500 not in statuses, "SR-016: contention must never yield 500"
++
++    winner = next(r for r in responses if r.status == 200)
++    assert winner.json()["content"] == LONG_CONTENT, (
++        "FR-047: the one successful read must carry the complete, untruncated content"
++    )
++    assert not server.record_exists(created["id"])
++
++
++def test_FR_047_concurrent_raw_reads_yield_exactly_one_200(server):
++    """FR-047, SR-016: the raw route gives the same single-winner guarantee."""
++    created = server.create(LONG_CONTENT, burn_after_reading=True)
++
++    responses = _race(server, created["id"], read_raw)
++    statuses = [response.status for response in responses]
++
++    assert statuses.count(200) == 1, statuses
++    assert statuses.count(404) == len(statuses) - 1, statuses
++    assert 500 not in statuses
++
++    winner = next(r for r in responses if r.status == 200)
++    assert winner.body == LONG_CONTENT.encode("utf-8"), (
++        "FR-047: no read may return partial or truncated text"
++    )
++    for loser in responses:
++        if loser.status == 404:
++            assert loser.json() == {"error": "not found"}
++
++
++def test_SR_016_concurrent_read_and_revocation_disclose_content_at_most_once(server):
++    """SR-016: a read racing a revocation — content at most once, paste gone after."""
++    created = server.create(LONG_CONTENT, burn_after_reading=True)
++    paste_id = created["id"]
++    token = created["delete_token"]
++    path = f"/pastes/{paste_id}"
++
++    thread_count = 24
++    barrier = threading.Barrier(thread_count)
++    results = []
++    lock = threading.Lock()
++
++    def run(index: int) -> None:
++        barrier.wait()
++        if index % 2:
++            response = server.delete(path, token)
++            kind = "delete"
++        else:
++            response = read_json(server, paste_id)
++            kind = "read"
++        with lock:
++            results.append((kind, response))
++
++    threads = [threading.Thread(target=run, args=(i,)) for i in range(thread_count)]
++    for thread in threads:
++        thread.start()
++    for thread in threads:
++        thread.join(timeout=60)
++
++    reads = [response for kind, response in results if kind == "read"]
++    deletes = [response for kind, response in results if kind == "delete"]
++
++    successful_reads = [r for r in reads if r.status == 200]
++    assert len(successful_reads) <= 1, "SR-016: content returned more than once"
++    for response in successful_reads:
++        assert response.json()["content"] == LONG_CONTENT
++
++    assert sum(1 for r in deletes if r.status == 204) <= 1
++    assert all(r.status in (200, 404) for r in reads), [r.status for r in reads]
++    assert all(r.status in (204, 404) for r in deletes), [r.status for r in deletes]
++    assert all(r.status != 500 for _, r in results)
++
++    assert not server.record_exists(paste_id), "the paste is gone either way"
++    assert read_json(server, paste_id).status == 404
++
++
++# --- SR-017: nothing bypasses the destruction -------------------------------------
++
++
++def test_SR_017_no_route_method_or_encoding_serves_a_consumed_paste(server):
++    """SR-017: after consumption, no address, method, or encoding returns content."""
++    content = "already burned"
++    created = server.create(content, burn_after_reading=True)
++    paste_id = created["id"]
++    token = created["delete_token"]
++
++    assert read_json(server, paste_id).status == 200  # the single read
++
++    attempts = [
++        ("GET", f"/pastes/{paste_id}"),
++        ("GET", f"/pastes/{paste_id}/raw"),
++        ("GET", f"/pastes/{paste_id}/raw/"),
++        ("GET", f"/pastes/{paste_id}/anything"),
++        ("GET", f"/pastes/{paste_id[:-1]}%{ord(paste_id[-1]):02X}"),
++        ("GET", f"/pastes/{paste_id[:-1]}%25{ord(paste_id[-1]):02X}"),
++        ("HEAD", f"/pastes/{paste_id}"),
++        ("PUT", f"/pastes/{paste_id}"),
++        ("PATCH", f"/pastes/{paste_id}"),
++        ("OPTIONS", f"/pastes/{paste_id}"),
++    ]
++    for method, path in attempts:
++        response = server.request(method, path)
++        assert response.status != 200, (method, path, response.status)
++        assert content.encode("utf-8") not in response.body, (method, path)
++
++    revocation = server.delete(f"/pastes/{paste_id}", token)
++    assert revocation.status == 404
++    assert content.encode("utf-8") not in revocation.body
++
++
++# --- SR-020: fail closed when the claim cannot be completed -----------------------
++
++
++def test_SR_020_a_failing_claim_is_a_generic_500_and_discloses_nothing(server):
++    """SR-020: an unexpected claim failure yields 500 and never serves the content."""
++    content = "never-disclosed-payload"
++    created = server.create(content, burn_after_reading=True)
++    paste_id = created["id"]
++
++    store = server.store
++    original = store.consume_record
++    calls = []
++
++    def exploding_consume(target_id):
++        calls.append(target_id)
++        raise OSError(13, "permission denied", "/root/secret/path.json")
++
++    store.consume_record = exploding_consume
++    try:
++        response = read_json(server, paste_id)
++
++        assert response.status == 500
++        assert response.json() == {"error": "internal error"}
++        assert content.encode("utf-8") not in response.body
++        assert calls == [paste_id], (
++            "SR-020: the failure must occur at the claim, after the liveness check"
++        )
++
++        raw_response = read_raw(server, paste_id)
++        assert raw_response.status == 500
++        assert content.encode("utf-8") not in raw_response.body
++    finally:
++        store.consume_record = original
++
++    # The paste was never served, so its single read is still intact — and is still
++    # served exactly once once the claim works again.
++    assert read_json(server, paste_id).status == 200
++    assert read_json(server, paste_id).status == 404
++
++
++# --- FR-054: every error this story can produce keeps the standard shape ----------
++
++
++def test_FR_054_every_error_body_is_exactly_one_non_echoing_error_key(server):
++    """FR-054: 400, 404, and 500 bodies are all `{"error": "<message>"}`."""
++    bad_request = server.post_json({"content": "x", "burn_after_reading": "yes"})
++    not_found = server.get("/pastes/" + "A" * 22)
++
++    created = server.create("burned away", burn_after_reading=True)
++    read_json(server, created["id"])
++    consumed = read_json(server, created["id"])
++
++    store = server.store
++    original = store.consume_record
++    live = server.create("live one", burn_after_reading=True)
++    store.consume_record = lambda _id: (_ for _ in ()).throw(OSError("boom"))
++    try:
++        internal = read_json(server, live["id"])
++    finally:
++        store.consume_record = original
++
++    for response in (bad_request, not_found, consumed, internal):
++        assert response.header("Content-Type") == "application/json; charset=utf-8"
++        body = response.json()
++        assert set(body) == {"error"}, body
++        assert isinstance(body["error"], str) and body["error"], body
++        assert "yes" not in body["error"], "the message must not echo the input"
++        assert "burned away" not in body["error"]
++        assert "live one" not in body["error"]
++
++    assert bad_request.status == 400
++    assert not_found.status == 404
++    assert consumed.status == 404
++    assert internal.status == 500
++
++
++# --- User Story 3: the two options compose in the only safe order -----------------
++
++
++@pytest.mark.parametrize("consume_with_raw", [False, True], ids=["structured", "raw"])
++def test_FR_046_a_refused_read_never_consumes_a_combined_paste(server, consume_with_raw):
++    """FR-046, FR-044, FR-045: a reader without the password never burns the read."""
++    password=[REDACTED:assigned_secret]
++    content = "both-protections-payload"
++    created = server.create(content, password=[REDACTED:assigned_secret], burn_after_reading=True)
++    paste_id = created["id"]
++
++    # Neither a missing nor a wrong password consumes the single read.
++    for reader in (read_json, read_raw):
++        assert reader(server, paste_id).status == 403
++        assert reader(server, paste_id, password=[REDACTED:assigned_secret]).status == 403
++        assert reader(server, paste_id, password=[REDACTED:assigned_secret][:-1]).status == 403
++    assert server.record_exists(paste_id), (
++        "FR-046: a stranger with the link must not be able to destroy the paste"
++    )
++
++    # The holder of the password takes the read, in whichever form.
++    if consume_with_raw:
++        granted = read_raw(server, paste_id, password=[REDACTED:assigned_secret])
++        assert granted.status == 200
++        assert granted.body == content.encode("utf-8")
++        assert granted.header("Content-Type") == "text/plain; charset=utf-8"
++    else:
++        granted = read_json(server, paste_id, password=[REDACTED:assigned_secret])
++        assert granted.status == 200
++        body = granted.json()
++        assert body["content"] == content
++        assert body["burn_after_reading"] is True
++        assert body["protected"] is True
++
++    # And it is gone — even for the holder of the password.
++    assert not server.record_exists(paste_id)
++    for reader in (read_json, read_raw):
++        assert reader(server, paste_id, password=[REDACTED:assigned_secret]).status == 404
++        assert reader(server, paste_id).status == 404
++    assert server.delete(f"/pastes/{paste_id}", created["delete_token"]).status == 404
+diff --git a/tests/test_compat.py b/tests/test_compat.py
+new file mode 100644
+index 0000000..f0a9959
+--- /dev/null
++++ b/tests/test_compat.py
+@@ -0,0 +1,496 @@
++"""Compatibility and durability: existing snippets and existing clients keep working.
++
++Covers FR-036, FR-037, FR-039, FR-048, FR-051, FR-052, FR-053, SR-020, SC-018,
++SC-019, SC-020.
++
++Records written before this feature carry neither new key. They must read back
++identically, report both flags false, and need no migration — which is exactly why
++``RECORD_FIELDS`` was not extended.
++"""
++
++from __future__ import annotations
++
++import json
++import os
++import pathlib
++import time
++
++import pytest
++
++STRUCTURED_KEYS = {
++    "id",
++    "content",
++    "created_at",
++    "expires_at",
++    "burn_after_reading",
++    "protected",
++}
++
++#: The header set the 001 contract fixes for a successful raw read, plus the two the
++#: stdlib always emits.
++RAW_HEADER_NAMES = {"server", "date", "content-type", "content-length", "x-content-type-options"}
++
++
++def read_json(server, paste_id, **kwargs):
++    return server.get(f"/pastes/{paste_id}", **kwargs)
++
++
++def read_raw(server, paste_id, **kwargs):
++    return server.get(f"/pastes/{paste_id}/raw", **kwargs)
++
++
++def plant_record(server, paste_id: str, record: dict) -> str:
++    """Write a record file by hand, exactly as a prior version would have."""
++    path = os.path.join(server.data_dir, paste_id + ".json")
++    payload = json.dumps(record, ensure_ascii=False).encode("utf-8")
++    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
++    with os.fdopen(descriptor, "wb") as handle:
++        handle.write(payload)
++    return paste_id
++
++
++# --- FR-037: both flags on every successful structured read -----------------------
++
++
++@pytest.mark.parametrize(
++    "options",
++    [
++        {},
++        {"burn_after_reading": False},
++        {"burn_after_reading": True},
++        {"password": "Flags-Always-Present-1"},
++        {"burn_after_reading": True, "password": "Flags-Always-Present-2"},
++    ],
++    ids=["neither", "burn-false", "burn-true", "password", "both"],
++)
++def test_FR_037_both_flags_are_present_on_every_successful_structured_read(
++    server, options
++):
++    """FR-037: burn_after_reading and protected are on every read, as bare booleans."""
++    created = server.create("flag carrier", **options)
++    password=[REDACTED:assigned_secret]("password")
++
++    response = read_json(
++        server, created["id"], **({"password": password} if password else {})
++    )
++
++    assert response.status == 200
++    body = response.json()
++    assert set(body) == STRUCTURED_KEYS, body
++    assert type(body["burn_after_reading"]) is bool
++    assert type(body["protected"]) is bool
++    assert body["burn_after_reading"] is bool(options.get("burn_after_reading", False))
++    assert body["protected"] is (password is not None)
++
++    # FR-013 still holds: the revocation secret is in neither the body nor a header.
++    assert created["delete_token"] not in response.body.decode("utf-8")
++    assert created["delete_token"] not in response.header_text
++    assert "delete_token" not in body
++
++
++# --- FR-039: the raw response is completely unchanged -----------------------------
++
++
++def test_FR_039_raw_response_carries_neither_flag_in_body_or_headers(server):
++    """FR-039: the raw body is the content alone; no header carries either flag."""
++    password=[REDACTED:assigned_secret]
++    content = "raw bytes, nothing added"
++    created = server.create(content, password=[REDACTED:assigned_secret], burn_after_reading=True)
++
++    response = read_raw(server, created["id"], password=[REDACTED:assigned_secret])
++
++    assert response.status == 200
++    assert response.body == content.encode("utf-8")
++    assert response.header("Content-Type") == "text/plain; charset=utf-8"
++    assert response.header("X-Content-Type-Options") == "nosniff"
++    assert {name.lower() for name in dict(response.headers)} == RAW_HEADER_NAMES, (
++        response.headers
++    )
++
++    combined = response.header_text + "\n" + response.body.decode("utf-8")
++    assert "burn_after_reading" not in combined
++    assert "protected" not in combined
++
++
++def test_FR_039_raw_headers_match_an_ordinary_paste_exactly(server):
++    """FR-039: a protected one-time paste's raw headers equal an ordinary paste's."""
++    content = "identical header set"
++    ordinary = server.create(content)
++    special = server.create(content, password=[REDACTED:assigned_secret], burn_after_reading=True)
++
++    plain = read_raw(server, ordinary["id"])
++    guarded = read_raw(server, special["id"], password=[REDACTED:assigned_secret])
++
++    def comparable(response):
++        return {
++            name.lower(): value
++            for name, value in response.headers
++            if name.lower() != "date"
++        }
++
++    assert comparable(plain) == comparable(guarded)
++    assert plain.body == guarded.body
++
++
++# --- FR-036: the new fields are validated before the size rule --------------------
++
++#: Over the 65 536-byte content cap, but under the 66 560-byte declared-length cap —
++#: so the body is read and the validation rules decide the outcome.
++OVERSIZED_CONTENT = "o" * 66000
++
++#: Over the declared-length cap, so the framing guard refuses it unread.
++UNREADABLE_CONTENT = "u" * 70000
++
++
++def test_FR_036_an_invalid_new_field_outranks_an_oversized_body(server):
++    """FR-036: invalid new field + oversized content is 400, never 413."""
++    for field, value, message in (
++        ("burn_after_reading", "yes", "burn_after_reading must be true or false"),
++        ("password", "", "password must be a string of 1 to 128 characters"),
++        ("password", 5, "password must be a string of 1 to 128 characters"),
++    ):
++        response = server.post_json(
++            {"content": OVERSIZED_CONTENT, field: value}
++        )
++        assert response.status == 400, (field, value, response.status)
++        assert response.json() == {"error": message}
++
++
++def test_FR_036_valid_new_fields_with_oversized_content_is_still_413(server):
++    """FR-036, FR-027: the control — valid new fields leave 413 in force."""
++    response = server.post_json(
++        {
++            "content": OVERSIZED_CONTENT,
++            "burn_after_reading": True,
++            "password": "Valid-Field-Oversized-4",
++        }
++    )
++
++    assert response.status == 413
++    assert response.json() == {
++        "error": "content exceeds the maximum size of 65536 bytes"
++    }
++
++
++def test_FR_036_a_declared_length_over_the_cap_is_still_413_with_the_body_unread(server):
++    """FR-036, FR-029: the framing guard still outranks everything, body unread."""
++    body = json.dumps(
++        {"content": UNREADABLE_CONTENT, "burn_after_reading": "invalid"}
++    ).encode("utf-8")
++    assert len(body) > 66560
++
++    response = server.post_raw(body, {"Content-Type": "application/json"})
++
++    assert response.status == 413, response.status
++    assert response.json() == {
++        "error": "content exceeds the maximum size of 65536 bytes"
++    }
++
++
++# --- FR-051: a record carrying neither key is a perfectly good paste --------------
++
++
++def test_FR_051_a_legacy_record_reads_back_unchanged_and_reports_both_flags_false(
++    server,
++):
++    """FR-051, SC-019: a pre-feature record needs no migration and is not corrupt."""
++    paste_id = "LegacyRecord0123456789"[:22]
++    assert len(paste_id) == 22
++    token = "t" * 43
++    record = {
++        "id": paste_id,
++        "content": "written before this feature existed",
++        "created_at": "2026-11-01T09:41:07Z",
++        "expires_at": None,
++        "delete_token": token,
++    }
++    plant_record(server, paste_id, record)
++    assert oct(os.stat(os.path.join(server.data_dir, paste_id + ".json")).st_mode)[-3:] == "600"
++
++    response = read_json(server, paste_id)
++
++    assert response.status == 200
++    body = response.json()
++    assert set(body) == STRUCTURED_KEYS
++    assert body["content"] == record["content"]
++    assert body["created_at"] == record["created_at"]
++    assert body["expires_at"] is None
++    assert body["burn_after_reading"] is False, "FR-051: absent means not one-time"
++    assert body["protected"] is False, "FR-051: absent means not protected"
++
++    # It needs no password, serves its raw form, and reads repeatedly.
++    assert read_json(server, paste_id).status == 200
++    raw = read_raw(server, paste_id)
++    assert raw.status == 200
++    assert raw.body == record["content"].encode("utf-8")
++
++    # And it is still revocable with its original token.
++    assert server.delete(f"/pastes/{paste_id}", token).status == 204
++    assert read_json(server, paste_id).status == 404
++
++
++def test_FR_051_an_explicit_null_password_is_unprotected_not_corrupt(server):
++    """FR-051: `password: null` means unprotected, exactly as absence does."""
++    paste_id = "NullPasswordRecord1234"[:22]
++    plant_record(
++        server,
++        paste_id,
++        {
++            "id": paste_id,
++            "content": "explicitly unprotected",
++            "created_at": "2026-11-01T09:41:07Z",
++            "expires_at": None,
++            "delete_token": "n" * 43,
++            "burn_after_reading": False,
++            "password": None,
++        },
++    )
++
++    response = read_json(server, paste_id)
++
++    assert response.status == 200
++    assert response.json()["protected"] is False
++    assert response.json()["burn_after_reading"] is False
++
++
++# --- FR-052 / FR-048: both options, and destruction, survive a restart ------------
++
++
++def test_FR_052_both_options_survive_a_restart(server):
++    """FR-052, SC-018: after a restart the paste is still one-time, still protected."""
++    password=[REDACTED:assigned_secret]
++    one_time = server.create("still one-time", burn_after_reading=True)
++    protected = server.create("still protected", password=[REDACTED:assigned_secret])
++
++    server.restart()
++
++    # Still protected, by the same password and no other.
++    assert read_json(server, protected["id"]).status == 403
++    assert read_json(server, protected["id"], password="wrong").status == 403
++    granted = read_json(server, protected["id"], password=[REDACTED:assigned_secret])
++    assert granted.status == 200
++    assert granted.json()["content"] == "still protected"
++    assert granted.json()["protected"] is True
++
++    # Still one-time: one read, then gone.
++    first = read_json(server, one_time["id"])
++    assert first.status == 200
++    assert first.json()["burn_after_reading"] is True
++    assert read_json(server, one_time["id"]).status == 404
++
++    # Both original delete tokens still revoke what is left.
++    assert server.delete(
++        f"/pastes/{protected['id']}", protected["delete_token"]
++    ).status == 204
++
++
++def test_FR_048_destruction_on_read_is_durable_across_a_restart(server):
++    """FR-048, SC-018: a consumed paste stays non-existent after a restart."""
++    created = server.create("consumed before the restart", burn_after_reading=True)
++    paste_id = created["id"]
++
++    assert read_json(server, paste_id).status == 200
++    assert not server.record_exists(paste_id)
++
++    server.restart()
++
++    assert read_json(server, paste_id).status == 404
++    assert read_raw(server, paste_id).status == 404
++    assert server.delete(f"/pastes/{paste_id}", created["delete_token"]).status == 404
++
++
++# --- FR-053: a pre-feature client observes exactly two added fields ---------------
++
++
++def test_FR_053_a_client_using_neither_field_sees_only_the_two_added_flags(server):
++    """FR-053, SC-020: every 001 status, header, body shape, and message is intact."""
++    content = "an ordinary paste, as before"
++
++    creation = server.post_json({"content": content, "expires_in": 3600})
++    assert creation.status == 201
++    assert creation.header("Content-Type") == "application/json; charset=utf-8"
++    assert set(creation.json()) == {"id", "delete_token", "url"}
++    created = creation.json()
++    paste_id = created["id"]
++
++    # The structured read: the 001 four fields, plus exactly the two FR-037 adds.
++    read = read_json(server, paste_id)
++    assert read.status == 200
++    assert set(read.json()) == STRUCTURED_KEYS
++    assert set(read.json()) - {"burn_after_reading", "protected"} == {
++        "id",
++        "content",
++        "created_at",
++        "expires_at",
++    }, "FR-053: the two flags are the only permitted difference"
++    assert read.json()["content"] == content
++
++    # The raw read: wholly unchanged.
++    raw = read_raw(server, paste_id)
++    assert raw.status == 200
++    assert raw.body == content.encode("utf-8")
++    assert {name.lower() for name in dict(raw.headers)} == RAW_HEADER_NAMES
++
++    # Every 001 error message is unchanged, and still reachable the same way.
++    assert server.post_json({}).json() == {"error": "content is required"}
++    assert server.post_json({"content": 5}).json() == {
++        "error": "content must be a string"
++    }
++    assert server.post_json({"content": "x", "expires_in": 0}).json() == {
++        "error": "expires_in must be an integer between 1 and 2592000"
++    }
++    assert server.get("/pastes/" + "Z" * 22).json() == {"error": "not found"}
++    assert server.get("/nope").json() == {"error": "not found"}
++    assert server.delete(f"/pastes/{paste_id}", "w" * 43).json() == {
++        "error": "invalid delete token"
++    }
++
++    # Revocation: still 204, still with no body.
++    revocation = server.delete(f"/pastes/{paste_id}", created["delete_token"])
++    assert revocation.status == 204
++    assert revocation.body == b""
++
++
++def test_FR_053_unknown_fields_are_still_ignored(server):
++    """FR-053, FR-009: a key this feature does not define still causes no rejection."""
++    response = server.post_json(
++        {"content": "ignored extras", "nickname": "x", "burn": True, "pass": "y"}
++    )
++
++    assert response.status == 201
++    body = read_json(server, response.json()["id"]).json()
++    assert body["burn_after_reading"] is False
++    assert body["protected"] is False
++
++
++# --- SR-020: a record whose protection state cannot be determined is gone ---------
++
++MALFORMED_BURN = ["true", 0, 1, None, [], {}, 1.5]
++
++MALFORMED_PASSWORD = [
++    "a string",
++    [],
++    5,
++    {"algorithm": "pbkdf2_sha256", "iterations": 600000, "salt": "ab" * 16},
++    {
++        "algorithm": "pbkdf2_sha256",
++        "iterations": 600000,
++        "salt": "ab" * 16,
++        "hash": "cd" * 32,
++        "extra": 1,
++    },
++    {
++        "algorithm": "md5",
++        "iterations": 600000,
++        "salt": "ab" * 16,
++        "hash": "cd" * 32,
++    },
++    {
++        "algorithm": "pbkdf2_sha256",
++        "iterations": 600000,
++        "salt": "not hex at all!" + "z" * 17,
++        "hash": "cd" * 32,
++    },
++    {
++        "algorithm": "pbkdf2_sha256",
++        "iterations": 600000,
++        "salt": "ab" * 16,
++        "hash": "cd" * 8,
++    },
++    {
++        "algorithm": "pbkdf2_sha256",
++        "iterations": 0,
++        "salt": "ab" * 16,
++        "hash": "cd" * 32,
++    },
++]
++
++
++def _planted(server, index: int, **extra) -> str:
++    paste_id = f"PlantedRecord{index:09d}"[:22]
++    assert len(paste_id) == 22
++    plant_record(
++        server,
++        paste_id,
++        {
++            "id": paste_id,
++            "content": "must-never-be-served",
++            "created_at": "2026-11-01T09:41:07Z",
++            "expires_at": None,
++            "delete_token": "p" * 43,
++            **extra,
++        },
++    )
++    return paste_id
++
++
++@pytest.mark.parametrize("value", MALFORMED_BURN, ids=[repr(v) for v in MALFORMED_BURN])
++def test_SR_020_a_malformed_burn_flag_makes_the_paste_non_existent(server, value):
++    """SR-020: an undeterminable one-time marking is 404, never served twice."""
++    paste_id = _planted(server, 1, burn_after_reading=value)
++
++    for reader in (read_json, read_raw):
++        response = reader(server, paste_id)
++        assert response.status == 404, (value, response.status)
++        assert response.json() == {"error": "not found"}
++        assert b"must-never-be-served" not in response.body
++
++
++@pytest.mark.parametrize(
++    "value", MALFORMED_PASSWORD, ids=[str(i) for i in range(len(MALFORMED_PASSWORD))]
++)
++def test_SR_020_a_malformed_password_verifier_makes_the_paste_non_existent(
++    server, value
++):
++    """SR-020: an undeterminable protection state is 404, never served unprotected."""
++    paste_id = _planted(server, 2, password=value)
++
++    for reader in (read_json, read_raw):
++        response = reader(server, paste_id)
++        assert response.status == 404, (value, response.status)
++        assert response.json() == {"error": "not found"}
++        assert b"must-never-be-served" not in response.body
++
++    # And no password unlocks it either — it does not exist at all.
++    assert read_json(server, paste_id, password=[REDACTED:assigned_secret]).status == 404
++
++
++def test_SR_020_an_absurd_iteration_count_is_refused_promptly_without_running_the_kdf(
++    server,
++):
++    """SR-018, SR-020: a planted 10**12 iteration count is rejected, not executed."""
++    paste_id = _planted(
++        server,
++        3,
++        password={
++            "algorithm": "pbkdf2_sha256",
++            "iterations": 10**12,
++            "salt": "ab" * 16,
++            "hash": "cd" * 32,
++        },
++    )
++
++    started = time.monotonic()
++    response = read_json(server, paste_id, password=[REDACTED:assigned_secret])
++    elapsed = time.monotonic() - started
++
++    assert response.status == 404
++    assert response.json() == {"error": "not found"}
++    assert elapsed < 2.0, (
++        "SR-018: the iteration bound must be checked before any key derivation, "
++        f"but the response took {elapsed:.1f}s"
++    )
++
++
++def test_SR_020_a_planted_record_never_becomes_readable_after_a_restart(server):
++    """SR-020: an unusable record stays unusable; it is never repaired or served."""
++    paste_id = _planted(server, 4, burn_after_reading="true", password=[REDACTED:assigned_secret])
++
++    assert read_json(server, paste_id).status == 404
++    server.restart()
++    assert read_json(server, paste_id).status == 404
++    assert read_raw(server, paste_id).status == 404
++
++    # It is still on disk — nothing was rewritten or deleted behind the operator's
++    # back; it simply stops resolving to a paste (the 001 FR-024 rule).
++    assert pathlib.Path(server.data_dir, paste_id + ".json").exists()
+diff --git a/tests/test_create.py b/tests/test_create.py
+index 954c25a..0a111c2 100644
+--- a/tests/test_create.py
++++ b/tests/test_create.py
+@@ -98,7 +98,15 @@ def test_FR_009_unknown_fields_are_ignored_and_never_stored(server):
+     assert created["delete_token"] != "attacker-chosen-token"
+ 
+     read = server.get(f"/pastes/{created['id']}").json()
+-    assert set(read) == {"id", "content", "created_at", "expires_at"}
++    # FR-037 adds exactly two fields to this body and nothing else.
++    assert set(read) == {
++        "id",
++        "content",
++        "created_at",
++        "expires_at",
++        "burn_after_reading",
++        "protected",
++    }
+     assert "colour" not in read
+     assert read["id"] == created["id"]
+     assert read["created_at"] != "1999-01-01T00:00:00Z"
+diff --git a/tests/test_password.py b/tests/test_password.py
+new file mode 100644
+index 0000000..4ed0ce3
+--- /dev/null
++++ b/tests/test_password.py
+@@ -0,0 +1,677 @@
++"""Password-protected pastes: reading requires the password set at creation.
++
++Covers FR-032, FR-033, FR-034, FR-035, FR-038, FR-040, FR-041, FR-042, FR-043,
++FR-050, SR-013, SR-014, SR-015, SR-017, SR-018, SR-019, SC-012, SC-013, SC-016,
++SC-017.
++
++The burn-after-reading requirements are covered in ``tests/test_burn.py``; the
++combined-paste sequences are split between the two modules.
++"""
++
++from __future__ import annotations
++
++import base64
++import os
++import pathlib
++import re
++import time
++
++import pytest
++
++from pastebin import models
++
++SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "pastebin"
++
++#: A password exercising every category FR-034 names: spaces, punctuation, emoji,
++#: combining marks, and non-ASCII letters.
++AWKWARD_PASSWORDS = [
++    "correct horse battery staple",
++    "p@$$w0rd!#%^&*()_+-=[]{}|;:',.<>/?`~\\\"",
++    "🔑🗝️🔐 unlock 🧨",
++    "égalité combining",
++    "Паро́ль-Ωμέγα-日本語-עברית",
++]
++
++
++def read_json(server, paste_id, **kwargs):
++    return server.get(f"/pastes/{paste_id}", **kwargs)
++
++
++def read_raw(server, paste_id, **kwargs):
++    return server.get(f"/pastes/{paste_id}/raw", **kwargs)
++
++
++READ_FORMS = [read_json, read_raw]
++READ_FORM_IDS = ["structured", "raw"]
++
++
++def content_of(response, expected: str) -> bool:
++    """True when ``response`` carried ``expected``, in whichever read form."""
++    if response.header("Content-Type") == "application/json; charset=utf-8":
++        return response.json().get("content") == expected
++    return response.body == expected.encode("utf-8")
++
++
++# --- FR-032: the field is accepted at both ends of its range ----------------------
++
++
++def test_FR_032_one_character_and_128_character_passwords_are_accepted(server):
++    """FR-032: a 1-character and a 128-character password are both accepted."""
++    shortest = "x"
++    longest = "L" * 128
++
++    short_paste = server.create("guarded-by-one", password=[REDACTED:assigned_secret])
++    long_paste = server.create("guarded-by-many", password=longest)
++
++    for paste, password, text in (
++        (short_paste, shortest, "guarded-by-one"),
++        (long_paste, longest, "guarded-by-many"),
++    ):
++        assert read_json(server, paste["id"]).status == 403
++        granted = read_json(server, paste["id"], password=[REDACTED:assigned_secret])
++        assert granted.status == 200
++        assert granted.json()["content"] == text
++        assert granted.json()["protected"] is True
++
++
++def test_FR_032_absent_password_means_unprotected(server):
++    """FR-032: a paste created without a password needs none to read."""
++    created = server.create("open to all")
++
++    response = read_json(server, created["id"])
++
++    assert response.status == 200
++    assert response.json()["protected"] is False
++    assert server.record_file(created["id"])["password"] is None
++
++
++# --- FR-033: type and length rejection, measured in characters --------------------
++
++
++@pytest.mark.parametrize(
++    "value",
++    ["", "q" * 129, None, 5, True, [], {}],
++    ids=["empty", "129-chars", "null", "number", "bool", "list", "object"],
++)
++def test_FR_033_invalid_password_is_400_and_creates_nothing(server, value):
++    """FR-033: a non-string or out-of-range password is 400 and creates nothing."""
++    before = sorted(os.listdir(server.data_dir))
++
++    response = server.post_json({"content": "rejected", "password": value})
++
++    assert response.status == 400, (value, response.body)
++    assert response.json() == {
++        "error": "password must be a string of 1 to 128 characters"
++    }
++    assert sorted(os.listdir(server.data_dir)) == before
++
++
++def test_FR_033_length_bound_is_counted_in_characters_not_bytes(server):
++    """FR-033: 128 multi-byte characters are accepted — the bound is characters."""
++    password = "🔑" * 128
++    assert len(password) == 128
++    assert len(password.encode("utf-8")) == 512, "the discriminating case must be multi-byte"
++
++    created = server.create("counted in characters", password=[REDACTED:assigned_secret])
++
++    assert read_json(server, created["id"]).status == 403
++    granted = read_json(server, created["id"], password=[REDACTED:assigned_secret])
++    assert granted.status == 200
++    assert granted.json()["content"] == "counted in characters"
++
++    # And one character more is still rejected, so the bound really is 128.
++    rejected = server.post_json({"content": "x", "password": "🔑" * 129})
++    assert rejected.status == 400
++
++
++# --- FR-034: any character a text value can hold ----------------------------------
++
++
++@pytest.mark.parametrize("password", AWKWARD_PASSWORDS)
++def test_FR_034_identical_password_grants_access_in_both_read_forms(server, password):
++    """FR-034, SC-013: spaces, punctuation, emoji, marks, and non-ASCII round-trip."""
++    content = "payload for an awkward password"
++    created = server.create(content, password=[REDACTED:assigned_secret])
++
++    structured = read_json(server, created["id"], password=[REDACTED:assigned_secret])
++    assert structured.status == 200
++    assert structured.json()["content"] == content
++
++    raw = read_raw(server, created["id"], password=[REDACTED:assigned_secret])
++    assert raw.status == 200
++    assert raw.body == content.encode("utf-8")
++
++
++# --- FR-040: the refusal table ----------------------------------------------------
++
++
++@pytest.mark.parametrize("reader", READ_FORMS, ids=READ_FORM_IDS)
++def test_FR_040_only_the_exact_password_is_accepted(server, reader):
++    """FR-040: missing, empty, near-miss, and over-long values are all 403."""
++    password=[REDACTED:assigned_secret]
++    content = "guarded text"
++    created = server.create(content, password=[REDACTED:assigned_secret])
++    paste_id = created["id"]
++
++    # No header at all.
++    assert reader(server, paste_id).status == 403
++
++    wrong_values = [
++        password.lower(),                # wrong case
++        password.upper(),                # wrong case
++        password + " ",                  # trailing whitespace
++        password[:-1],                   # truncated
++        password[:5],                    # a correct prefix
++        password + "extra",              # over-long
++        "",                              # empty, via the helper
++    ]
++    for value in wrong_values:
++        response = reader(server, paste_id, password=value)
++        assert response.status == 403, (value, response.status)
++
++    # The exact value, and only it, is accepted.
++    granted = reader(server, paste_id, password=[REDACTED:assigned_secret])
++    assert granted.status == 200
++    assert content_of(granted, content)
++
++
++# --- FR-041: a refusal discloses nothing and changes nothing ----------------------
++
++
++@pytest.mark.parametrize("reader", READ_FORMS, ids=READ_FORM_IDS)
++def test_FR_041_refused_read_discloses_nothing_and_leaves_the_paste_readable(
++    server, reader
++):
++    """FR-041, SC-012: a 403 carries the standard body and no part of the content."""
++    password=[REDACTED:assigned_secret]
++    content = "topsecret-marker-string"
++    created = server.create(content, password=[REDACTED:assigned_secret])
++    paste_id = created["id"]
++
++    for attempt in (None, "wrong", password[:-1]):
++        response = (
++            reader(server, paste_id)
++            if attempt is None
++            else reader(server, paste_id, password=attempt)
++        )
++        assert response.status == 403
++        assert response.json() == {"error": "invalid paste password"}
++        assert content.encode("utf-8") not in response.body
++        for size in range(4, len(content) + 1):
++            assert content[:size].encode("utf-8") not in response.body
++        assert content not in response.header_text
++
++    # Unchanged and still readable by someone who holds the password.
++    granted = reader(server, paste_id, password=[REDACTED:assigned_secret])
++    assert granted.status == 200
++    assert content_of(granted, content)
++
++
++# --- FR-042: the header is ignored on an unprotected paste ------------------------
++
++
++def test_FR_042_password_header_has_no_effect_on_an_unprotected_paste(server):
++    """FR-042: an unprotected paste reads identically with or without a header."""
++    content = "nothing to guard"
++    created = server.create(content)
++    paste_id = created["id"]
++
++    plain = read_json(server, paste_id)
++    plausible = read_json(server, paste_id, password=[REDACTED:assigned_secret])
++    garbage = read_json(server, paste_id, password="🙈" * 20)
++
++    for response in (plain, plausible, garbage):
++        assert response.status == 200
++        assert response.json()["protected"] is False
++    assert plain.body == plausible.body == garbage.body, (
++        "FR-042: the header's value must have no effect whatsoever"
++    )
++
++    raw_plain = read_raw(server, paste_id)
++    raw_with_header = read_raw(server, paste_id, password=[REDACTED:assigned_secret])
++    assert raw_plain.status == raw_with_header.status == 200
++    assert raw_plain.body == raw_with_header.body == content.encode("utf-8")
++
++
++# --- FR-050: revocation needs the token, and only the token -----------------------
++
++
++def test_FR_050_revocation_needs_the_token_alone_and_never_the_password(server):
++    """FR-050: the password neither substitutes for the token nor is required."""
++    password=[REDACTED:assigned_secret]
++    created = server.create("revoke me", password=[REDACTED:assigned_secret])
++    paste_id = created["id"]
++    token = created["delete_token"]
++    path = f"/pastes/{paste_id}"
++
++    # A correct password in place of the token is not a credential for revocation.
++    assert server.delete(path, password).status == 403
++    # A correct password alongside a wrong token does not help either.
++    wrong = server.request(
++        "DELETE", path, None, {"X-Delete-Token": "z" * 43}, password=[REDACTED:assigned_secret]
++    )
++    assert wrong.status == 403
++    assert server.record_exists(paste_id)
++
++    # The token alone, with no password header, revokes.
++    assert server.delete(path, token).status == 204
++    assert read_json(server, paste_id, password=[REDACTED:assigned_secret]).status == 404
++    assert read_raw(server, paste_id, password=[REDACTED:assigned_secret]).status == 404
++
++
++# --- FR-035 / FR-038 / SR-013: what is stored, and what is returned ---------------
++
++
++@pytest.mark.parametrize(
++    "options",
++    [
++        {},
++        {"burn_after_reading": True},
++        {"password": "Storage-Shape-Check-1"},
++        {"burn_after_reading": True, "password": "Storage-Shape-Check-2"},
++    ],
++    ids=["neither", "burn-only", "password-only", "both"],
++)
++def test_FR_035_creation_response_is_exactly_three_fields_for_every_combination(
++    server, options
++):
++    """FR-035, SR-013: the 201 body never echoes or reports either option."""
++    response = server.post_json({"content": "creation shape", **options})
++
++    assert response.status == 201
++    body = response.json()
++    assert set(body) == {"id", "delete_token", "url"}
++    assert body["url"] == f"/pastes/{body['id']}"
++
++    combined = response.header_text + "\n" + response.body.decode("utf-8")
++    assert "burn_after_reading" not in combined
++    assert "protected" not in combined
++    password=[REDACTED:assigned_secret]("password")
++    if password:
++        assert password not in combined
++
++
++def test_SR_013_password_is_stored_only_as_a_salted_slow_hash(server):
++    """SR-013, SC-017: the stored verifier is PBKDF2, salted, and non-recoverable."""
++    password=[REDACTED:assigned_secret]
++    created = server.create("hashed storage", password=[REDACTED:assigned_secret])
++
++    record = server.record_file(created["id"])
++    verifier = record["password"]
++
++    assert set(verifier) == {"algorithm", "iterations", "salt", "hash"}
++    assert verifier["algorithm"] == "pbkdf2_sha256"
++    assert verifier["iterations"] == 600000
++    assert re.fullmatch(r"[0-9a-f]{32}", verifier["salt"]), verifier["salt"]
++    assert re.fullmatch(r"[0-9a-f]{64}", verifier["hash"]), verifier["hash"]
++
++    # The plaintext appears nowhere under the data directory, in any form.
++    for path in pathlib.Path(server.data_dir).rglob("*"):
++        if path.is_file():
++            blob = path.read_bytes()
++            assert password.encode("utf-8") not in blob, path
++            assert password.encode("utf-16-le") not in blob, path
++
++    # The hash is not an encoding of the password.
++    assert verifier["hash"] != password.encode("utf-8").hex()
++    assert verifier["hash"] != base64.b64encode(password.encode("utf-8")).decode()
++    assert password not in verifier["hash"]
++
++
++def test_SR_013_same_password_yields_a_different_salt_and_hash_per_paste(server):
++    """SR-013: the salt is drawn per paste, so stored hashes are unrelated."""
++    password=[REDACTED:assigned_secret]
++    first = server.create("paste one", password=[REDACTED:assigned_secret])
++    second = server.create("paste two", password=[REDACTED:assigned_secret])
++
++    one = server.record_file(first["id"])["password"]
++    two = server.record_file(second["id"])["password"]
++
++    assert one["salt"] != two["salt"], "SR-013: the salt must be drawn per paste"
++    assert one["hash"] != two["hash"], "SR-013: per-paste salts make hashes unrelated"
++
++    # Both still verify against the one password that made them.
++    assert read_json(server, first["id"], password=[REDACTED:assigned_secret]).status == 200
++    assert read_json(server, second["id"], password=[REDACTED:assigned_secret]).status == 200
++
++
++def test_FR_038_protected_reports_only_whether_and_is_a_bare_boolean(server):
++    """FR-038, SR-019: no response carries the password or any value derived from it."""
++    password=[REDACTED:assigned_secret]
++    created = server.create("whether only", password=[REDACTED:assigned_secret])
++    verifier = server.record_file(created["id"])["password"]
++
++    response = read_json(server, created["id"], password=[REDACTED:assigned_secret])
++
++    assert response.status == 200
++    body = response.json()
++    assert body["protected"] is True
++    assert type(body["protected"]) is bool
++
++    combined = response.header_text + "\n" + response.body.decode("utf-8")
++    assert password not in combined
++    assert verifier["salt"] not in combined
++    assert verifier["hash"] not in combined
++    assert "pbkdf2" not in combined.lower()
++    assert "iterations" not in combined.lower()
++
++
++# --- SR-014: constant-time verification -------------------------------------------
++
++
++def test_SR_014_implementation_uses_hmac_compare_digest(server):
++    """SR-014: password verification is ``hmac.compare_digest``, never ``==``."""
++    models_source = (SRC / "models.py").read_text(encoding="utf-8")
++    assert "hmac.compare_digest(" in models_source, (
++        "SR-014: the verification path must use a constant-time comparison"
++    )
++
++    offenders = []
++    for module in sorted(SRC.glob("*.py")):
++        for number, line in enumerate(
++            module.read_text(encoding="utf-8").splitlines(), start=1
++        ):
++            stripped = line.strip()
++            if stripped.startswith("#"):
++                continue
++            if re.search(r"password|hash|digest", stripped, re.IGNORECASE) and (
++                re.search(r"[!=]=", stripped)
++            ):
++                offenders.append(f"{module.name}:{number}: {stripped}")
++    assert not offenders, (
++        "SR-014: a password or its digest must never be compared with == or !=\n"
++        + "\n".join(offenders)
++    )
++
++
++def test_SR_014_near_miss_and_prefix_passwords_are_rejected(server):
++    """SR-014: a last-character miss and a correct prefix are both refused."""
++    password=[REDACTED:assigned_secret]
++    created = server.create("near misses", password=[REDACTED:assigned_secret])
++    paste_id = created["id"]
++
++    near_miss = password[:-1] + ("Z" if password[-1] != "Z" else "Y")
++    assert read_json(server, paste_id, password=[REDACTED:assigned_secret]).status == 403
++    assert read_json(server, paste_id, password=[REDACTED:assigned_secret][: len(password) // 2]).status == 403
++    assert read_raw(server, paste_id, password=[REDACTED:assigned_secret]).status == 403
++
++    assert read_json(server, paste_id, password=[REDACTED:assigned_secret]).status == 200
++
++
++# --- SR-015: authorization on every read, never cached ----------------------------
++
++
++def test_SR_015_every_read_is_checked_and_nothing_is_cached(server):
++    """SR-015: two successful reads each need the header; a later one without is 403."""
++    password=[REDACTED:assigned_secret]
++    created = server.create("re-checked", password=[REDACTED:assigned_secret])
++    paste_id = created["id"]
++
++    for _ in range(2):
++        response = read_json(server, paste_id, password=[REDACTED:assigned_secret])
++        assert response.status == 200
++        assert response.header("Set-Cookie") is None, (
++            "SR-015: no session may be established"
++        )
++
++    # A correct read grants nothing to the next, header-less one.
++    assert read_json(server, paste_id).status == 403
++    assert read_raw(server, paste_id).status == 403
++
++
++def test_SR_015_no_client_supplied_claim_other_than_the_password_grants_access(server):
++    """SR-015: cookies, sessions, and Authorization headers change no outcome."""
++    password=[REDACTED:assigned_secret]
++    created = server.create("claims ignored", password=[REDACTED:assigned_secret])
++    path = f"/pastes/{created['id']}"
++
++    claims = {
++        "Cookie": "session=admin; authenticated=true",
++        "Authorization": "Bearer let-me-in",
++        "X-Forwarded-For": "127.0.0.1",
++        "X-Paste-Protected": "false",
++    }
++    refused = server.request("GET", path, None, claims)
++    assert refused.status == 403
++    assert refused.json() == {"error": "invalid paste password"}
++
++    # And the same claims alongside the correct password neither help nor hinder.
++    granted = server.request("GET", path, None, claims, password=[REDACTED:assigned_secret])
++    assert granted.status == 200
++    assert granted.header("Set-Cookie") is None
++
++
++def test_SR_015_a_read_of_one_paste_grants_no_access_to_another(server):
++    """SR-015: access is per-paste; it is never carried across identifiers."""
++    password_a = "Paste-A-Secret-11"
++    password_b = "Paste-B-Secret-22"
++    paste_a = server.create("alpha content", password=[REDACTED:assigned_secret])
++    paste_b = server.create("beta content", password=[REDACTED:assigned_secret])
++
++    assert read_json(server, paste_a["id"], password=[REDACTED:assigned_secret]).status == 200
++
++    assert read_json(server, paste_b["id"]).status == 403
++    assert read_json(server, paste_b["id"], password=[REDACTED:assigned_secret]).status == 403
++    assert read_json(server, paste_b["id"], password=[REDACTED:assigned_secret]).status == 200
++
++
++# --- SR-018 / SR-019: bounded work, and nothing disclosed -------------------------
++
++
++def test_SR_018_validation_precedes_hashing(server, monkeypatch):
++    """SR-018: an invalid password shape is rejected before any key derivation."""
++    def explode(_password):  # pragma: no cover - must never be reached
++        raise AssertionError("SR-018: hashing ran before validation accepted the shape")
++
++    monkeypatch.setattr(models, "hash_password", explode)
++
++    for value in ["", "z" * 129, None, 7, [], {}]:
++        response = server.post_json({"content": "x", "password": value})
++        assert response.status == 400, value
++        assert response.json()["error"] == (
++            "password must be a string of 1 to 128 characters"
++        )
++
++
++def test_SR_018_a_read_without_a_password_header_runs_no_key_derivation(server, monkeypatch):
++    """SR-018: a missing header is refused without provoking a KDF run."""
++    password=[REDACTED:assigned_secret]
++    created = server.create("bounded work", password=[REDACTED:assigned_secret])
++
++    def explode(*_args):  # pragma: no cover - must never be reached
++        raise AssertionError("SR-018: a KDF ran for a request that supplied nothing")
++
++    monkeypatch.setattr(models, "verify_password", explode)
++
++    assert read_json(server, created["id"]).status == 403
++    assert read_raw(server, created["id"]).status == 403
++    empty = server.request(
++        "GET", f"/pastes/{created['id']}", headers={"X-Paste-Password": ""}
++    )
++    assert empty.status == 403
++
++
++def test_SR_019_the_refusal_message_is_a_fixed_non_revealing_constant(server):
++    """SR-019: the 403 message does not vary with the value, or with its absence."""
++    password=[REDACTED:assigned_secret]
++    protected = server.create("redacted", password=[REDACTED:assigned_secret])
++    paste_id = protected["id"]
++
++    messages = set()
++    bodies = set()
++    for attempt in (None, "", "wrong", password[:-1], "🙈" * 40, "a" * 500):
++        if attempt is None:
++            response = read_json(server, paste_id)
++        else:
++            response = server.request(
++                "GET",
++                f"/pastes/{paste_id}",
++                headers={"X-Paste-Password": attempt.encode("utf-8").decode("latin-1")},
++            )
++        assert response.status == 403
++        messages.add(response.json()["error"])
++        bodies.add(response.body)
++
++    assert messages == {"invalid paste password"}, messages
++    assert len(bodies) == 1, "SR-019: the refusal body must not vary with the input"
++
++
++def test_SR_019_no_response_discloses_a_password_salt_hash_or_parameter(server):
++    """SR-019, SC-017: no body or header ever carries secret or hashing material."""
++    password=[REDACTED:assigned_secret]
++    created = server.create("redaction check", password=[REDACTED:assigned_secret])
++    verifier = server.record_file(created["id"])["password"]
++
++    responses = [
++        server.post_json({"content": "another", "password": password}),
++        read_json(server, created["id"]),
++        read_json(server, created["id"], password="wrong"),
++        read_json(server, created["id"], password=[REDACTED:assigned_secret]),
++        read_raw(server, created["id"], password=[REDACTED:assigned_secret]),
++        server.delete(f"/pastes/{created['id']}"),
++        server.get("/pastes/" + "B" * 22),
++    ]
++
++    for response in responses:
++        combined = response.header_text + "\n" + response.body.decode("utf-8", "replace")
++        assert password not in combined, response.status
++        assert verifier["salt"] not in combined, response.status
++        assert verifier["hash"] not in combined, response.status
++        assert "pbkdf2" not in combined.lower(), response.status
++        assert "iterations" not in combined.lower(), response.status
++
++
++# --- FR-043: non-existence outranks a permission failure --------------------------
++
++
++def _vanished_protected_pastes(server, password):
++    """Four identifiers that must all be indistinguishable from never-issued ones."""
++    never_issued = "N" * 22
++
++    expired = server.create("expired text", expires_in=1, password=[REDACTED:assigned_secret])["id"]
++
++    revoked_paste = server.create("revoked text", password=[REDACTED:assigned_secret])
++    revoked = revoked_paste["id"]
++
++    consumed_paste = server.create(
++        "consumed text", password=[REDACTED:assigned_secret], burn_after_reading=True
++    )
++    consumed = consumed_paste["id"]
++
++    # Revoke one, consume the other, and let the third expire.
++    assert server.delete(f"/pastes/{revoked}", revoked_paste["delete_token"]).status == 204
++    assert read_json(server, consumed, password=[REDACTED:assigned_secret]).status == 200
++    time.sleep(2.2)
++
++    return {
++        "never issued": never_issued,
++        "expired": expired,
++        "revoked": revoked,
++        "consumed": consumed,
++    }
++
++
++def test_FR_043_unknown_expired_revoked_and_consumed_are_404_whatever_the_password(
++    server,
++):
++    """FR-043, SC-016: twelve cases, all 404 — a refusal never confirms an id is real."""
++    password=[REDACTED:assigned_secret]
++    pastes = _vanished_protected_pastes(server, password)
++
++    attempts = {
++        "no header": {},
++        "wrong password": {"password": "definitely-not-it"},
++        "correct password": {"password": password},
++    }
++
++    results = {}
++    for label, paste_id in pastes.items():
++        for attempt, kwargs in attempts.items():
++            response = read_json(server, paste_id, **kwargs)
++            results[(label, attempt)] = response.status
++            assert response.json() == {"error": "not found"}, (label, attempt)
++
++    assert len(results) == 12, results
++    assert set(results.values()) == {404}, results
++    assert 403 not in results.values(), (
++        "FR-043: non-existence must be reported in preference to a permission failure"
++    )
++
++    # A reference point: an identifier that was never issued is byte-identical.
++    reference = read_json(server, "N" * 22).body
++    for paste_id in pastes.values():
++        assert read_json(server, paste_id, password=[REDACTED:assigned_secret]).body == reference
++
++
++def test_FR_043_the_raw_route_keeps_the_same_precedence(server):
++    """FR-043: the raw read reports 404 for a vanished paste, whatever is supplied."""
++    password=[REDACTED:assigned_secret]
++    pastes = _vanished_protected_pastes(server, password)
++
++    for paste_id in pastes.values():
++        for kwargs in ({}, {"password": "wrong"}, {"password": password}):
++            response = read_raw(server, paste_id, **kwargs)
++            assert response.status == 404
++            assert response.json() == {"error": "not found"}
++
++
++# --- SR-015 / SR-017: a combined paste is bypassable by nothing -------------------
++
++
++def test_SR_017_no_route_method_or_encoding_bypasses_or_consumes_a_combined_paste(
++    server,
++):
++    """SR-015, SR-017: nothing serves or consumes a one-time protected paste early."""
++    password=[REDACTED:assigned_secret]
++    content = "combined-secret-marker"
++    created = server.create(content, password=[REDACTED:assigned_secret], burn_after_reading=True)
++    paste_id = created["id"]
++    path = f"/pastes/{paste_id}"
++
++    # ``password_is_irrelevant`` marks the attempts whose refusal must not depend on
++    # the password: an unroutable method or address is refused even for the caller
++    # who holds it, so those are retried *with* the correct password below.
++    attempts = [
++        ("HEAD", path, None, True),
++        ("PUT", path, None, True),
++        ("PATCH", path, None, True),
++        ("OPTIONS", path, None, True),
++        # A refused revocation: the password is not a revocation credential, and a
++        # wrong token is refused — neither may consume the single read (FR-046).
++        ("DELETE", path, {"X-Delete-Token": "y" * 43}, True),
++        ("DELETE", path, {"X-Delete-Token": password}, True),
++        ("DELETE", path, None, True),
++        ("GET", f"{path}/raw/", None, True),
++        ("GET", f"{path}/anything", None, True),
++        # A disguised spelling of the paste's own address. Decoding it must land on
++        # the same password check, not around it — so it is only ever tried *without*
++        # the password: with the password it is simply the paste's address, and
++        # serving it would be correct rather than a bypass.
++        ("GET", f"/pastes/{paste_id[:-1]}%{ord(paste_id[-1]):02X}", None, False),
++        ("GET", f"/pastes/{paste_id[:-1]}%25{ord(paste_id[-1]):02X}", None, False),
++    ]
++
++    for method, target, headers, password_is_irrelevant in attempts:
++        # First with no password at all: nothing may serve the text to a caller who
++        # cannot prove they hold it, by any route, method, or encoding (SR-017).
++        response = server.request(method, target, None, headers)
++        assert response.status != 200, (method, target, response.status)
++        assert content.encode("utf-8") not in response.body, (method, target)
++
++        if password_is_irrelevant:
++            # And again holding the password, so the refusal is the route's or the
++            # method's own and not merely a missing credential.
++            response = server.request(method, target, None, headers, password=[REDACTED:assigned_secret])
++            assert response.status != 200, (method, target, response.status)
++            assert content.encode("utf-8") not in response.body, (method, target)
++
++    # Critically: none of that consumed the paste. It still has its single read, and
++    # it still requires the password to take it.
++    assert server.record_exists(paste_id)
++    assert read_json(server, paste_id).status == 403
++    assert read_json(server, paste_id, password="wrong").status == 403
++
++    granted = read_json(server, paste_id, password=[REDACTED:assigned_secret])
++    assert granted.status == 200
++    assert granted.json()["content"] == content
++    assert read_json(server, paste_id, password=[REDACTED:assigned_secret]).status == 404
+diff --git a/tests/test_persistence.py b/tests/test_persistence.py
+index f48a136..490c4fc 100644
+--- a/tests/test_persistence.py
++++ b/tests/test_persistence.py
+@@ -30,7 +30,15 @@ def test_FR_023_every_paste_survives_a_restart_unchanged(server):
+     after = [server.get(f"/pastes/{c['id']}").json() for c in created]
+     assert after == before, "FR-023: every field must read back identically"
+     for item in after:
+-        assert set(item) == {"id", "content", "created_at", "expires_at"}
++        # FR-037 adds exactly two fields to this body and nothing else.
++        assert set(item) == {
++            "id",
++            "content",
++            "created_at",
++            "expires_at",
++            "burn_after_reading",
++            "protected",
++        }
+ 
+ 
+ def test_FR_023_raw_content_is_byte_identical_after_a_restart(server):
+diff --git a/tests/test_read.py b/tests/test_read.py
+index f75a0fc..2a2496d 100644
+--- a/tests/test_read.py
++++ b/tests/test_read.py
+@@ -30,7 +30,15 @@ def test_FR_012_structured_read_returns_exactly_four_fields(server):
+     assert response.status == 200
+     assert response.header("Content-Type") == "application/json; charset=utf-8"
+     body = response.json()
+-    assert set(body) == {"id", "content", "created_at", "expires_at"}
++    # FR-037 adds exactly two fields to this body and nothing else.
++    assert set(body) == {
++        "id",
++        "content",
++        "created_at",
++        "expires_at",
++        "burn_after_reading",
++        "protected",
++    }
+     assert body["id"] == created["id"]
+     assert body["content"] == "hello"
+ 
+diff --git a/tests/test_requirement_coverage.py b/tests/test_requirement_coverage.py
+index f24f3ce..d31d432 100644
+--- a/tests/test_requirement_coverage.py
++++ b/tests/test_requirement_coverage.py
+@@ -1,9 +1,13 @@
+-"""SC-008: every requirement id is referenced by at least one test.
++"""SC-008 / SC-021: every requirement id is referenced by at least one test.
+ 
+ Constitution Principle III requires the mapping from requirement identifier to test
+ to be explicit and discoverable. This test turns that from a convention into an
+ enforced gate: if a requirement id appears in no test name and no test docstring, the
+ suite fails and names the missing ids.
++
++The range covers both features: ``FR-001 … FR-029`` and ``SR-001 … SR-012`` from
++`001-pastebin-service`, and ``FR-030 … FR-054`` and ``SR-013 … SR-020`` from
++`002-burn-and-password-pastes`.
+ """
+ 
+ from __future__ import annotations
+@@ -14,8 +18,8 @@ import re
+ 
+ TESTS = pathlib.Path(__file__).resolve().parent
+ 
+-REQUIRED_IDS = [f"FR-{n:03d}" for n in range(1, 30)] + [
+-    f"SR-{n:03d}" for n in range(1, 13)
++REQUIRED_IDS = [f"FR-{n:03d}" for n in range(1, 55)] + [
++    f"SR-{n:03d}" for n in range(1, 21)
+ ]
+ 
+ #: Matches both the docstring form (``FR-001``) and the identifier form (``FR_001``),
+@@ -48,7 +52,7 @@ def referenced_ids() -> dict[str, set[str]]:
+ 
+ 
+ def test_SC_008_every_requirement_id_is_referenced_by_a_test():
+-    """SC-008: no FR-001 … FR-029 or SR-001 … SR-012 may go unreferenced."""
++    """SC-008: no FR-001 … FR-054 or SR-001 … SR-020 may go unreferenced."""
+     found = referenced_ids()
+ 
+     missing = [identifier for identifier in REQUIRED_IDS if identifier not in found]

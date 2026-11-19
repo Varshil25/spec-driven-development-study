@@ -1,0 +1,301 @@
+diff --git a/specs/001-pastebin-service/tasks.md b/specs/001-pastebin-service/tasks.md
+new file mode 100644
+index 0000000..3f98f9f
+--- /dev/null
++++ b/specs/001-pastebin-service/tasks.md
+@@ -0,0 +1,295 @@
++---
++
++description: "Task list for 001-pastebin-service"
++---
++
++# Tasks: Pastebin Service
++
++**Input**: Design documents from `/specs/001-pastebin-service/`
++
++**Prerequisites**: [plan.md](./plan.md), [spec.md](./spec.md), [research.md](./research.md),
++[data-model.md](./data-model.md), [contracts/http-api.md](./contracts/http-api.md),
++[contracts/cli.md](./contracts/cli.md), [quickstart.md](./quickstart.md)
++
++**Tests**: **REQUIRED** — not optional for this feature. Constitution Principle III and Principle V
++make every FR and SR a testable requirement with at least one automated `pytest` test, and SC-008
++requires each requirement id to be referenced by a test. A requirement with no passing test is not
++implemented.
++
++**Organization**: Tasks are grouped by user story so each story can be implemented, tested, and
++delivered independently.
++
++## Format: `[ID] [P?] [Story] Description`
++
++- **[P]**: Can run in parallel (different files, no dependencies)
++- **[Story]**: Which user story this task belongs to (US1, US2, US3, US4)
++- Every task names the exact file path it touches
++
++## Path Conventions
++
++Single project, `src/` layout (spec Constraints, plan "Structure Decision"):
++
++- Runtime code: `src/pastebin/`
++- Tests: `tests/`
++- Packaging: `pyproject.toml` at repository root
++- Run as: `PYTHONPATH=src python -m pastebin serve --port PORT --data DIR`
++
++---
++
++## Phase 1: Setup (Shared Infrastructure)
++
++**Purpose**: Project skeleton and packaging with zero runtime dependencies.
++
++- [ ] T001 Create the directory skeleton `src/pastebin/` and `tests/` at the repository root, with an empty `src/pastebin/__init__.py`; do **not** create `tests/__init__.py` (tests are collected by `pytest` rootdir discovery)
++- [ ] T002 Create `pyproject.toml` at the repository root: project name `pastebin`, `requires-python = ">=3.11"`, an **empty** `dependencies = []` list (Constitution Principle I — zero runtime dependencies), `[project.optional-dependencies] dev = ["pytest"]`, setuptools backend configured for the `src/` layout, and `[tool.pytest.ini_options]` with `pythonpath = ["src"]` and `testpaths = ["tests"]`
++- [ ] T003 [P] Add the module docstring and `__version__` constant to `src/pastebin/__init__.py` (package marker only — no imports of sibling modules, so that `python -m pastebin` import order stays trivial)
++
++---
++
++## Phase 2: Foundational (Blocking Prerequisites)
++
++**Purpose**: The shared runtime spine — constants, identifier generation, the storage primitives,
++the HTTP handler with its redaction overrides and closed route table, the CLI entry point, and the
++test fixtures. Every user story builds on these.
++
++**⚠️ CRITICAL**: No user story work can begin until this phase is complete.
++
++- [ ] T004 [P] Create `src/pastebin/models.py` with the module constants and primitives: `MAX_CONTENT_BYTES = 65536`, `MAX_BODY_BYTES = 66560` (65 536 + 1 024 envelope slack, R-06), `MIN_EXPIRES_IN = 1`, `MAX_EXPIRES_IN = 2_592_000`, `TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"`, `ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{22}")`; plus `now_utc()` returning `datetime.datetime.now(datetime.UTC).replace(microsecond=0)` (R-08), `format_timestamp(dt)` using `strftime(TIMESTAMP_FORMAT)` (never `isoformat()` — it emits `+00:00`, not `Z`), `parse_timestamp(s)` using `strptime` with `tzinfo=UTC`, `new_id()` returning `secrets.token_urlsafe(16)` (22 chars, 128 bits — SR-001, FR-011), `new_delete_token()` returning `secrets.token_urlsafe(32)` (43 chars, 256 bits), and `is_valid_id(s)` using `ID_PATTERN.fullmatch`
++- [ ] T005 [P] Create `src/pastebin/store.py` with `PasteStore.__init__(self, data_dir)` resolving and caching `os.path.realpath(data_dir)`, and `_record_path(self, paste_id)` implementing the two-layer containment of SR-003/R-07: first reject anything failing `models.is_valid_id` (returns `None`, never touches the filesystem), then build `os.path.join(self._dir, paste_id + ".json")` and confirm `os.path.realpath(candidate)` starts with `os.path.realpath(self._dir) + os.sep` (post-symlink-resolution check; returns `None` if not contained)
++- [ ] T006 Create `write_record(self, record)` in `src/pastebin/store.py`: generate the id via `models.new_id()`, open a temp file in the **same directory** with `os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)` — mode set at creation, never `chmod` afterwards (SR-008) — write `json.dumps(record, ensure_ascii=False).encode("utf-8")`, `os.fsync`, close, then `os.replace(tmp, final)` (R-03); on `FileExistsError` for the final path regenerate the id and retry, bounded to 5 attempts, then raise (fail closed, SR-010); remove the temp file on any failure path (depends on T005)
++- [ ] T007 Create `read_record(self, paste_id)` in `src/pastebin/store.py`: resolve via `_record_path`, return `None` for an invalid/uncontained id, open the file, decode UTF-8, `json.loads`, and return the record dict; `FileNotFoundError` returns `None` (full corruption tolerance is hardened in T037) (depends on T005)
++- [ ] T008 [P] Create `src/pastebin/server.py` with `PastebinHandler(http.server.BaseHTTPRequestHandler)` carrying only the response and redaction plumbing (R-11, SR-009): `protocol_version = "HTTP/1.1"`, `version_string()` overridden to return the fixed string `"pastebin"` (suppresses the `BaseHTTP/x.y Python/z` banner), `log_message()` and `log_request()` overridden to write nothing, `send_error()` overridden to route through the JSON error helper so no stdlib HTML error page can escape, `_send_json(status, payload)` writing `application/json; charset=utf-8` with an explicit `Content-Length`, `_send_bytes(status, content_type, body, extra_headers=None)`, and `_send_json_error(status, message)` writing exactly `{"error": "<message>"}` (FR-025)
++- [ ] T009 Add request parsing and the closed route table to `src/pastebin/server.py` (R-07, R-12, FR-028): `urllib.parse.urlsplit(self.path).path` to discard the query string, split on `/`, then `urllib.parse.unquote` **each segment individually** (never the whole path — whole-path unquoting lets `%2F` manufacture new segments); dispatch on `(method, segment shape)` against exactly four rows — `POST /pastes`, `GET /pastes/<id>`, `GET /pastes/<id>/raw`, `DELETE /pastes/<id>`; every other combination (unknown path, `GET /pastes`, `POST /pastes/<id>`, `PUT`/`PATCH`/`HEAD`, `/pastes/<id>/anything`, trailing slash `/pastes/<id>/`) returns `404` with `{"error": "not found"}` and **no** `405` and no `Allow` header; define `do_GET`/`do_POST`/`do_DELETE` all funnelling into the one dispatcher, wrapped in `try: ... except Exception: self._send_json_error(500, "internal error")` (SR-010; never a bare `except:`) (depends on T008)
++- [ ] T010 Add `PastebinHTTPServer(http.server.ThreadingHTTPServer)` to `src/pastebin/server.py` with `daemon_threads = True`, holding the `PasteStore` instance so handlers reach it via `self.server.store` (R-01); confirm the inherited `allow_reuse_address` does not permit a second listener on an already-bound `127.0.0.1:PORT` (FR-004 depends on the bind failing) (depends on T009)
++- [ ] T011 [P] Create `src/pastebin/cli.py` with `main(argv=None)`: `argparse` parser with a single `serve` subcommand, required `--port` (`type=int`) and required `--data`; range-check `0 <= port <= 65535` after parsing with the message `error: --port must be between 0 and 65535`; define `HOST = "127.0.0.1"` as a module constant with **no** `--host` flag and no way to override it (SR-011); create the data directory with `os.makedirs(path, mode=0o700, exist_ok=True)` followed by an explicit `os.chmod(path, 0o700)` (handles a pre-existing looser directory, SR-008, FR-002), then verify writability — each failure prints `error: cannot create data directory: <reason>` or `error: data directory is not writable` to **stderr** and exits non-zero (FR-004, per `contracts/cli.md`)
++- [ ] T012 Complete the startup sequence in `src/pastebin/cli.py` in the exact order of `contracts/cli.md`: construct `PastebinHTTPServer` (which binds and listens), then `print(f"listening on {HOST}:{server.server_address[1]}", flush=True)` — the **bound** port, so `--port 0` reports the ephemeral port (FR-003, R-02) — then `serve_forever()`; a bind `OSError` prints `error: cannot bind 127.0.0.1:<port>: <reason>` to stderr and exits non-zero **without** printing the readiness line (FR-004); `KeyboardInterrupt` shuts down cleanly and returns exit status `0`; no fallback port and no fallback directory (Constitution Principle II) (depends on T010, T011)
++- [ ] T013 Create `src/pastebin/__main__.py` containing only `from .cli import main` and `raise SystemExit(main())` so that `PYTHONPATH=src python -m pastebin serve --port PORT --data DIR` is the entry point (spec Constraints) (depends on T012)
++- [ ] T014 Create `tests/conftest.py` with the shared fixtures (R-15): a `server` fixture that builds a `PasteStore` on `tmp_path`, starts a real `PastebinHTTPServer` on `--port 0` in a background thread, yields an object exposing the base URL and the data directory, and calls `shutdown()` + `server_close()` on teardown; a `restart_server` helper that stops the server and starts a fresh one against the **same** `tmp_path` (needed by FR-018 and FR-023); and stdlib-only HTTP helpers built on `urllib.request` / `http.client` — `post_json`, `get`, `delete`, and a raw-socket/`http.client` helper able to send a deliberately wrong or absent `Content-Length` and chunked framing (no third-party client — R-15) (depends on T010)
++- [ ] T015 [P] Create `tests/test_routing.py` covering FR-028 as a table test over `/`, `/nope`, `/pastes/`, `GET /pastes`, `POST /pastes/<id>`, `PUT`/`PATCH`/`HEAD` on `/pastes/<id>`, `/pastes/<id>/other`, and `/pastes/<id>/` — asserting `404` for every row, a JSON body of exactly `{"error": "not found"}`, and the absence of any `Allow` header; each test name or docstring references `FR-028` (depends on T014)
++- [ ] T016 [P] Create `tests/test_security.py` covering SR-003 and SC-010: a table test over the id segments `../../etc/passwd`, `..%2F..%2Fetc%2Fpasswd`, `%2Fetc%2Fpasswd`, `/etc/passwd`, `a/../b`, the empty string, a 21-char id, and a 23-char id — each must return `404` on `GET /pastes/<id>`, `GET /pastes/<id>/raw`, and `DELETE /pastes/<id>`; plus a test that plants a symlink named `<valid-22-char-id>.json` inside the data directory pointing at a file **outside** it and asserts the read returns `404` and the target's contents never appear in the response; plus an assertion that nothing outside the data directory is created, modified, or removed; each test references `SR-003` (depends on T014)
++
++**Checkpoint**: The service starts, prints the readiness line, answers `404` for every route, and
++never leaks a path, a banner, or a traceback. User story work can now begin.
++
++---
++
++## Phase 3: User Story 1 - Share a text snippet (Priority: P1) 🎯 MVP
++
++**Goal**: A caller can submit a snippet and read it back by its link, both as structured data and
++as plain text, with the text byte-identical to what was submitted.
++
++**Independent Test**: Start the service, `POST /pastes` with `{"content": "hello"}`, then `GET` the
++returned `url` and `<url>/raw` — both return the exact original text, and the structured read
++contains no `delete_token`. Delivers a usable sharing tool on its own, with no expiry, revocation,
++or restart behaviour required.
++
++### Tests for User Story 1
++
++> Write these first and confirm they fail before implementing T021–T025.
++
++- [ ] T017 [P] [US1] Create `tests/test_create.py` covering creation and body validation: `POST` with `content` only returns `201` (FR-005); `content` missing → `400`, `content: 5` → `400`, `content: ""` → `201` and stored as empty (FR-006); unknown extra fields are ignored and absent from the read (FR-009); the `201` body has exactly `id`, `delete_token`, and `url == "/pastes/<id>"` (FR-010); a table test over an empty body, invalid JSON, a bare list, a bare number, a bare string, `null`, and `true` → all `400` with nothing created (FR-026, SR-004); and an assertion that every rejection leaves the data directory byte-for-byte unchanged (SR-004). Each test references its FR/SR ids
++- [ ] T018 [US1] Add the size and framing tests to `tests/test_create.py`: `content` encoding to exactly 65 536 bytes → `201` and 65 537 bytes → `413`, including a multi-byte case where the character count is far below the byte count (FR-007, FR-027); a body that is oversized *and* otherwise valid returns `413`, confirming precedence over `400`/`201` (FR-027); a missing `Content-Length` → `400`; `Transfer-Encoding: chunked` → `400`; a `Content-Length` larger than the bytes actually delivered → `400` with no hang (SR-005); and a 50 MB declared body → `413` while the server process's RSS does not grow by the payload size (FR-029, SC-007) (same file as T017 — sequential)
++- [ ] T019 [P] [US1] Create `tests/test_read.py`: `GET /pastes/<id>` returns `200` with `id`, `content`, `created_at`, `expires_at` at their exact values (FR-012); `delete_token` is absent from the body **and** from every response header (FR-013); `GET /pastes/<id>/raw` returns `200`, `Content-Type: text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`, and a body byte-equal to the input with no trailing newline and no BOM (FR-014, SR-012); an empty paste returns `200` with `Content-Length: 0`; a fixture containing non-ASCII, emoji, `\n`, `\t`, quotes, and leading/trailing whitespace round-trips byte-identically through both read forms (FR-016, SC-001); storing `<script>alert(1)</script>` and `<html>…` returns them as inert `text/plain`, never `text/html` (SR-012); an id that was never issued returns `404` (FR-028)
++- [ ] T020 [P] [US1] Add the generation and permission tests to `tests/test_security.py`: create 1 000 pastes and assert all ids and tokens are unique, that ids are 22 chars and tokens 43 chars from `[A-Za-z0-9_-]`, that ids need no URL encoding (FR-011, SR-001), and that identical content created at different times yields unrelated ids and tokens (SR-001's "not derived from content, time, or a counter"); `os.stat` the data directory and assert mode `0o700` and every record file `0o600`, re-running the creation under a permissive umask of `0o000` to catch a write-then-`chmod` implementation (SR-008)
++
++### Implementation for User Story 1
++
++- [ ] T021 [US1] Add `validate_create_payload(payload)` to `src/pastebin/models.py` implementing rules 4–8 and 11 of the data-model validation table in the exact documented order, each returning a specific message: body decodes as UTF-8 → else `400` `"request body must be valid UTF-8"`; parses as JSON → else `400` `"request body must be a JSON object"`; the parsed value is a `dict` (a list, number, string, `null`, or bool is rejected) → else `400` `"request body must be a JSON object"`; the `content` key is present → else `400` `"content is required"`; `type(payload["content"]) is str` — **`type(...) is str`, never `isinstance`**, so `str` subclasses are rejected → else `400` `"content must be a string"`; and finally `len(content.encode("utf-8")) <= 65536` → else `413` `"content exceeds the maximum size of 65536 bytes"`. Keys other than `content` and `expires_in` are never inspected (FR-009)
++- [ ] T022 [US1] Add the pre-body framing guard to the `POST /pastes` path in `src/pastebin/server.py`, applied **before any body byte is read** (R-06, SR-005, FR-029): `Content-Length` must be present and a non-negative integer → else `400` `"request must declare a valid Content-Length"`; `Transfer-Encoding: chunked` → `400` with the same message; `Content-Length > MAX_BODY_BYTES` (66 560) → `413` `"content exceeds the maximum size of 65536 bytes"` with the body left unread, a `Connection: close` header, and `self.close_connection = True` (an unread body on a reused connection is a request-smuggling hazard); then `self.rfile.read(content_length)` with the validated length, and a short read → `400` `"request body was shorter than the declared Content-Length"`
++- [ ] T023 [US1] Implement the `POST /pastes` handler in `src/pastebin/server.py`: call `models.validate_create_payload`, then build the record `{"id", "content", "created_at", "expires_at", "delete_token"}` with `created_at = models.format_timestamp(models.now_utc())`, `expires_at = None` (lifetimes arrive in US2), and `delete_token = models.new_delete_token()`; persist via `store.write_record`; respond `201` with exactly `{"id": ..., "delete_token": ..., "url": f"/pastes/{id}"}` (FR-010, FR-011) (depends on T021, T022)
++- [ ] T024 [US1] Implement the `GET /pastes/<id>` handler in `src/pastebin/server.py`: look the record up via `store.read_record`, respond `404` `{"error": "not found"}` when it is `None`, otherwise `200` with exactly `{"id", "content", "created_at", "expires_at"}` — `delete_token` is **never** included in the body or any header (FR-012, FR-013, FR-015, SR-009) (depends on T023)
++- [ ] T025 [US1] Implement the `GET /pastes/<id>/raw` handler in `src/pastebin/server.py`: respond `200` with the body `content.encode("utf-8")` written verbatim — no trailing newline, no BOM, no JSON wrapper — `Content-Type: text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`, and `Content-Length` computed from the **encoded byte count** never `len(str)` (FR-014, FR-016, SR-012, R-13); failures use the JSON error body even though the success body is plain text (depends on T024)
++
++**Checkpoint**: User Story 1 is fully functional and independently testable — the MVP. Run
++`PYTHONPATH=src pytest -q tests/test_create.py tests/test_read.py tests/test_security.py` and
++quickstart Scenario 1.
++
++---
++
++## Phase 4: User Story 2 - Let a snippet expire on its own (Priority: P2)
++
++**Goal**: A caller can set a lifetime at creation; the snippet becomes indistinguishable from one
++that never existed once that lifetime elapses, including across a restart. A snippet created
++without a lifetime never expires.
++
++**Independent Test**: Create a snippet with `expires_in: 1`, read it back successfully, wait two
++seconds, and confirm all three id-bearing routes report `404`. Testable without revocation or
++durability work.
++
++### Tests for User Story 2
++
++- [ ] T026 [P] [US2] Create `tests/test_expiry.py`: a table test over `expires_in` values `1` and `2592000` (accepted, `201`) and `0`, `-1`, `2592001`, `3600.0`, `"3600"`, `true`, `false`, `null` (rejected, `400`, nothing created) — `true` in particular must **not** be read as a 1-second lifetime (FR-008, spec Edge Case "True/false as a lifetime"); absence of `expires_in` yields `expires_at: null` (FR-008, FR-015); a one-hour lifetime reads back with `expires_at` exactly 3 600 seconds after `created_at`; both timestamps match `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$` (FR-015); after expiry, `GET /pastes/<id>`, `GET /pastes/<id>/raw`, and `DELETE /pastes/<id>` all return `404` (FR-017); and a paste is readable up to **and including** its expiry instant and not after (Edge Case "Expiry exactly now", inclusive `<=`)
++- [ ] T027 [US2] Add the restart-expiry test to `tests/test_expiry.py` using the `restart_server` helper from `tests/conftest.py`: create a paste with `expires_in: 1`, stop the server, sleep past the expiry instant, restart against the same data directory, and assert `404` — proving expiry is evaluated per request against the current clock with no startup scan (FR-018) (same file as T026 — sequential)
++
++### Implementation for User Story 2
++
++- [ ] T028 [US2] Extend `validate_create_payload` in `src/pastebin/models.py` with rules 9 and 10, inserted **before** the size check so an oversized-and-otherwise-valid body still yields `413`: if `expires_in` is present, `type(expires_in) is int` — **`type(...) is int`, never `isinstance`, because `bool` is a subclass of `int` in Python and `isinstance(True, int)` is `True`** (R-10) — and `1 <= expires_in <= 2_592_000`; either failure is `400` `"expires_in must be an integer between 1 and 2592000"`. Absence means "never expires"; an explicit `null` is rejected rather than treated as absence (Principle II forbids inventing an equivalence the spec did not state). Add `compute_expires_at(created_at, expires_in)` returning `created_at + timedelta(seconds=expires_in)` formatted with `format_timestamp`, or `None` when `expires_in` was absent — microseconds are truncated **before** adding so the stored and reported instants are identical (R-08)
++- [ ] T029 [US2] Add `is_live(record, now)` to `src/pastebin/store.py` implementing the liveness predicate verbatim — `record exists ∧ record parses ∧ (expires_at is null ∨ now <= expires_at)`, with the comparison **inclusive** — and apply it inside `read_record` so an expired record returns `None`; the record is never rewritten or deleted on expiry, so an expired file is permitted to linger on disk (spec Assumption "Expired records may remain on disk") (depends on T028)
++- [ ] T030 [US2] Wire `expires_in` through the `POST /pastes` handler in `src/pastebin/server.py`: pass the validated value to `models.compute_expires_at` and store the resulting `expires_at` string (or JSON `null`) in the record, so the on-disk timestamp strings are the same strings returned on the wire with nothing re-derived on read (R-08, FR-023) (depends on T028, T029)
++
++**Checkpoint**: User Stories 1 and 2 both work independently. Run quickstart Scenario 2.
++
++---
++
++## Phase 5: User Story 3 - Revoke a snippet early (Priority: P3)
++
++**Goal**: The creator can remove a snippet immediately using the secret issued at creation;
++everyone else cannot, and non-existence is always reported in preference to a permission failure.
++
++**Independent Test**: Create a snippet, `DELETE` it with its `X-Delete-Token` and confirm `204`
++then `404` on every subsequent read; separately confirm a wrong token and a missing token both
++return `403` and leave the snippet readable with unchanged content.
++
++### Tests for User Story 3
++
++- [ ] T031 [P] [US3] Create `tests/test_revoke.py`: `DELETE` with the correct token → `204` with an empty body (FR-019); `DELETE` with no `X-Delete-Token` and with a wrong token → `403` `{"error": "invalid delete token"}`, and a subsequent `GET` returns the unchanged content (FR-020, SC-004); a token differing only in its **last character** is rejected (SR-002); `DELETE` of an unknown id and of an expired id, each with a wrong token and with no token — all four return `404` `{"error": "not found"}`, never `403` (FR-021, Edge Case "Both wrong"); after a successful `DELETE`, `GET`, `GET /raw`, and a repeat `DELETE` with the same correct token all return `404` (FR-022); and the token is re-read from the stored record on every request, so no earlier successful read or any client-supplied claim other than the token itself can satisfy the check (SR-006)
++- [ ] T032 [P] [US3] Add the concurrency tests to `tests/test_security.py` for SR-007: spawn N threads issuing the **same** correct `DELETE` and assert exactly one `204`, the rest `404`, and no `403` and no `500` (Edge Case "Concurrent revocation"); spawn concurrent `GET`s while a `DELETE` is in flight and assert every response is either the complete paste or `404`, never truncated or partial (Edge Case "Concurrent reads during revocation"); and add a source-level assertion that `hmac.compare_digest` is used and that no `==` comparison of the delete token exists in `src/pastebin/` (SR-002)
++
++### Implementation for User Story 3
++
++- [ ] T033 [US3] Add a module-level `threading.Lock` and `delete_record(self, paste_id, token)` to `src/pastebin/store.py`, holding the lock across the **entire** read-record → liveness-check → token-compare → `os.unlink` sequence (SR-007, R-09), and returning a three-valued outcome (`NOT_FOUND` / `FORBIDDEN` / `DELETED`); evaluation order is load-bearing — existence and liveness are checked **before** the token, so an unknown or expired id is `NOT_FOUND` regardless of the token supplied (FR-021); the comparison is `hmac.compare_digest(supplied, stored)`, never `==` (SR-002); `FileNotFoundError` from either the read or the `unlink` maps to `NOT_FOUND`; reads deliberately take no lock — `os.replace` and a single `unlink` already give readers all-or-nothing (R-09)
++- [ ] T034 [US3] Implement the `DELETE /pastes/<id>` handler in `src/pastebin/server.py`: read the `X-Delete-Token` header, validate its characters are ASCII before comparing (pre-empting `compare_digest`'s `TypeError` on non-ASCII `str`, SR-004), treat an absent header as an empty token, call `store.delete_record`, and map the outcome to `204` with an empty body and `Content-Length: 0`, `403` `{"error": "invalid delete token"}`, or `404` `{"error": "not found"}` (FR-019, FR-020, FR-021) (depends on T033)
++
++**Checkpoint**: User Stories 1, 2, and 3 are each independently functional. Run quickstart
++Scenario 3.
++
++---
++
++## Phase 6: User Story 4 - Snippets survive a restart (Priority: P4)
++
++**Goal**: Every unexpired, unrevoked snippet — content, timestamps, and revocation secret — is
++still valid after the service is stopped and started again against the same data directory, and
++the operator gets a loud, non-zero failure when the service cannot start.
++
++**Independent Test**: Create several snippets, stop the service, start it again against the same
++data directory, and confirm all of them read back identically and that the original revocation
++secrets still work.
++
++### Tests for User Story 4
++
++- [ ] T035 [P] [US4] Create `tests/test_persistence.py`: create several pastes (with and without lifetimes), stop the server, restart against the same data directory, and assert identical `content`, `created_at`, and `expires_at` for each, and that an original `delete_token` still revokes (FR-023, SC-005); plant a truncated record, a non-JSON record, a JSON array, a record that is not valid UTF-8, and a record missing `content`, then assert each of those ids reads `404`, that the service still starts, and that unrelated pastes still read correctly (FR-024, Edge Case "Foreign files in the data directory")
++- [ ] T036 [P] [US4] Create `tests/test_startup.py` driving `python -m pastebin serve` as a **real subprocess** (R-15): assert a connection to `127.0.0.1:PORT` succeeds and that no other interface is bound (FR-001, SR-011); start with a nested non-existent `--data` path and assert the tree is created with mode `0o700` and the service becomes ready (FR-002); capture stdout and assert it is **exactly** `listening on 127.0.0.1:<bound port>` and nothing else, with `--port 0` reporting the ephemeral port rather than `0` (FR-003); three failure cases — invalid arguments, a port already in use, and an unwritable data directory — each asserting a non-zero exit status, a message on **stderr**, and the **absence** of the readiness line on stdout (FR-004); assert `--host` is rejected as an unknown argument and that a connection to the host's non-loopback address is refused (SR-011); and connect immediately after reading the readiness line across many iterations, asserting the request is served rather than refused (SC-006)
++
++### Implementation for User Story 4
++
++- [ ] T037 [US4] Harden `read_record` in `src/pastebin/store.py` for FR-024: catch `OSError`, `UnicodeDecodeError`, and `json.JSONDecodeError`, and reject a parsed value that is not a `dict` or that lacks any of `id`, `content`, `created_at`, `expires_at`, `delete_token` — every such case returns `None`, i.e. the paste is treated as not existing, and never raises, never prevents startup, and never affects any other paste; the store looks records up by exact key only and never enumerates the directory, so foreign files are structurally invisible (depends on T029)
++- [ ] T038 [US4] Reconcile `src/pastebin/cli.py` against the failure table in `contracts/cli.md`: confirm each startup failure emits its exact documented stderr message and a non-zero exit, that the readiness line is printed only **after** the socket is bound and listening (so a client connecting the instant it sees the line is queued, not refused — SC-006), that `print(..., flush=True)` is used because stdout is block-buffered when piped, that `SIGINT` exits `0` with in-flight requests allowed to complete, and that no request logging, banner, or diagnostic is ever written to stdout (FR-003, FR-004, SR-009) (depends on T012, T036)
++
++**Checkpoint**: All four user stories are independently functional. Run quickstart Scenario 4.
++
++---
++
++## Phase 7: Polish & Cross-Cutting Concerns
++
++**Purpose**: The suite-wide gates that no single story owns.
++
++- [ ] T039 [P] Create `tests/test_requirement_coverage.py` implementing the SC-008 gate: scan every test name and docstring under `tests/` for requirement ids and fail if any of `FR-001` … `FR-029` or `SR-001` … `SR-012` is unreferenced, naming the missing ids in the failure message (Constitution Principle III — the mapping must be explicit and discoverable)
++- [ ] T040 [P] Add the suite-wide leakage and fail-closed tests to `tests/test_security.py`: scan every response body and header produced across the whole suite for any paste's `delete_token`, for any absolute filesystem path, for `Traceback`, and for a Python version string, asserting none appear and that the `Server` header is exactly `pastebin` (SR-009, SC-009); and inject an internal failure (monkeypatch the store to raise) asserting the response is `500` with the standard `{"error": ...}` shape, no content, no partial content, and no diagnostics (SR-010)
++- [ ] T041 Run `PYTHONPATH=src pytest -q` over `tests/` and fix failures in `src/pastebin/` until the full suite passes with **zero** failures, skips, and `xfail`s — tests must not be weakened, marked `xfail`, or deleted to make the run green (Constitution: Development Workflow & Quality Gates) (depends on T039, T040)
++- [ ] T042 Execute all five scenarios in `specs/001-pastebin-service/quickstart.md` against a freshly started service and confirm each behaves as documented, including the `0700`/`0600` permission check and the flat-RSS check during the 50 MB submission (depends on T041)
++- [ ] T043 [P] Create `README.md` at the repository root documenting the run command, the four routes, and the `pytest` invocation, deriving content from `contracts/cli.md` and `contracts/http-api.md` without restating them in full
++- [ ] T044 Final constitution compliance review across `src/pastebin/` and `pyproject.toml`: confirm `dependencies` is empty and `pytest` appears only under the dev extra (Principle I); confirm no bare `except:` and no `except Exception: pass` exists and that the single broad `except Exception` in `server.py` emits a loud `500` rather than swallowing (Principle II); confirm every FR and SR has a named test (Principle III); confirm no abstraction layer, cache, sweeper, startup scan, or configuration option was added beyond the three elements justified in the plan's Complexity Tracking (Principle IV); and confirm the Security Baseline items listed in the plan's Constitution Check remain implemented (Principle V) (depends on T041)
++
++---
++
++## Dependencies & Execution Order
++
++### Phase Dependencies
++
++- **Setup (Phase 1)**: No dependencies — start immediately
++- **Foundational (Phase 2)**: Depends on Setup — **BLOCKS all user stories**
++- **User Story 1 (Phase 3)**: Depends on Foundational only
++- **User Story 2 (Phase 4)**: Depends on Foundational; extends US1's create/read path
++- **User Story 3 (Phase 5)**: Depends on Foundational; needs a paste to revoke, so it reuses US1's create
++- **User Story 4 (Phase 6)**: Depends on Foundational; reuses US1's create to have something to persist
++- **Polish (Phase 7)**: Depends on all desired stories being complete
++
++### User Story Dependencies
++
++- **US1 (P1)**: No dependency on any other story. This is the MVP.
++- **US2 (P2)**: Independently testable. Touches `models.validate_create_payload`, `store.read_record`, and the `POST` handler that US1 created — so if US1 and US2 are built in parallel by different people they will collide in `models.py` and `server.py`. Sequential delivery (US1 → US2) is the low-friction path.
++- **US3 (P3)**: Independently testable. Adds a new route and a new store method; the only shared edit is the dispatcher row, so it parallelises with US2 cleanly once Foundational is done.
++- **US4 (P4)**: Independently testable. `store.write_record`'s atomic `os.replace` + `fsync` (T006) already delivers most of FR-023, so this phase is mostly the corrupt-record hardening (T037), the startup contract reconciliation (T038), and the tests that prove both.
++
++### Within Each User Story
++
++- Tests are written first and must fail before the implementation task runs
++- `models.py` validation before `server.py` handlers
++- `store.py` persistence before `server.py` handlers that call it
++- Story complete and its checkpoint validated before moving to the next priority
++
++### Parallel Opportunities
++
++- **Phase 1**: T003 runs in parallel with nothing else meaningful (3 small tasks)
++- **Phase 2**: T004 (`models.py`), T005 (`store.py`), T008 (`server.py`), and T011 (`cli.py`) are four different files with no cross-imports at that stage — all four in parallel. Later, T015 and T016 are two different test files, both in parallel.
++- **Phase 3**: T017, T019, and T020 are three different test files — all in parallel. T018 must follow T017 (same file).
++- **Phase 4**: T026 in parallel with nothing else in-phase; T027 follows it (same file).
++- **Phase 5**: T031 and T032 are different files — in parallel.
++- **Phase 6**: T035 and T036 are different files — in parallel.
++- **Phase 7**: T039, T040, and T043 are three different files — all in parallel; T041, T042, T044 are sequential gates.
++- Across stories: once Foundational completes, US3 and US4 can proceed alongside US2 with different developers, given the `server.py` dispatcher is the only shared edit.
++
++---
++
++## Parallel Example: Foundational Phase
++
++```bash
++# Four independent runtime modules, no cross-imports at this stage:
++Task: "Create src/pastebin/models.py with constants, timestamp helpers, and id/token generation"
++Task: "Create src/pastebin/store.py with PasteStore.__init__ and _record_path containment"
++Task: "Create src/pastebin/server.py with the handler's redaction overrides and response helpers"
++Task: "Create src/pastebin/cli.py with argparse, port range check, and data-directory setup"
++```
++
++## Parallel Example: User Story 1
++
++```bash
++# Three independent test files, written before the implementation:
++Task: "Create tests/test_create.py covering FR-005, FR-006, FR-009, FR-010, FR-026, SR-004"
++Task: "Create tests/test_read.py covering FR-012 … FR-016, SR-012"
++Task: "Add SR-001 generation and SR-008 permission tests to tests/test_security.py"
++```
++
++---
++
++## Implementation Strategy
++
++### MVP First (User Story 1 only)
++
++1. Complete Phase 1 (Setup) — T001–T003
++2. Complete Phase 2 (Foundational) — T004–T016 — **blocks everything**
++3. Complete Phase 3 (User Story 1) — T017–T025
++4. **STOP and VALIDATE**: run `PYTHONPATH=src pytest -q` and quickstart Scenario 1. A caller can share a snippet and read it back in two steps, with exact round-trip including non-ASCII (SC-001)
++5. Demo if ready — the service is useful at this point with no expiry, revocation, or restart guarantees
++
++### Incremental Delivery
++
++1. Setup + Foundational → the service starts, is loopback-only, and answers `404` everywhere
++2. **+ US1** → create and read, both forms (MVP)
++3. **+ US2** → lifetimes and expiry, including across a restart
++4. **+ US3** → revocation with constant-time token checking and atomic check-and-remove
++5. **+ US4** → durability, corrupt-record tolerance, and the full startup-failure contract
++6. **+ Polish** → the SC-008 coverage gate, the suite-wide leakage scan, and the constitution review
++
++Each story adds value without breaking the previous ones; each checkpoint is a place to stop.
++
++### Parallel Team Strategy
++
++1. The whole team completes Setup + Foundational together (four runtime modules in parallel)
++2. Once Foundational is done:
++   - Developer A: US1 (P1), then US2 (P2) — these share `models.py` and `server.py`'s create path
++   - Developer B: US3 (P3) — new route, new store method
++   - Developer C: US4 (P4) — store hardening and the subprocess startup suite
++3. Reconvene for Phase 7, which depends on every story's tests existing
++
++---
++
++## Notes
++
++- **[P]** = different files, no dependencies on incomplete tasks
++- **[Story]** label maps a task to a user story for traceability
++- Tests are mandatory here, not optional — SC-008 and Constitution Principle III make an untested requirement an unimplemented one
++- Verify each test fails before implementing against it
++- Commit after each task or logical group
++- Two details are easy to get wrong and are called out verbatim in the task text: `type(x) is int` rather than `isinstance` (because `isinstance(True, int)` is `True`), and `os.open(..., 0o600)` rather than write-then-`chmod` (because `chmod` leaves the window SR-008 forbids)
++- Avoid: adding a `--host` flag (SR-011 forbids the option existing), returning `405` with an `Allow` header (FR-028 requires `404`), logging requests to stdout (FR-003 allows exactly one line), and interpolating input or stored values into error messages (SR-009)

@@ -1,0 +1,2027 @@
+diff --git a/pytest.ini b/pytest.ini
+new file mode 100644
+index 0000000..442bb94
+--- /dev/null
++++ b/pytest.ini
+@@ -0,0 +1,3 @@
++[pytest]
++pythonpath = src
++testpaths = tests
+diff --git a/specs/001-tar-archive-cli/data-model.md b/specs/001-tar-archive-cli/data-model.md
+index 971d4ea..4a3f1d9 100644
+--- a/specs/001-tar-archive-cli/data-model.md
++++ b/specs/001-tar-archive-cli/data-model.md
+@@ -77,12 +77,20 @@ truncated, or deleted" holds by construction.
+ 
+ ```text
+ plan        : list of (member, target_path, kind)   # archive order preserved
+-skipped     : count of "other"-kind members          # dropped from the plan
+ violations  : member names failing containment       # → exit 2
+ collisions  : kind mismatches against existing paths # → exit 2
+ conflicts   : regular-file targets that already exist as regular files  # → exit 3 unless --overwrite
+ ```
+ 
++> **Amended during implementation**: this list originally also carried
++> `skipped`, a count of "other"-kind members. It was dropped, because no
++> requirement reports a skipped total and
++> [contracts/cli-contract.md](./contracts/cli-contract.md) *Out of contract*
++> rules out "totals beyond the specified lines" — so the field was
++> unreadable-by-construction dead data, which Principle IV prohibits.
++> "Other"-kind members are still dropped from the plan rather than counted
++> (FR-016); only the unused tally is gone.
++
+ - Represented as plain lists/tuples built by one function; no class.
+ - **Validation order is fixed** (research R8): `violations` → exit 2, then `collisions` → exit 2,
+   then `conflicts` → exit 3. Exit 2 outranks exit 3 so that status 3 always means "re-run with
+diff --git a/specs/001-tar-archive-cli/tasks.md b/specs/001-tar-archive-cli/tasks.md
+index 5268db1..372ec87 100644
+--- a/specs/001-tar-archive-cli/tasks.md
++++ b/specs/001-tar-archive-cli/tasks.md
+@@ -31,10 +31,10 @@ Single project, per plan.md *Project Structure*. Repository root holds `pytest.i
+ 
+ **Purpose**: Create the file skeleton and test configuration so a bare `pytest` from the repository root can import the package.
+ 
+-- [ ] T001 Create the directory skeleton `src/tarx/` and `tests/` at the repository root, matching plan.md *Project Structure* exactly (no `models/`, `services/`, or `lib/` subdirectories)
+-- [ ] T002 [P] Create `pytest.ini` at the repository root containing a `[pytest]` section with `pythonpath = src` and `testpaths = tests`, so a bare `pytest` from the root imports `src/tarx` with no environment setup (research R10, Constitution Technology Constraints)
+-- [ ] T003 [P] Create `src/tarx/__init__.py` as an empty package marker with no logic — it exists only because `python -m tarx` requires a package (plan.md Principle IV justification 1)
+-- [ ] T004 [P] Add `__pycache__/` and `.pytest_cache/` entries to the repository-root `.gitignore` if not already present
++- [X] T001 Create the directory skeleton `src/tarx/` and `tests/` at the repository root, matching plan.md *Project Structure* exactly (no `models/`, `services/`, or `lib/` subdirectories)
++- [X] T002 [P] Create `pytest.ini` at the repository root containing a `[pytest]` section with `pythonpath = src` and `testpaths = tests`, so a bare `pytest` from the root imports `src/tarx` with no environment setup (research R10, Constitution Technology Constraints)
++- [X] T003 [P] Create `src/tarx/__init__.py` as an empty package marker with no logic — it exists only because `python -m tarx` requires a package (plan.md Principle IV justification 1)
++- [X] T004 [P] Add `__pycache__/` and `.pytest_cache/` entries to the repository-root `.gitignore` if not already present
+ 
+ ---
+ 
+@@ -44,14 +44,14 @@ Single project, per plan.md *Project Structure*. Repository root holds `pytest.i
+ 
+ **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
+ 
+-- [ ] T005 Create `src/tarx/cli.py` with a module docstring and the three exit-status constants `EXIT_OK = 0`, `EXIT_ERROR = 2`, `EXIT_CONFLICT = 3` so FR-028's "consistently and exclusively" is checkable by reading three definitions (FR-028, data-model.md *Error record*)
+-- [ ] T006 Add the single internal exception class `TarxError(Exception)` to `src/tarx/cli.py` carrying exactly two fields — `message` (human-readable, one line, names the offending path or member) and `code` (either `2` or `3`; `0` is never carried by an error) (FR-027, FR-028, data-model.md *Error record*; this is the one place Principle IV's "prefer a plain data structure" is overridden because Python's `raise` requires an exception type)
+-- [ ] T007 Implement `build_parser()` in `src/tarx/cli.py` returning an `argparse.ArgumentParser` constructed with an explicit `prog="tarx"` and a subparsers object with `dest="command", required=True`; register no subcommands yet (FR-001, FR-004, research R7 — the default `prog` would render `usage: __main__.py ...` and undercut SC-008)
+-- [ ] T008 Implement `main(argv)` in `src/tarx/cli.py`: build the parser, parse `argv`, dispatch to the selected subcommand handler, and wrap the dispatch in a single `except TarxError` that writes exactly `tarx: <message>` plus a newline to `sys.stderr` and returns `error.code`; return `EXIT_OK` on success. This must be the *only* place in the codebase that formats a diagnostic or chooses an exit status (FR-027, FR-028, contracts/cli-contract.md *Diagnostics* format `tarx: <message>`)
+-- [ ] T009 Create `src/tarx/__main__.py` as a two-line entry point that imports `main` from `src/tarx/cli.py` and calls `sys.exit(main(sys.argv[1:]))` — no logic beyond this (plan.md Principle IV justification 1)
+-- [ ] T010 Implement the shared helper `open_archive(path)` in `src/tarx/cli.py` using `tarfile.open(path, mode="r:*")` (written explicitly so content-sniffing intent is readable), converting each failure to a `TarxError` with the contract's own message text and code `2`: `FileNotFoundError` → `cannot read archive '<path>': no such file`; `IsADirectoryError` → `cannot read archive '<path>': is a directory`; `PermissionError` → `cannot read archive '<path>': permission denied`; `tarfile.ReadError` → `'<path>' is not a valid tar archive`; any other `OSError` → `cannot read archive '<path>': <reason>`. Never forward `tarfile.ReadError`'s own text, which research R4 verified is multi-line and would violate FR-027 (FR-018, FR-024, research R2/R4, contracts/cli-contract.md *Diagnostics*)
+-- [ ] T011 Create `tests/conftest.py` with the shared archive-building fixtures used across the suite, each building into `tmp_path`: (a) a plain `.tar` with members `photos/a.jpg` then `photos/b.jpg` in that order with distinct known bytes; (b) the gzip-compressed equivalent `.tar.gz`; (c) a gzip-compressed archive deliberately **named** `mislabeled.tar`; (d) a nested archive several levels deep that also contains a directory member with no files in it; (e) a valid empty archive built by `tarfile.open(..., "w")` with nothing added (research R5 verified this opens cleanly with `getmembers() == []`); (f) a zero-byte file, which is **not** a valid archive and must stay distinct from case (e); (g) a file of random bytes; (h) an archive containing a symbolic-link member alongside a regular file and a directory. Also provide a helper that runs `python -m tarx` as a subprocess with `PYTHONPATH=src` set explicitly in the child environment, since `pytest.ini`'s `pythonpath` affects only the pytest process (research R10)
+-- [ ] T012 Create `tests/test_invocation.py` with a foundational smoke test asserting that `python -m tarx --help` exits 0 and that its usage line begins `usage: tarx` rather than `usage: __main__.py` (FR-001, research R7)
++- [X] T005 Create `src/tarx/cli.py` with a module docstring and the three exit-status constants `EXIT_OK = 0`, `EXIT_ERROR = 2`, `EXIT_CONFLICT = 3` so FR-028's "consistently and exclusively" is checkable by reading three definitions (FR-028, data-model.md *Error record*)
++- [X] T006 Add the single internal exception class `TarxError(Exception)` to `src/tarx/cli.py` carrying exactly two fields — `message` (human-readable, one line, names the offending path or member) and `code` (either `2` or `3`; `0` is never carried by an error) (FR-027, FR-028, data-model.md *Error record*; this is the one place Principle IV's "prefer a plain data structure" is overridden because Python's `raise` requires an exception type)
++- [X] T007 Implement `build_parser()` in `src/tarx/cli.py` returning an `argparse.ArgumentParser` constructed with an explicit `prog="tarx"` and a subparsers object with `dest="command", required=True`; register no subcommands yet (FR-001, FR-004, research R7 — the default `prog` would render `usage: __main__.py ...` and undercut SC-008)
++- [X] T008 Implement `main(argv)` in `src/tarx/cli.py`: build the parser, parse `argv`, dispatch to the selected subcommand handler, and wrap the dispatch in a single `except TarxError` that writes exactly `tarx: <message>` plus a newline to `sys.stderr` and returns `error.code`; return `EXIT_OK` on success. This must be the *only* place in the codebase that formats a diagnostic or chooses an exit status (FR-027, FR-028, contracts/cli-contract.md *Diagnostics* format `tarx: <message>`)
++- [X] T009 Create `src/tarx/__main__.py` as a two-line entry point that imports `main` from `src/tarx/cli.py` and calls `sys.exit(main(sys.argv[1:]))` — no logic beyond this (plan.md Principle IV justification 1)
++- [X] T010 Implement the shared helper `open_archive(path)` in `src/tarx/cli.py` using `tarfile.open(path, mode="r:*")` (written explicitly so content-sniffing intent is readable), converting each failure to a `TarxError` with the contract's own message text and code `2`: `FileNotFoundError` → `cannot read archive '<path>': no such file`; `IsADirectoryError` → `cannot read archive '<path>': is a directory`; `PermissionError` → `cannot read archive '<path>': permission denied`; `tarfile.ReadError` → `'<path>' is not a valid tar archive`; any other `OSError` → `cannot read archive '<path>': <reason>`. Never forward `tarfile.ReadError`'s own text, which research R4 verified is multi-line and would violate FR-027 (FR-018, FR-024, research R2/R4, contracts/cli-contract.md *Diagnostics*)
++- [X] T011 Create `tests/conftest.py` with the shared archive-building fixtures used across the suite, each building into `tmp_path`: (a) a plain `.tar` with members `photos/a.jpg` then `photos/b.jpg` in that order with distinct known bytes; (b) the gzip-compressed equivalent `.tar.gz`; (c) a gzip-compressed archive deliberately **named** `mislabeled.tar`; (d) a nested archive several levels deep that also contains a directory member with no files in it; (e) a valid empty archive built by `tarfile.open(..., "w")` with nothing added (research R5 verified this opens cleanly with `getmembers() == []`); (f) a zero-byte file, which is **not** a valid archive and must stay distinct from case (e); (g) a file of random bytes; (h) an archive containing a symbolic-link member alongside a regular file and a directory. Also provide a helper that runs `python -m tarx` as a subprocess with `PYTHONPATH=src` set explicitly in the child environment, since `pytest.ini`'s `pythonpath` affects only the pytest process (research R10)
++- [X] T012 Create `tests/test_invocation.py` with a foundational smoke test asserting that `python -m tarx --help` exits 0 and that its usage line begins `usage: tarx` rather than `usage: __main__.py` (FR-001, research R7)
+ 
+ **Checkpoint**: `pytest` runs green from the repository root; `python -m tarx --help` prints correct usage; no subcommand behavior exists yet. User story implementation can now begin.
+ 
+@@ -67,15 +67,15 @@ Single project, per plan.md *Project Structure*. Repository root holds `pytest.i
+ 
+ > **NOTE: Write these tests FIRST and confirm they FAIL before implementing T016–T018.**
+ 
+-- [ ] T013 [P] [US1] Create `tests/test_list.py` covering FR-005 through FR-009, with the requirement id in each test name or docstring: every member's recorded path on its own line terminated by `\n` (FR-005); archive order preserved with no sorting, filtering, or de-duplication applied (FR-006); every member type printed including directory entries and the symbolic-link member from the conftest fixture (FR-007); directory member names printed **without** a trailing path separator, asserted against an archive whose directory headers store `real/` (FR-008, research R3); exit status 0 and empty stderr on success (FR-009); and the empty-archive case printing nothing with exit 0 (US1 acceptance scenario 4, research R5)
+-- [ ] T014 [P] [US1] Create `tests/test_compression.py` covering the list side of FR-017 and FR-018: listing the plain archive and listing its gzip-compressed twin produce byte-identical stdout and the same exit status (FR-017); listing the gzip archive deliberately named `mislabeled.tar` produces that same output, proving detection comes from content and not from the file-name extension (FR-018, research R2)
+-- [ ] T015 [US1] Extend `tests/test_invocation.py` with FR-002 coverage: `list` with zero positional arguments and `list` with two positional arguments each write usage guidance to stderr, write nothing to stdout, and exit non-zero (FR-002)
++- [X] T013 [P] [US1] Create `tests/test_list.py` covering FR-005 through FR-009, with the requirement id in each test name or docstring: every member's recorded path on its own line terminated by `\n` (FR-005); archive order preserved with no sorting, filtering, or de-duplication applied (FR-006); every member type printed including directory entries and the symbolic-link member from the conftest fixture (FR-007); directory member names printed **without** a trailing path separator, asserted against an archive whose directory headers store `real/` (FR-008, research R3); exit status 0 and empty stderr on success (FR-009); and the empty-archive case printing nothing with exit 0 (US1 acceptance scenario 4, research R5)
++- [X] T014 [P] [US1] Create `tests/test_compression.py` covering the list side of FR-017 and FR-018: listing the plain archive and listing its gzip-compressed twin produce byte-identical stdout and the same exit status (FR-017); listing the gzip archive deliberately named `mislabeled.tar` produces that same output, proving detection comes from content and not from the file-name extension (FR-018, research R2)
++- [X] T015 [US1] Extend `tests/test_invocation.py` with FR-002 coverage: `list` with zero positional arguments and `list` with two positional arguments each write usage guidance to stderr, write nothing to stdout, and exit non-zero (FR-002)
+ 
+ ### Implementation for User Story 1
+ 
+-- [ ] T016 [US1] Register the `list` subparser in `build_parser()` in `src/tarx/cli.py` with exactly one positional argument `ARCHIVE` and no options (FR-002, contracts/cli-contract.md *`list ARCHIVE`*)
+-- [ ] T017 [US1] Implement `cmd_list(args)` in `src/tarx/cli.py`: open the archive via `open_archive`, iterate the `TarFile` object directly with `for member in tar:` (**not** `getmembers()`, so metadata is consumed as it is parsed and memory stays flat — research R6), print `member.name` verbatim with no trailing-separator handling (research R3 verified `tarfile` already strips it), and return `EXIT_OK`. Use a `with` block so the archive is closed; write nothing to stderr (FR-005, FR-006, FR-007, FR-008, FR-009)
+-- [ ] T018 [US1] Wire the `list` command into `main()`'s dispatch in `src/tarx/cli.py`, and wrap member iteration so a `tarfile.ReadError` or `OSError` raised mid-parse (a truncated archive) still surfaces as a `TarxError` with code `2` rather than a traceback (FR-024, FR-027)
++- [X] T016 [US1] Register the `list` subparser in `build_parser()` in `src/tarx/cli.py` with exactly one positional argument `ARCHIVE` and no options (FR-002, contracts/cli-contract.md *`list ARCHIVE`*)
++- [X] T017 [US1] Implement `cmd_list(args)` in `src/tarx/cli.py`: open the archive via `open_archive`, iterate the `TarFile` object directly with `for member in tar:` (**not** `getmembers()`, so metadata is consumed as it is parsed and memory stays flat — research R6), print `member.name` verbatim with no trailing-separator handling (research R3 verified `tarfile` already strips it), and return `EXIT_OK`. Use a `with` block so the archive is closed; write nothing to stderr (FR-005, FR-006, FR-007, FR-008, FR-009)
++- [X] T018 [US1] Wire the `list` command into `main()`'s dispatch in `src/tarx/cli.py`, and wrap member iteration so a `tarfile.ReadError` or `OSError` raised mid-parse (a truncated archive) still surfaces as a `TarxError` with code `2` rather than a traceback (FR-024, FR-027)
+ 
+ **Checkpoint**: User Story 1 is fully functional and independently testable — listing works for plain, gzip, and misnamed archives, and `pytest` is green.
+ 
+@@ -91,20 +91,20 @@ Single project, per plan.md *Project Structure*. Repository root holds `pytest.i
+ 
+ > **NOTE: Write these tests FIRST and confirm they FAIL before implementing T023–T028.**
+ 
+-- [ ] T019 [P] [US2] Create `tests/test_extract.py` covering FR-010 through FR-016 with requirement ids in test names or docstrings: each regular-file member recreated at `DEST/<member name>` with byte-identical contents (FR-010); every directory needed by a member created, **and** directory members containing no files also created (FR-011); a `DEST` that does not exist created along with its missing parents (FR-012); pre-existing non-colliding entries under `DEST` left unmodified (FR-013, US2 acceptance scenario 5); stdout exactly the single line `extracted N files\n` with exit 0 and empty stderr (FR-014); the count including only regular files written — excluding directories and excluding skipped members — and using the literal word `files` for every N including `0` and `1` (FR-015); the symbolic-link member from the conftest fixture skipped without failing and not counted (FR-016); plus the empty-archive case printing exactly `extracted 0 files` with exit 0 (US2 acceptance scenario 4)
+-- [ ] T020 [P] [US2] Extend `tests/conftest.py` with an archive fixture that stores the **same** member path twice with different contents, built programmatically since GNU `tar` will not produce it conveniently; and a fixture producing a zero-length archived file (research R9, spec Edge Cases *Duplicate member names* and *Zero-length archived files*)
+-- [ ] T021 [US2] Extend `tests/test_extract.py` with the duplicate-path and zero-length cases: a path stored twice ends on disk with the **later** entry's contents and contributes **once** to the reported count (FR-015, research R9); a zero-length archived file is recreated as an empty file and **is** counted in the summary (spec Edge Cases)
+-- [ ] T022 [US2] Extend `tests/test_compression.py` with the extract side of FR-017: extracting the gzip-compressed archive and extracting its plain twin produce identical file trees, identical summary lines, and identical exit statuses; extracting the gzip archive named `mislabeled.tar` behaves the same (FR-017, FR-018, US2 acceptance scenario 2)
+-- [ ] T023 [US2] Extend `tests/test_invocation.py` with FR-003 coverage: `extract` with one positional argument and `extract` with three positional arguments each write usage to stderr and exit non-zero; `extract ARCHIVE DEST --overwrite` is accepted as a valid invocation (FR-003)
++- [X] T019 [P] [US2] Create `tests/test_extract.py` covering FR-010 through FR-016 with requirement ids in test names or docstrings: each regular-file member recreated at `DEST/<member name>` with byte-identical contents (FR-010); every directory needed by a member created, **and** directory members containing no files also created (FR-011); a `DEST` that does not exist created along with its missing parents (FR-012); pre-existing non-colliding entries under `DEST` left unmodified (FR-013, US2 acceptance scenario 5); stdout exactly the single line `extracted N files\n` with exit 0 and empty stderr (FR-014); the count including only regular files written — excluding directories and excluding skipped members — and using the literal word `files` for every N including `0` and `1` (FR-015); the symbolic-link member from the conftest fixture skipped without failing and not counted (FR-016); plus the empty-archive case printing exactly `extracted 0 files` with exit 0 (US2 acceptance scenario 4)
++- [X] T020 [P] [US2] Extend `tests/conftest.py` with an archive fixture that stores the **same** member path twice with different contents, built programmatically since GNU `tar` will not produce it conveniently; and a fixture producing a zero-length archived file (research R9, spec Edge Cases *Duplicate member names* and *Zero-length archived files*)
++- [X] T021 [US2] Extend `tests/test_extract.py` with the duplicate-path and zero-length cases: a path stored twice ends on disk with the **later** entry's contents and contributes **once** to the reported count (FR-015, research R9); a zero-length archived file is recreated as an empty file and **is** counted in the summary (spec Edge Cases)
++- [X] T022 [US2] Extend `tests/test_compression.py` with the extract side of FR-017: extracting the gzip-compressed archive and extracting its plain twin produce identical file trees, identical summary lines, and identical exit statuses; extracting the gzip archive named `mislabeled.tar` behaves the same (FR-017, FR-018, US2 acceptance scenario 2)
++- [X] T023 [US2] Extend `tests/test_invocation.py` with FR-003 coverage: `extract` with one positional argument and `extract` with three positional arguments each write usage to stderr and exit non-zero; `extract ARCHIVE DEST --overwrite` is accepted as a valid invocation (FR-003)
+ 
+ ### Implementation for User Story 2
+ 
+-- [ ] T024 [US2] Register the `extract` subparser in `build_parser()` in `src/tarx/cli.py` with exactly two positional arguments `ARCHIVE` then `DEST`, plus `--overwrite` as a `store_true` flag (FR-003, contracts/cli-contract.md *`extract ARCHIVE DEST [--overwrite]`*)
+-- [ ] T025 [US2] Implement `member_target(name, dest)` in `src/tarx/cli.py` resolving a member's recorded name to its destination path: compute `posixpath.normpath(name)` and join it under `dest`. Keep the resolution purely lexical with **no filesystem access** so it can run before the destination exists (data-model.md *Member name validation*; containment rejection itself is added in Phase 6 / T038)
+-- [ ] T026 [US2] Implement `build_plan(tar, dest)` in `src/tarx/cli.py` returning a plain tuple of plain lists — `(plan, skipped)` where `plan` is a list of `(member, target_path, kind)` triples in **preserved archive order** and `skipped` counts members that are neither regular files nor directories. Classify each member by exactly three cases using `TarInfo.isreg()` / `TarInfo.isdir()` / neither; drop the "other" kind from the plan rather than failing. Use no classes and no custom types (FR-006, FR-016, data-model.md *Kind taxonomy* and *ExtractionPlan*)
+-- [ ] T027 [US2] Implement destination preparation in `src/tarx/cli.py`: after planning succeeds, create the destination with `Path(dest).mkdir(parents=True, exist_ok=True)` so missing parent directories are created — and only at this point, so a run that fails during planning leaves no new directories behind (FR-012, FR-020, data-model.md *Destination*)
+-- [ ] T028 [US2] Implement the write pass in `src/tarx/cli.py`: walk `plan` in archive order; for a directory member call `Path.mkdir(parents=True, exist_ok=True)`; for a regular-file member create its parent directories then `open(target, "wb")` and `shutil.copyfileobj(tar.extractfile(member), dst, length=64 * 1024)` — streaming in fixed-size chunks so memory does not grow with the size of the largest member, never `extractfile(...).read()` (SC-007, research R6). Add each written regular-file target to a `WrittenSet` (a `set` of destination paths, **not** an integer counter, because a path stored twice must contribute once while the later entry's contents win). Do **not** call `TarFile.extract` or `extractall`, and do not apply member metadata — modes, ownership, and mtimes are explicitly out of scope (FR-010, FR-011, FR-013, FR-015, research R9/R11, data-model.md *WrittenSet*)
+-- [ ] T029 [US2] Implement `cmd_extract(args)` in `src/tarx/cli.py` as the two-phase pipeline — open archive, build plan, prepare destination, run the write pass — then print exactly `extracted {len(written)} files` to stdout and return `EXIT_OK`, writing nothing to stderr. Use the literal word `files` unconditionally (FR-014, FR-015, contracts/cli-contract.md). Wire `extract` into `main()`'s dispatch
++- [X] T024 [US2] Register the `extract` subparser in `build_parser()` in `src/tarx/cli.py` with exactly two positional arguments `ARCHIVE` then `DEST`, plus `--overwrite` as a `store_true` flag (FR-003, contracts/cli-contract.md *`extract ARCHIVE DEST [--overwrite]`*)
++- [X] T025 [US2] Implement `member_target(name, dest)` in `src/tarx/cli.py` resolving a member's recorded name to its destination path: compute `posixpath.normpath(name)` and join it under `dest`. Keep the resolution purely lexical with **no filesystem access** so it can run before the destination exists (data-model.md *Member name validation*; containment rejection itself is added in Phase 6 / T038)
++- [X] T026 [US2] Implement `build_plan(tar, dest)` in `src/tarx/cli.py` returning a plain tuple of plain lists — `(plan, skipped)` where `plan` is a list of `(member, target_path, kind)` triples in **preserved archive order** and `skipped` counts members that are neither regular files nor directories. Classify each member by exactly three cases using `TarInfo.isreg()` / `TarInfo.isdir()` / neither; drop the "other" kind from the plan rather than failing. Use no classes and no custom types (FR-006, FR-016, data-model.md *Kind taxonomy* and *ExtractionPlan*)
++- [X] T027 [US2] Implement destination preparation in `src/tarx/cli.py`: after planning succeeds, create the destination with `Path(dest).mkdir(parents=True, exist_ok=True)` so missing parent directories are created — and only at this point, so a run that fails during planning leaves no new directories behind (FR-012, FR-020, data-model.md *Destination*)
++- [X] T028 [US2] Implement the write pass in `src/tarx/cli.py`: walk `plan` in archive order; for a directory member call `Path.mkdir(parents=True, exist_ok=True)`; for a regular-file member create its parent directories then `open(target, "wb")` and `shutil.copyfileobj(tar.extractfile(member), dst, length=64 * 1024)` — streaming in fixed-size chunks so memory does not grow with the size of the largest member, never `extractfile(...).read()` (SC-007, research R6). Add each written regular-file target to a `WrittenSet` (a `set` of destination paths, **not** an integer counter, because a path stored twice must contribute once while the later entry's contents win). Do **not** call `TarFile.extract` or `extractall`, and do not apply member metadata — modes, ownership, and mtimes are explicitly out of scope (FR-010, FR-011, FR-013, FR-015, research R9/R11, data-model.md *WrittenSet*)
++- [X] T029 [US2] Implement `cmd_extract(args)` in `src/tarx/cli.py` as the two-phase pipeline — open archive, build plan, prepare destination, run the write pass — then print exactly `extracted {len(written)} files` to stdout and return `EXIT_OK`, writing nothing to stderr. Use the literal word `files` unconditionally (FR-014, FR-015, contracts/cli-contract.md). Wire `extract` into `main()`'s dispatch
+ 
+ **Checkpoint**: User Stories 1 AND 2 both work independently — listing and fresh extraction are complete for plain and gzip archives, and `pytest` is green. Overwrite protection and the full failure matrix are not yet in place.
+ 
+@@ -120,15 +120,15 @@ Single project, per plan.md *Project Structure*. Repository root holds `pytest.i
+ 
+ > **NOTE: Write these tests FIRST and confirm they FAIL before implementing T031–T034.**
+ 
+-- [ ] T030 [P] [US3] Create `tests/test_overwrite.py` covering FR-019 through FR-023 with requirement ids in test names or docstrings: without `--overwrite`, a regular-file member whose target already exists as a regular file produces the diagnostic `tarx: '<path>' already exists; use --overwrite to replace it` on stderr, empty stdout, and exit status **3** (FR-019); that failing run creates, modifies, truncates, and deletes nothing under the destination, asserted by hashing the whole destination tree before and after (FR-020, SC-003); with `--overwrite`, existing regular files at colliding paths have their contents replaced and are counted among the files written, stdout is exactly `extracted N files`, exit 0 (FR-021); an existing directory at the path of a directory member is not a conflict with or without the flag — structures merge (FR-022, US3 acceptance scenario 4); a partially-populated destination still fails with exit 3 without adding any of the archive's other files (US3 acceptance scenario 3)
+-- [ ] T031 [US3] Extend `tests/test_overwrite.py` with the kind-collision cases, each exiting **2 even when `--overwrite` is given** (FR-023, research R8): a regular-file member whose target already exists as a directory gives `tarx: cannot replace directory '<path>' with file from member '<name>'`; a directory member whose target already exists as a regular file gives `tarx: cannot replace '<path>' with directory from member '<name>'`. Add an explicit regression test for research R8's resolved ambiguity — no `--overwrite`, file member, existing directory at the target — asserting exit **2** and not 3, since exit 3 must mean "re-running with `--overwrite` would fix this". Also cover an existing **non-directory ancestor** between the destination and a planned target, which must be reported as a collision at planning time rather than surfacing as a mid-write `NotADirectoryError` (data-model.md *ExtractionPlan*)
++- [X] T030 [P] [US3] Create `tests/test_overwrite.py` covering FR-019 through FR-023 with requirement ids in test names or docstrings: without `--overwrite`, a regular-file member whose target already exists as a regular file produces the diagnostic `tarx: '<path>' already exists; use --overwrite to replace it` on stderr, empty stdout, and exit status **3** (FR-019); that failing run creates, modifies, truncates, and deletes nothing under the destination, asserted by hashing the whole destination tree before and after (FR-020, SC-003); with `--overwrite`, existing regular files at colliding paths have their contents replaced and are counted among the files written, stdout is exactly `extracted N files`, exit 0 (FR-021); an existing directory at the path of a directory member is not a conflict with or without the flag — structures merge (FR-022, US3 acceptance scenario 4); a partially-populated destination still fails with exit 3 without adding any of the archive's other files (US3 acceptance scenario 3)
++- [X] T031 [US3] Extend `tests/test_overwrite.py` with the kind-collision cases, each exiting **2 even when `--overwrite` is given** (FR-023, research R8): a regular-file member whose target already exists as a directory gives `tarx: cannot replace directory '<path>' with file from member '<name>'`; a directory member whose target already exists as a regular file gives `tarx: cannot replace '<path>' with directory from member '<name>'`. Add an explicit regression test for research R8's resolved ambiguity — no `--overwrite`, file member, existing directory at the target — asserting exit **2** and not 3, since exit 3 must mean "re-running with `--overwrite` would fix this". Also cover an existing **non-directory ancestor** between the destination and a planned target, which must be reported as a collision at planning time rather than surfacing as a mid-write `NotADirectoryError` (data-model.md *ExtractionPlan*)
+ 
+ ### Implementation for User Story 3
+ 
+-- [ ] T032 [US3] Extend `build_plan` in `src/tarx/cli.py` to also collect `conflicts`: for each planned regular-file target that already exists as a regular file, record the path. Evaluate conflicts against the destination's **pre-existing** state only — because all validation precedes any write, a path written earlier in the same run can never be mistaken for a pre-existing conflict (FR-019, research R9)
+-- [ ] T033 [US3] Extend `build_plan` in `src/tarx/cli.py` to also collect `collisions`: a regular-file member whose target exists as a directory; a directory member whose target exists as a non-directory; and, for each planned target, any path between the destination and the target that already exists and is **not** a directory (the non-directory-ancestor case) (FR-023, data-model.md *ExtractionPlan*)
+-- [ ] T034 [US3] Enforce the fixed validation order in `cmd_extract` in `src/tarx/cli.py` before any write and before the destination is created: `collisions` → `TarxError(code=EXIT_ERROR)`, then `conflicts` → `TarxError(code=EXIT_CONFLICT)` when `--overwrite` was not given. Exit 2 outranks exit 3 so status 3 always means "re-run with `--overwrite`". Because the whole planning phase is read-only with respect to the filesystem, FR-020's "nothing created, modified, truncated, or deleted" holds by construction rather than by promise (FR-019, FR-020, FR-023, research R8, contracts/cli-contract.md *Validation order within `extract`*)
+-- [ ] T035 [US3] Honor `--overwrite` in `src/tarx/cli.py`: when set, skip raising on `conflicts` so the write pass replaces the existing files' contents and counts them in the `WrittenSet`; `collisions` still raise exit 2 regardless of the flag. Confirm a directory member targeting an existing directory is never recorded as a conflict in either mode (FR-021, FR-022)
++- [X] T032 [US3] Extend `build_plan` in `src/tarx/cli.py` to also collect `conflicts`: for each planned regular-file target that already exists as a regular file, record the path. Evaluate conflicts against the destination's **pre-existing** state only — because all validation precedes any write, a path written earlier in the same run can never be mistaken for a pre-existing conflict (FR-019, research R9)
++- [X] T033 [US3] Extend `build_plan` in `src/tarx/cli.py` to also collect `collisions`: a regular-file member whose target exists as a directory; a directory member whose target exists as a non-directory; and, for each planned target, any path between the destination and the target that already exists and is **not** a directory (the non-directory-ancestor case) (FR-023, data-model.md *ExtractionPlan*)
++- [X] T034 [US3] Enforce the fixed validation order in `cmd_extract` in `src/tarx/cli.py` before any write and before the destination is created: `collisions` → `TarxError(code=EXIT_ERROR)`, then `conflicts` → `TarxError(code=EXIT_CONFLICT)` when `--overwrite` was not given. Exit 2 outranks exit 3 so status 3 always means "re-run with `--overwrite`". Because the whole planning phase is read-only with respect to the filesystem, FR-020's "nothing created, modified, truncated, or deleted" holds by construction rather than by promise (FR-019, FR-020, FR-023, research R8, contracts/cli-contract.md *Validation order within `extract`*)
++- [X] T035 [US3] Honor `--overwrite` in `src/tarx/cli.py`: when set, skip raising on `conflicts` so the write pass replaces the existing files' contents and counts them in the `WrittenSet`; `collisions` still raise exit 2 regardless of the flag. Confirm a directory member targeting an existing directory is never recorded as a conflict in either mode (FR-021, FR-022)
+ 
+ **Checkpoint**: User Stories 1, 2, AND 3 are independently functional — data loss is prevented by default, `--overwrite` works, kind collisions are rejected, and `pytest` is green.
+ 
+@@ -144,18 +144,18 @@ Single project, per plan.md *Project Structure*. Repository root holds `pytest.i
+ 
+ > **NOTE: Write these tests FIRST and confirm they FAIL before implementing T039–T043.**
+ 
+-- [ ] T036 [P] [US4] Extend `tests/conftest.py` with programmatically-built archive fixtures whose members escape the destination — one with an absolute POSIX member name such as `/etc/escape.txt`, one with a traversing name such as `../escape.txt`, one whose normalized name begins `../`, one carrying a Windows drive-letter prefix, and one carrying a UNC prefix. These cannot be produced conveniently with GNU `tar`, so build them with `tarfile` directly (quickstart.md *Scenario 4*, data-model.md *Member name validation*)
+-- [ ] T037 [P] [US4] Create `tests/test_failures.py` covering FR-024 through FR-028 with requirement ids in test names or docstrings. For **both** subcommands: a nonexistent archive path gives `tarx: cannot read archive '<path>': no such file`, empty stdout, exit 2; an archive path that is a directory gives `... : is a directory`; an unreadable archive (mode `0o000`, skipped when running as root) gives `... : permission denied`; a file of random bytes and a **zero-byte** file each give `tarx: '<path>' is not a valid tar archive` — the zero-byte case asserted distinctly from the valid-empty-archive success case (FR-024, research R4/R5). For `extract`: a destination that already exists as a regular file gives `tarx: destination '<path>' exists and is not a directory` with exit 2 and no extraction performed (FR-025, US4 acceptance scenario 3); each escaping-member fixture gives `tarx: refusing to extract member '<name>' outside destination` with exit 2 and **nothing created outside the destination**, verified by checking the surrounding filesystem (FR-026). Assert for every failure case that stderr is non-empty, is a single line, names the offending path or member, and contains no `Traceback (most recent call last)` (FR-027, SC-005)
+-- [ ] T038 [US4] Extend `tests/test_invocation.py` with FR-004 coverage: no subcommand at all, an unrecognized subcommand such as `frobnicate`, and an unrecognized option each write usage guidance to stderr, write nothing to stdout, exit with status 2, and perform no other action (FR-004, contracts/cli-contract.md — this is `argparse`'s own default behavior and must be confirmed rather than reimplemented). Add an FR-028 exclusivity test asserting the observed status set across the whole suite is exactly `{0, 2, 3}` with 3 produced only by the no-`--overwrite` file-replacement conflict
++- [X] T036 [P] [US4] Extend `tests/conftest.py` with programmatically-built archive fixtures whose members escape the destination — one with an absolute POSIX member name such as `/etc/escape.txt`, one with a traversing name such as `../escape.txt`, one whose normalized name begins `../`, one carrying a Windows drive-letter prefix, and one carrying a UNC prefix. These cannot be produced conveniently with GNU `tar`, so build them with `tarfile` directly (quickstart.md *Scenario 4*, data-model.md *Member name validation*)
++- [X] T037 [P] [US4] Create `tests/test_failures.py` covering FR-024 through FR-028 with requirement ids in test names or docstrings. For **both** subcommands: a nonexistent archive path gives `tarx: cannot read archive '<path>': no such file`, empty stdout, exit 2; an archive path that is a directory gives `... : is a directory`; an unreadable archive (mode `0o000`, skipped when running as root) gives `... : permission denied`; a file of random bytes and a **zero-byte** file each give `tarx: '<path>' is not a valid tar archive` — the zero-byte case asserted distinctly from the valid-empty-archive success case (FR-024, research R4/R5). For `extract`: a destination that already exists as a regular file gives `tarx: destination '<path>' exists and is not a directory` with exit 2 and no extraction performed (FR-025, US4 acceptance scenario 3); each escaping-member fixture gives `tarx: refusing to extract member '<name>' outside destination` with exit 2 and **nothing created outside the destination**, verified by checking the surrounding filesystem (FR-026). Assert for every failure case that stderr is non-empty, is a single line, names the offending path or member, and contains no `Traceback (most recent call last)` (FR-027, SC-005)
++- [X] T038 [US4] Extend `tests/test_invocation.py` with FR-004 coverage: no subcommand at all, an unrecognized subcommand such as `frobnicate`, and an unrecognized option each write usage guidance to stderr, write nothing to stdout, exit with status 2, and perform no other action (FR-004, contracts/cli-contract.md — this is `argparse`'s own default behavior and must be confirmed rather than reimplemented). Add an FR-028 exclusivity test asserting the observed status set across the whole suite is exactly `{0, 2, 3}` with 3 produced only by the no-`--overwrite` file-replacement conflict
+ 
+ ### Implementation for User Story 4
+ 
+-- [ ] T039 [US4] Implement `validate_destination(dest)` in `src/tarx/cli.py`, called from `cmd_extract` **after** the archive opens successfully and **before** planning: if the path exists and is not a directory, raise `TarxError("destination '<path>' exists and is not a directory", EXIT_ERROR)`. Report archive errors before destination errors so the diagnostic is deterministic when both are present (FR-025, research R8 follow-on decision, contracts/cli-contract.md *Validation order*)
+-- [ ] T040 [US4] Wrap the destination `mkdir` in `src/tarx/cli.py` so a failure to create or write to the destination raises `TarxError("cannot write to destination '<path>': <reason>", EXIT_ERROR)` rather than surfacing a raw `OSError` (FR-025, FR-027)
+-- [ ] T041 [US4] Add containment rejection to the plan-building path in `src/tarx/cli.py`, collecting a `violations` list of member names that fail a **purely lexical** check on the recorded name, with no filesystem access: rejected if `posixpath.isabs(name)`; rejected if the name carries a Windows drive letter or UNC prefix; rejected if `posixpath.normpath(name)` is `..` or starts with `../`. Otherwise the normalized name is the member's path relative to the destination. Do not use `os.path.realpath` containment checks — they touch the filesystem, depend on symlinks already inside the destination, and cannot run before the destination exists (FR-026, data-model.md *Member name validation*, research R11)
+-- [ ] T042 [US4] Insert the `violations` check as the **first** validation in `cmd_extract` in `src/tarx/cli.py`, ahead of `collisions` and `conflicts`, raising `TarxError("refusing to extract member '<name>' outside destination", EXIT_ERROR)`. The complete order is now: archive opens and parses → 2; destination exists and is not a directory → 2; member path escapes → 2; kind collision → 2; overwrite conflict without the flag → 3; writes begin. Steps before "writes begin" must touch no files (FR-026, FR-020, contracts/cli-contract.md *Validation order within `extract`*)
+-- [ ] T043 [US4] Add an `OSError` backstop around the write pass in `src/tarx/cli.py` converting any mid-write failure — a `PermissionError` on a target, a truncated archive discovered during streaming — into a `TarxError` with code `EXIT_ERROR` and a message naming the offending path, so the command reports a diagnostic and exits non-zero rather than printing a success line. Files already written are left in place; the spec requires no rollback. The backstop must convert to a named diagnostic, never swallow (spec Edge Cases *Partial write interrupted by an error*, FR-027, Constitution Principle II)
+-- [ ] T044 [US4] Audit `src/tarx/cli.py` for FR-027 and FR-028 compliance: confirm every exit flows through `EXIT_OK` / `EXIT_ERROR` / `EXIT_CONFLICT`, that no numeric status literal appears anywhere else, that there is exactly one place that formats a diagnostic (`main`), and that no `except` clause is bare or silently discards an error. Confirm by reading every `raise`, `return`, and `except` in the module that no code path can let an exception escape `main` uncaught (FR-027, FR-028, Constitution Principle II)
++- [X] T039 [US4] Implement `validate_destination(dest)` in `src/tarx/cli.py`, called from `cmd_extract` **after** the archive opens successfully and **before** planning: if the path exists and is not a directory, raise `TarxError("destination '<path>' exists and is not a directory", EXIT_ERROR)`. Report archive errors before destination errors so the diagnostic is deterministic when both are present (FR-025, research R8 follow-on decision, contracts/cli-contract.md *Validation order*)
++- [X] T040 [US4] Wrap the destination `mkdir` in `src/tarx/cli.py` so a failure to create or write to the destination raises `TarxError("cannot write to destination '<path>': <reason>", EXIT_ERROR)` rather than surfacing a raw `OSError` (FR-025, FR-027)
++- [X] T041 [US4] Add containment rejection to the plan-building path in `src/tarx/cli.py`, collecting a `violations` list of member names that fail a **purely lexical** check on the recorded name, with no filesystem access: rejected if `posixpath.isabs(name)`; rejected if the name carries a Windows drive letter or UNC prefix; rejected if `posixpath.normpath(name)` is `..` or starts with `../`. Otherwise the normalized name is the member's path relative to the destination. Do not use `os.path.realpath` containment checks — they touch the filesystem, depend on symlinks already inside the destination, and cannot run before the destination exists (FR-026, data-model.md *Member name validation*, research R11)
++- [X] T042 [US4] Insert the `violations` check as the **first** validation in `cmd_extract` in `src/tarx/cli.py`, ahead of `collisions` and `conflicts`, raising `TarxError("refusing to extract member '<name>' outside destination", EXIT_ERROR)`. The complete order is now: archive opens and parses → 2; destination exists and is not a directory → 2; member path escapes → 2; kind collision → 2; overwrite conflict without the flag → 3; writes begin. Steps before "writes begin" must touch no files (FR-026, FR-020, contracts/cli-contract.md *Validation order within `extract`*)
++- [X] T043 [US4] Add an `OSError` backstop around the write pass in `src/tarx/cli.py` converting any mid-write failure — a `PermissionError` on a target, a truncated archive discovered during streaming — into a `TarxError` with code `EXIT_ERROR` and a message naming the offending path, so the command reports a diagnostic and exits non-zero rather than printing a success line. Files already written are left in place; the spec requires no rollback. The backstop must convert to a named diagnostic, never swallow (spec Edge Cases *Partial write interrupted by an error*, FR-027, Constitution Principle II)
++- [X] T044 [US4] Audit `src/tarx/cli.py` for FR-027 and FR-028 compliance: confirm every exit flows through `EXIT_OK` / `EXIT_ERROR` / `EXIT_CONFLICT`, that no numeric status literal appears anywhere else, that there is exactly one place that formats a diagnostic (`main`), and that no `except` clause is bare or silently discards an error. Confirm by reading every `raise`, `return`, and `except` in the module that no code path can let an exception escape `main` uncaught (FR-027, FR-028, Constitution Principle II)
+ 
+ **Checkpoint**: All four user stories are independently functional. The full failure matrix is covered and no input produces a traceback.
+ 
+@@ -165,12 +165,12 @@ Single project, per plan.md *Project Structure*. Repository root holds `pytest.i
+ 
+ **Purpose**: Performance verification, traceability closure, and the constitution's quality gates.
+ 
+-- [ ] T045 [P] Create `tests/test_performance.py` covering SC-007, kept in its own file because it is the only slow test (plan.md *Structure Decision*): build an archive of 10,000 members, assert `list` completes in under 5 seconds and `extract` completes in under 30 seconds, and assert memory does not grow in proportion to the size of the largest member by extracting an archive containing one large member while sampling peak memory with `tracemalloc` (SC-007, research R6)
+-- [ ] T046 [P] Verify SC-006 traceability: confirm every requirement FR-001 through FR-028 is named by at least one test's name or docstring in `tests/`, and that each such test fails when its requirement is unmet. Add any missing coverage (SC-006, Constitution Principle III)
+-- [ ] T047 [P] Verify Constitution Principle I by reading every import line under `src/` and confirming each resolves to the standard library or to `tarx` itself — the expected set is `tarfile`, `argparse`, `pathlib`, `posixpath`, `shutil`, `sys`, `os`. Confirm `pytest` is imported nowhere under `src/` (Constitution Principle I, quickstart.md acceptance checklist)
+-- [ ] T048 [P] Verify Constitution Principle IV by confirming the runtime tree is exactly `src/tarx/__init__.py`, `src/tarx/__main__.py`, and `src/tarx/cli.py`, that `__init__.py` holds no logic, that `__main__.py` is the two-line entry point, and that no fifth structure beyond plan.md's four written justifications has appeared (Constitution Principle IV, plan.md *Simplicity justifications*)
+-- [ ] T049 Run the manual end-to-end walkthrough in [quickstart.md](./quickstart.md) — all four scenarios — and confirm each observed output, diagnostic, and exit status matches the documented expectation
+-- [ ] T050 Run `pytest` bare from the repository root with no arguments and confirm the full suite passes, then walk the acceptance checklist at the end of [quickstart.md](./quickstart.md) and confirm every box holds (Constitution *Development Workflow & Quality Gates*, SC-006)
++- [X] T045 [P] Create `tests/test_performance.py` covering SC-007, kept in its own file because it is the only slow test (plan.md *Structure Decision*): build an archive of 10,000 members, assert `list` completes in under 5 seconds and `extract` completes in under 30 seconds, and assert memory does not grow in proportion to the size of the largest member by extracting an archive containing one large member while sampling peak memory with `tracemalloc` (SC-007, research R6)
++- [X] T046 [P] Verify SC-006 traceability: confirm every requirement FR-001 through FR-028 is named by at least one test's name or docstring in `tests/`, and that each such test fails when its requirement is unmet. Add any missing coverage (SC-006, Constitution Principle III)
++- [X] T047 [P] Verify Constitution Principle I by reading every import line under `src/` and confirming each resolves to the standard library or to `tarx` itself — the expected set is `tarfile`, `argparse`, `pathlib`, `posixpath`, `shutil`, `sys`, `os`. Confirm `pytest` is imported nowhere under `src/` (Constitution Principle I, quickstart.md acceptance checklist)
++- [X] T048 [P] Verify Constitution Principle IV by confirming the runtime tree is exactly `src/tarx/__init__.py`, `src/tarx/__main__.py`, and `src/tarx/cli.py`, that `__init__.py` holds no logic, that `__main__.py` is the two-line entry point, and that no fifth structure beyond plan.md's four written justifications has appeared (Constitution Principle IV, plan.md *Simplicity justifications*)
++- [X] T049 Run the manual end-to-end walkthrough in [quickstart.md](./quickstart.md) — all four scenarios — and confirm each observed output, diagnostic, and exit status matches the documented expectation
++- [X] T050 Run `pytest` bare from the repository root with no arguments and confirm the full suite passes, then walk the acceptance checklist at the end of [quickstart.md](./quickstart.md) and confirm every box holds (Constitution *Development Workflow & Quality Gates*, SC-006)
+ 
+ ---
+ 
+diff --git a/src/tarx/__init__.py b/src/tarx/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/src/tarx/__main__.py b/src/tarx/__main__.py
+new file mode 100644
+index 0000000..2c79526
+--- /dev/null
++++ b/src/tarx/__main__.py
+@@ -0,0 +1,5 @@
++import sys
++
++from tarx.cli import main
++
++sys.exit(main(sys.argv[1:]))
+diff --git a/src/tarx/cli.py b/src/tarx/cli.py
+new file mode 100644
+index 0000000..9f1b108
+--- /dev/null
++++ b/src/tarx/cli.py
+@@ -0,0 +1,429 @@
++"""Command-line interface for ``tarx``: list and extract tar archives.
++
++Two subcommands are provided:
++
++* ``list ARCHIVE`` prints the recorded name of every archive member, one per
++  line, in archive order.
++* ``extract ARCHIVE DEST [--overwrite]`` recreates regular-file and directory
++  members under ``DEST`` and prints ``extracted N files``.
++
++All runtime behaviour uses the standard library only (Constitution Principle I).
++Every failure is raised as a :class:`TarxError` and formatted in exactly one
++place -- :func:`main` -- which is also the only chooser of exit statuses
++(FR-027, FR-028).
++"""
++
++import argparse
++import posixpath
++import shutil
++import sys
++import tarfile
++from pathlib import Path
++
++# The complete set of exit statuses this program uses, consistently and
++# exclusively (FR-028). No numeric status literal appears anywhere else.
++EXIT_OK = 0
++EXIT_ERROR = 2
++EXIT_CONFLICT = 3
++
++# The two member kinds this tool handles. Members of neither kind are skipped
++# (FR-016), so they need no name of their own.
++KIND_FILE = "file"
++KIND_DIR = "dir"
++
++# Fixed copy-buffer size: extraction streams in chunks of this many bytes so
++# memory does not grow with the size of the largest member (SC-007, research R6).
++COPY_BUFFER_SIZE = 64 * 1024
++
++
++class TarxError(Exception):
++    """A specified failure, carrying its diagnostic and its exit status.
++
++    ``message`` is human-readable, one line, and names the offending path or
++    member (FR-027). ``code`` is either ``EXIT_ERROR`` or ``EXIT_CONFLICT``;
++    ``EXIT_OK`` is never carried by an error (FR-028).
++
++    A class is used here, rather than a plain tuple, only because Python's
++    ``raise`` requires an exception type -- the one place Principle IV's
++    "prefer a plain data structure" is overridden by the language.
++    """
++
++    def __init__(self, message, code):
++        super().__init__(message)
++        self.message = message
++        self.code = code
++
++
++def open_archive(path):
++    """Open ``path`` as a tar archive, sniffing compression from its content.
++
++    ``mode="r:*"`` is written explicitly so the content-sniffing intent is
++    readable; it detects gzip (and other) compression from the stream rather
++    than from the file name (FR-018, research R2).
++
++    Every failure becomes a :class:`TarxError` carrying this project's own
++    one-line message. ``tarfile.ReadError``'s own text is never forwarded:
++    research R4 verified it is multi-line and would violate FR-027
++    (FR-018, FR-024).
++    """
++    try:
++        return tarfile.open(path, mode="r:*")
++    except FileNotFoundError:
++        raise TarxError(f"cannot read archive '{path}': no such file", EXIT_ERROR)
++    except IsADirectoryError:
++        raise TarxError(f"cannot read archive '{path}': is a directory", EXIT_ERROR)
++    except PermissionError:
++        raise TarxError(f"cannot read archive '{path}': permission denied", EXIT_ERROR)
++    except tarfile.ReadError:
++        raise TarxError(f"'{path}' is not a valid tar archive", EXIT_ERROR)
++    except OSError as exc:
++        reason = exc.strerror or str(exc)
++        raise TarxError(f"cannot read archive '{path}': {reason}", EXIT_ERROR)
++
++
++def read_failure(path, exc):
++    """Return the :class:`TarxError` for a failure while reading ``path``.
++
++    Used by the mid-parse backstops, where ``tarfile`` can raise long after a
++    successful open -- a truncated archive, or an I/O error on the underlying
++    file. ``ReadError``'s own multi-line text is never forwarded (research R4).
++    """
++    if isinstance(exc, tarfile.ReadError):
++        return TarxError(f"'{path}' is not a valid tar archive", EXIT_ERROR)
++    reason = getattr(exc, "strerror", None) or str(exc)
++    return TarxError(f"cannot read archive '{path}': {reason}", EXIT_ERROR)
++
++
++def write_failure(path, exc):
++    """Return the :class:`TarxError` for a failure while writing ``path``."""
++    reason = getattr(exc, "strerror", None) or str(exc)
++    return TarxError(f"cannot write to destination '{path}': {reason}", EXIT_ERROR)
++
++
++def escapes_destination(name):
++    """Return whether a recorded member name would write outside the destination.
++
++    A **purely lexical** check on the recorded name, with no filesystem
++    access: it cannot be defeated by symlinks already present inside the
++    destination, and it runs before the destination exists (FR-026,
++    research R11).
++
++    ``os.path.realpath`` containment checks were rejected for exactly those
++    reasons. Note that ``posixpath.isabs`` catches ``/etc/...`` and the
++    POSIX-absolute UNC form ``//server/...``, but not a Windows drive letter
++    or a backslash UNC prefix, so those are checked explicitly.
++    """
++    if posixpath.isabs(name):
++        return True
++    if len(name) >= 2 and name[0].isalpha() and name[1] == ":":
++        return True
++    if name.startswith("\\\\"):
++        return True
++    normalized = posixpath.normpath(name)
++    return normalized == ".." or normalized.startswith("../")
++
++
++def validate_destination(dest):
++    """Reject a destination that exists as something other than a directory.
++
++    Called after the archive has opened successfully and before planning, so
++    an unusable archive is always diagnosed ahead of an unusable destination
++    (FR-025, research R8 follow-on decision).
++    """
++    if dest.exists() and not dest.is_dir():
++        raise TarxError(
++            f"destination '{dest}' exists and is not a directory", EXIT_ERROR
++        )
++
++
++def cmd_list(args):
++    """Print the recorded name of every archive member, one per line.
++
++    Iterates the ``TarFile`` object directly rather than calling
++    ``getmembers()``, so member metadata is consumed as it is parsed and
++    memory stays flat with respect to the member count (research R6).
++
++    ``member.name`` is printed verbatim: ``tarfile`` already strips the
++    trailing separator from directory headers, so FR-008 needs no code here
++    (research R3). No sorting, filtering, or de-duplication is applied
++    (FR-005, FR-006, FR-007, FR-008, FR-009).
++    """
++    path = args.archive
++    with open_archive(path) as tar:
++        try:
++            for member in tar:
++                print(member.name)
++        except (tarfile.ReadError, OSError) as exc:
++            raise read_failure(path, exc)
++    return EXIT_OK
++
++
++def member_target(name, dest):
++    """Resolve a member's recorded ``name`` to its path under ``dest``.
++
++    Purely lexical, with **no filesystem access**, so it can run before the
++    destination exists. ``posixpath.normpath`` collapses ``.`` and ``..``
++    segments in the recorded name; rejecting the names that escape is a
++    separate concern, handled before this result is ever written
++    (data-model.md *Member name validation*).
++    """
++    return Path(dest) / posixpath.normpath(name)
++
++
++def needed_parents(dest, name):
++    """Yield each directory between ``dest`` and a member's target, outermost first.
++
++    Purely lexical, like :func:`member_target`: the member's recorded name is
++    normalized and split, so this never touches the filesystem and never
++    raises on a name that escapes the destination.
++    """
++    current = Path(dest)
++    for part in posixpath.normpath(name).split("/")[:-1]:
++        if part in ("", ".", ".."):
++            continue
++        current = current / part
++        yield current
++
++
++def build_plan(tar, dest):
++    """Read every member and decide what to do, touching no files.
++
++    Returns ``(plan, violations, conflicts, collisions)`` -- plain lists, no
++    classes:
++
++    * ``plan`` -- ``(member, target_path, kind)`` triples in **preserved
++      archive order** (FR-006), so a path stored twice ends up with the later
++      entry's contents.
++    * ``violations`` -- *names* of members whose recorded path escapes the
++      destination. Exit 2 (FR-026). A violating member is left out of the
++      plan entirely, so no later check ever computes a path outside the
++      destination.
++    * ``conflicts`` -- destination *paths* of regular-file members that
++      already exist as regular files. Exit 3 unless ``--overwrite``
++      (FR-019).
++    * ``collisions`` -- ready-to-raise *messages* for kind mismatches, which
++      exit 2 regardless of ``--overwrite`` (FR-023). Messages rather than
++      paths because the three collision cases read differently; the one
++      diagnostic *format* still lives only in :func:`main`.
++
++    Every check reads the destination's **pre-existing** state and writes
++    nothing. Because all validation precedes any write, a path written earlier
++    in the same run can never be mistaken for a pre-existing conflict
++    (research R9).
++
++    Members are classified by exactly three cases: regular file, directory, or
++    other -- "other" members are dropped rather than counted, because nothing
++    in this specification reports a skipped total and the contract rules out
++    "totals beyond the specified lines" (FR-016, Principle IV).
++
++    ``getmembers()`` is used rather than streaming because extraction
++    needs two passes -- validate everything, then write -- and the metadata
++    for even 10,000 members is independent of member *contents*, so SC-007
++    still holds (research R6).
++    """
++    plan = []
++    violations = []
++    conflicts = []
++    collisions = []
++
++    for member in tar.getmembers():
++        if member.isreg():
++            kind = KIND_FILE
++        elif member.isdir():
++            kind = KIND_DIR
++        else:
++            # Members of neither kind are skipped before their name matters
++            # for writing, so containment never rejects a run over a member
++            # that would not have been written anyway (FR-016).
++            continue
++
++        if escapes_destination(member.name):
++            violations.append(member.name)
++            continue
++
++        target = member_target(member.name, dest)
++        plan.append((member, target, kind))
++
++        # A non-directory anywhere between the destination and the target
++        # would surface as a mid-write NotADirectoryError or FileExistsError;
++        # catch it here, while nothing has been written yet.
++        for parent in needed_parents(dest, member.name):
++            if parent.exists() and not parent.is_dir():
++                collisions.append(
++                    f"cannot replace '{parent}' with directory "
++                    f"from member '{member.name}'"
++                )
++
++        if kind == KIND_FILE:
++            if target.is_dir():
++                collisions.append(
++                    f"cannot replace directory '{target}' with file "
++                    f"from member '{member.name}'"
++                )
++            elif target.exists():
++                conflicts.append(target)
++        elif target.exists() and not target.is_dir():
++            # An existing *directory* here is not a conflict: structures
++            # merge, with or without --overwrite (FR-022).
++            collisions.append(
++                f"cannot replace '{target}' with directory "
++                f"from member '{member.name}'"
++            )
++
++    return plan, violations, conflicts, collisions
++
++
++def write_members(tar, plan):
++    """Execute ``plan`` and return the set of regular-file paths written.
++
++    A ``set`` rather than an integer counter, because a path stored twice in
++    one archive must contribute **once** to the reported count while the later
++    entry's contents win (FR-015, research R9).
++
++    Regular files are streamed with ``copyfileobj`` at a fixed buffer size --
++    never ``extractfile(...).read()``, which would buffer a whole member in
++    memory and fail SC-007. ``TarFile.extract``/``extractall`` are
++    deliberately not used: they overwrite unconditionally, cannot report a
++    count, and apply member metadata the spec puts out of scope
++    (research R11). Modes, ownership, and mtimes are therefore not reproduced.
++    """
++    written = set()
++    for member, target, kind in plan:
++        if kind == KIND_DIR:
++            target.mkdir(parents=True, exist_ok=True)
++            continue
++        target.parent.mkdir(parents=True, exist_ok=True)
++        with tar.extractfile(member) as source, open(target, "wb") as destination:
++            shutil.copyfileobj(source, destination, length=COPY_BUFFER_SIZE)
++        written.add(target)
++    return written
++
++
++def cmd_extract(args):
++    """Extract an archive's files and directories under a destination.
++
++    A two-phase pipeline: open the archive, build the plan (read-only with
++    respect to the filesystem), prepare the destination, then run the write
++    pass. The destination is created only once planning has succeeded, so a
++    run that fails during planning leaves no new directories behind
++    (FR-012, FR-020).
++
++    Validation runs in a fixed order, and every step of it precedes the first
++    write::
++
++        archive opens and parses        -> 2
++        destination is not a directory  -> 2
++        member path escapes             -> 2
++        kind collision                  -> 2
++        overwrite conflict, no flag     -> 3
++        writes begin
++
++    Exit 2 outranks exit 3, so status 3 always means "re-run with
++    ``--overwrite``" (research R8, contracts *Validation order within
++    ``extract``*). Nothing above "writes begin" touches a file, which is what
++    makes FR-020 a structural property rather than a promise.
++    """
++    path = args.archive
++    dest = Path(args.dest)
++    with open_archive(path) as tar:
++        validate_destination(dest)
++
++        # build_plan calls getmembers(), which parses the remaining headers
++        # and so can fail long after a successful open -- a truncated archive
++        # raises here, not at open time. Without this conversion the failure
++        # would escape main as a traceback (FR-024, FR-027).
++        try:
++            plan, violations, conflicts, collisions = build_plan(tar, dest)
++        except (tarfile.ReadError, OSError) as exc:
++            raise read_failure(path, exc)
++
++        if violations:
++            raise TarxError(
++                f"refusing to extract member '{violations[0]}' outside destination",
++                EXIT_ERROR,
++            )
++        if collisions:
++            raise TarxError(collisions[0], EXIT_ERROR)
++        if conflicts and not args.overwrite:
++            raise TarxError(
++                f"'{conflicts[0]}' already exists; use --overwrite to replace it",
++                EXIT_CONFLICT,
++            )
++
++        try:
++            dest.mkdir(parents=True, exist_ok=True)
++        except OSError as exc:
++            raise write_failure(dest, exc)
++
++        # Backstop for anything that can only fail once writing has started:
++        # a permission error on a target, or an archive that turns out to be
++        # truncated part-way through streaming. Converted to a named
++        # diagnostic and exit 2 -- never swallowed, and never reported as
++        # success (spec Edge Cases *Partial write interrupted by an error*).
++        # Files already written are left in place; no rollback is required.
++        try:
++            written = write_members(tar, plan)
++        except tarfile.ReadError as exc:
++            raise read_failure(path, exc)
++        except OSError as exc:
++            raise write_failure(getattr(exc, "filename", None) or dest, exc)
++
++    print(f"extracted {len(written)} files")
++    return EXIT_OK
++
++
++def build_parser():
++    """Return the argument parser for ``tarx``.
++
++    ``prog`` is set explicitly because running a package as ``python -m tarx``
++    leaves ``sys.argv[0]`` pointing at ``__main__.py``, which would render
++    ``usage: __main__.py ...`` and undercut SC-008 (FR-001, research R7).
++    """
++    parser = argparse.ArgumentParser(
++        prog="tarx",
++        description="List and extract tar archives.",
++    )
++    subparsers = parser.add_subparsers(
++        dest="command", required=True, metavar="COMMAND"
++    )
++
++    # FR-002: exactly one positional argument, no options.
++    list_parser = subparsers.add_parser(
++        "list", help="print every archive member, one per line"
++    )
++    list_parser.add_argument("archive", metavar="ARCHIVE", help="path to a tar archive")
++
++    # FR-003: exactly two positional arguments, plus the --overwrite flag.
++    extract_parser = subparsers.add_parser(
++        "extract", help="extract an archive's files and directories"
++    )
++    extract_parser.add_argument(
++        "archive", metavar="ARCHIVE", help="path to a tar archive"
++    )
++    extract_parser.add_argument(
++        "dest", metavar="DEST", help="directory to extract into"
++    )
++    extract_parser.add_argument(
++        "--overwrite",
++        action="store_true",
++        help="replace existing regular files at colliding paths",
++    )
++
++    return parser
++
++
++def main(argv):
++    """Parse ``argv``, dispatch to a subcommand, and return an exit status.
++
++    This is the only place in the codebase that formats a diagnostic or
++    chooses an exit status (FR-027, FR-028). Invocation errors are handled by
++    ``argparse`` itself, which prints usage to stderr and exits 2 (FR-004).
++    """
++    parser = build_parser()
++    args = parser.parse_args(argv)
++    handlers = {"list": cmd_list, "extract": cmd_extract}
++    try:
++        return handlers[args.command](args)
++    except TarxError as error:
++        sys.stderr.write(f"tarx: {error.message}\n")
++        return error.code
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000..ece91c6
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,316 @@
++"""Shared fixtures: archive builders and a subprocess runner for ``python -m tarx``.
++
++Every archive is built into ``tmp_path`` so each test gets its own copy. The
++archives are built with ``tarfile`` directly rather than by shelling out to
++GNU ``tar``, because several of the cases the specification calls out (a
++directory member with no files, the same path stored twice, a member whose
++name escapes the destination) cannot be produced conveniently with ``tar``.
++One fixture deliberately uses GNU ``tar`` -- see :func:`gnu_tar_dir_archive`,
++which exists to prove FR-008 against directory headers that really do store a
++trailing separator (research R3).
++"""
++
++import io
++import os
++import subprocess
++import sys
++import tarfile
++from pathlib import Path
++
++import pytest
++
++# Repository root: tests/ sits directly beneath it, and the package lives in src/.
++REPO_ROOT = Path(__file__).resolve().parents[1]
++SRC_DIR = REPO_ROOT / "src"
++
++# Distinct known bytes, of different lengths, so a mixed-up extraction cannot
++# accidentally pass a byte-identity assertion.
++CONTENT_A = b"alpha-contents-of-a"
++CONTENT_B = b"bravo-contents-of-b!!"
++
++# The two members of the plain/gzip archive pair, in archive order.
++PHOTO_MEMBERS = {
++    "photos/a.jpg": CONTENT_A,
++    "photos/b.jpg": CONTENT_B,
++}
++
++
++# --------------------------------------------------------------------------
++# Low-level archive-building helpers
++# --------------------------------------------------------------------------
++
++
++def add_file(tar, name, data):
++    """Add a regular-file member named ``name`` holding exactly ``data``."""
++    info = tarfile.TarInfo(name)
++    info.size = len(data)
++    info.mtime = 0
++    info.mode = 0o644
++    tar.addfile(info, io.BytesIO(data))
++
++
++def add_dir(tar, name):
++    """Add a directory member named ``name``."""
++    info = tarfile.TarInfo(name)
++    info.type = tarfile.DIRTYPE
++    info.mtime = 0
++    info.mode = 0o755
++    tar.addfile(info)
++
++
++def add_symlink(tar, name, linkname):
++    """Add a symbolic-link member -- a member of neither handled kind."""
++    info = tarfile.TarInfo(name)
++    info.type = tarfile.SYMTYPE
++    info.linkname = linkname
++    info.mtime = 0
++    tar.addfile(info)
++
++
++def build_photo_archive(path, mode):
++    """Write the two-member photo archive to ``path`` using ``mode``."""
++    with tarfile.open(path, mode) as tar:
++        for name, data in PHOTO_MEMBERS.items():
++            add_file(tar, name, data)
++    return path
++
++
++# --------------------------------------------------------------------------
++# Archive fixtures
++# --------------------------------------------------------------------------
++
++
++@pytest.fixture
++def archive_members():
++    """The member name -> contents mapping of the photo archives, in order."""
++    return dict(PHOTO_MEMBERS)
++
++
++@pytest.fixture
++def plain_archive(tmp_path):
++    """(a) An uncompressed archive: ``photos/a.jpg`` then ``photos/b.jpg``."""
++    return build_photo_archive(tmp_path / "photos.tar", "w")
++
++
++@pytest.fixture
++def gzip_archive(tmp_path):
++    """(b) The gzip-compressed twin of :func:`plain_archive`."""
++    return build_photo_archive(tmp_path / "photos.tar.gz", "w:gz")
++
++
++@pytest.fixture
++def mislabeled_archive(tmp_path):
++    """(c) A gzip-compressed archive deliberately *named* ``mislabeled.tar``.
++
++    Proves compression is detected from content, not from the name (FR-018).
++    """
++    return build_photo_archive(tmp_path / "mislabeled.tar", "w:gz")
++
++
++@pytest.fixture
++def nested_archive(tmp_path):
++    """(d) A nested archive plus a directory member holding no files.
++
++    Members, in archive order:
++
++    * ``nest`` and ``nest/a`` -- explicit directory members
++    * ``nest/a/one.txt`` -- a regular file under an explicit directory
++    * ``nest/a/b/c/deep.txt`` -- a regular file whose parents ``b`` and ``c``
++      have *no* directory members, so they must be created on demand (FR-011)
++    * ``nest/empty`` -- a directory member with nothing in it (FR-011)
++
++    Two regular files in total, so a correct count reports ``2``.
++    """
++    path = tmp_path / "nested.tar"
++    with tarfile.open(path, "w") as tar:
++        add_dir(tar, "nest")
++        add_dir(tar, "nest/a")
++        add_file(tar, "nest/a/one.txt", b"one")
++        add_file(tar, "nest/a/b/c/deep.txt", b"deep")
++        add_dir(tar, "nest/empty")
++    return path
++
++
++@pytest.fixture
++def empty_archive(tmp_path):
++    """(e) A *valid* archive with zero members (research R5).
++
++    Distinct from :func:`zero_byte_file`: this one opens cleanly and lists
++    nothing, where a zero-byte file is not an archive at all.
++    """
++    path = tmp_path / "empty.tar"
++    with tarfile.open(path, "w"):
++        pass
++    return path
++
++
++@pytest.fixture
++def zero_byte_file(tmp_path):
++    """(f) A zero-byte file -- *not* a valid archive (research R4/R5)."""
++    path = tmp_path / "zero.tar"
++    path.write_bytes(b"")
++    return path
++
++
++@pytest.fixture
++def truncated_archive(tmp_path):
++    """A valid archive cut off mid-member.
++
++    Opens cleanly -- the first header is intact -- and only fails once
++    ``tarfile`` parses past the end of the data, so it exercises the
++    *mid-parse* failure path rather than the open path (FR-024, FR-027).
++    """
++    whole = tmp_path / "whole.tar"
++    with tarfile.open(whole, "w") as tar:
++        for name in ("a.txt", "b.txt", "c.txt"):
++            add_file(tar, name, b"x" * 3000)
++    path = tmp_path / "truncated.tar"
++    path.write_bytes(whole.read_bytes()[:4096])
++    return path
++
++
++@pytest.fixture
++def random_bytes_file(tmp_path):
++    """(g) A file of random bytes -- not a valid archive."""
++    path = tmp_path / "junk.bin"
++    path.write_bytes(os.urandom(512))
++    return path
++
++
++@pytest.fixture
++def symlink_archive(tmp_path):
++    """(h) An archive holding a symbolic link beside a file and a directory.
++
++    Members, in archive order: ``mix`` (directory), ``mix/real.txt``
++    (regular file), ``mix/link.txt`` (symbolic link). The link is listed
++    (FR-007) but skipped and not counted on extraction (FR-016).
++    """
++    path = tmp_path / "symlink.tar"
++    with tarfile.open(path, "w") as tar:
++        add_dir(tar, "mix")
++        add_file(tar, "mix/real.txt", b"real")
++        add_symlink(tar, "mix/link.txt", "real.txt")
++    return path
++
++
++@pytest.fixture
++def duplicate_archive(tmp_path):
++    """An archive storing the same member path twice with different contents.
++
++    Built programmatically because GNU ``tar`` will not produce it
++    conveniently. ``list`` must print the path twice -- no de-duplication
++    (FR-006) -- while ``extract`` must leave the *later* contents on disk and
++    count the path *once* (FR-015, research R9).
++    """
++    path = tmp_path / "duplicate.tar"
++    with tarfile.open(path, "w") as tar:
++        add_file(tar, "dup/same.txt", b"first-write")
++        add_file(tar, "dup/same.txt", b"second-write-wins")
++    return path
++
++
++@pytest.fixture
++def duplicate_contents():
++    """The two payloads of :func:`duplicate_archive`, in archive order."""
++    return (b"first-write", b"second-write-wins")
++
++
++@pytest.fixture
++def zero_length_member_archive(tmp_path):
++    """An archive holding a zero-length regular file beside a non-empty one.
++
++    Per the spec's Edge Cases, a zero-length archived file is recreated as an
++    empty file and *is* counted in the summary -- so this archive extracts to
++    ``extracted 2 files``.
++    """
++    path = tmp_path / "zerolen.tar"
++    with tarfile.open(path, "w") as tar:
++        add_file(tar, "zl/empty.txt", b"")
++        add_file(tar, "zl/full.txt", b"full")
++    return path
++
++
++# Member names that must never be written relative to the destination. Each is
++# verified to round-trip through tarfile verbatim, so the containment check
++# really does see the name written here (FR-026).
++ESCAPING_NAMES = (
++    "/etc/escape.txt",  # absolute POSIX path
++    "../escape.txt",  # traverses straight out
++    "a/../../escape.txt",  # normalizes to ../escape.txt
++    "C:/escape.txt",  # Windows drive letter, forward slashes
++    "C:\\escape.txt",  # Windows drive letter, backslashes
++    "\\\\server\\share\\escape.txt",  # UNC prefix
++    "//server/share/escape.txt",  # UNC prefix, POSIX-absolute form
++)
++
++
++@pytest.fixture
++def escaping_archives(tmp_path):
++    """``{member name: archive path}`` for every escaping-member case.
++
++    One single-member archive per name, so each diagnostic can be asserted
++    against the member it names. Built with ``tarfile`` directly because GNU
++    ``tar`` will not conveniently produce these (quickstart.md *Scenario 4*,
++    data-model.md *Member name validation*).
++    """
++    archives = {}
++    for index, name in enumerate(ESCAPING_NAMES):
++        path = tmp_path / f"escape{index}.tar"
++        with tarfile.open(path, "w") as tar:
++            add_file(tar, name, b"escaped")
++        archives[name] = path
++    return archives
++
++
++@pytest.fixture
++def gnu_tar_dir_archive(tmp_path):
++    """An archive built by system GNU ``tar``, which stores dirs as ``real/``.
++
++    Research R3 established that ``tarfile`` strips the trailing separator
++    while parsing the header, so FR-008 needs no code of our own -- but that
++    claim is only worth anything if a test asserts it against a real GNU
++    ``tar`` archive rather than one ``tarfile`` wrote itself.
++
++    Skipped when ``tar`` is unavailable.
++    """
++    tar_bin = "/usr/bin/tar"
++    if not os.path.exists(tar_bin):
++        pytest.skip("system GNU tar is not available")
++    tree = tmp_path / "tree"
++    (tree / "real" / "sub").mkdir(parents=True)
++    (tree / "real" / "sub" / "leaf.txt").write_bytes(b"leaf")
++    path = tmp_path / "gnu.tar"
++    subprocess.run(
++        [tar_bin, "-cf", str(path), "-C", str(tree), "real"],
++        check=True,
++        capture_output=True,
++    )
++    return path
++
++
++# --------------------------------------------------------------------------
++# Subprocess runner
++# --------------------------------------------------------------------------
++
++
++@pytest.fixture
++def run_tarx():
++    """Run ``python -m tarx`` as a subprocess and return the completed process.
++
++    ``PYTHONPATH`` is set explicitly in the child environment: ``pytest.ini``'s
++    ``pythonpath`` option affects only the pytest process, not children
++    (research R10).
++    """
++
++    def _run(*argv, cwd=None):
++        env = dict(os.environ)
++        env["PYTHONPATH"] = str(SRC_DIR)
++        return subprocess.run(
++            [sys.executable, "-m", "tarx", *[str(a) for a in argv]],
++            cwd=str(cwd) if cwd is not None else None,
++            env=env,
++            capture_output=True,
++            text=True,
++        )
++
++    return _run
+diff --git a/tests/test_compression.py b/tests/test_compression.py
+new file mode 100644
+index 0000000..23527f5
+--- /dev/null
++++ b/tests/test_compression.py
+@@ -0,0 +1,65 @@
++"""FR-017, FR-018: gzip and plain archives behave identically; detection by content."""
++
++
++def test_fr017_list_identical_for_plain_and_gzip(run_tarx, plain_archive, gzip_archive):
++    """FR-017, SC-001: a gzip archive lists byte-identically to its plain twin."""
++    plain = run_tarx("list", plain_archive)
++    gzipped = run_tarx("list", gzip_archive)
++    assert gzipped.stdout == plain.stdout
++    assert gzipped.returncode == plain.returncode == 0
++    assert gzipped.stderr == plain.stderr == ""
++
++
++def test_fr018_list_detects_compression_from_content_not_name(
++    run_tarx, plain_archive, mislabeled_archive
++):
++    """FR-018: a gzip archive *named* ``mislabeled.tar`` lists correctly.
++
++    The name says uncompressed tar and the content says gzip. Detection comes
++    from the content, so the output matches the plain archive exactly
++    (research R2).
++    """
++    plain = run_tarx("list", plain_archive)
++    mislabeled = run_tarx("list", mislabeled_archive)
++    assert mislabeled.stdout == plain.stdout
++    assert mislabeled.returncode == 0
++    assert mislabeled.stderr == ""
++
++
++def _tree(root):
++    """Return a ``{relative path: contents}`` snapshot of every file under root."""
++    return {
++        str(p.relative_to(root)): p.read_bytes()
++        for p in sorted(root.rglob("*"))
++        if p.is_file()
++    }
++
++
++def test_fr017_extract_identical_for_plain_and_gzip(
++    run_tarx, plain_archive, gzip_archive, tmp_path
++):
++    """FR-017: extracting a gzip archive matches its plain twin exactly.
++
++    US2 acceptance scenario 2: identical file trees, summary lines, and
++    exit statuses.
++    """
++    plain_dest = tmp_path / "out-plain"
++    gzip_dest = tmp_path / "out-gzip"
++    plain = run_tarx("extract", plain_archive, plain_dest)
++    gzipped = run_tarx("extract", gzip_archive, gzip_dest)
++    assert gzipped.stdout == plain.stdout
++    assert gzipped.returncode == plain.returncode == 0
++    assert _tree(gzip_dest) == _tree(plain_dest)
++
++
++def test_fr018_extract_detects_compression_from_content_not_name(
++    run_tarx, plain_archive, mislabeled_archive, tmp_path
++):
++    """FR-018: extracting a gzip archive *named* ``.tar`` behaves identically."""
++    plain_dest = tmp_path / "out-plain"
++    mislabeled_dest = tmp_path / "out-mislabeled"
++    plain = run_tarx("extract", plain_archive, plain_dest)
++    mislabeled = run_tarx("extract", mislabeled_archive, mislabeled_dest)
++    assert mislabeled.stdout == plain.stdout
++    assert mislabeled.returncode == plain.returncode == 0
++    assert _tree(mislabeled_dest) == _tree(plain_dest)
+diff --git a/tests/test_extract.py b/tests/test_extract.py
+new file mode 100644
+index 0000000..a09fc1a
+--- /dev/null
++++ b/tests/test_extract.py
+@@ -0,0 +1,147 @@
++"""FR-010 ... FR-016: extraction contents, directories, count, and skipping."""
++
++
++def test_fr010_regular_files_recreated_byte_identically(
++    run_tarx, plain_archive, archive_members, tmp_path
++):
++    """FR-010, SC-002: each regular file lands at ``DEST/<name>`` with identical bytes."""
++    dest = tmp_path / "out"
++    result = run_tarx("extract", plain_archive, dest)
++    assert result.returncode == 0
++    for name, data in archive_members.items():
++        assert (dest / name).is_file()
++        assert (dest / name).read_bytes() == data
++
++
++def test_fr011_needed_and_empty_directories_are_created(
++    run_tarx, nested_archive, tmp_path
++):
++    """FR-011: directories needed by a member *and* empty directory members.
++
++    ``nest/a/b`` and ``nest/a/b/c`` have no directory members of their own and
++    must be created on demand; ``nest/empty`` is a directory member that
++    contains nothing and must still appear.
++    """
++    dest = tmp_path / "out"
++    assert run_tarx("extract", nested_archive, dest).returncode == 0
++    assert (dest / "nest" / "a").is_dir()
++    assert (dest / "nest" / "a" / "b" / "c").is_dir()
++    assert (dest / "nest" / "a" / "b" / "c" / "deep.txt").read_bytes() == b"deep"
++    assert (dest / "nest" / "empty").is_dir()
++    assert list((dest / "nest" / "empty").iterdir()) == []
++
++
++def test_fr012_destination_and_missing_parents_are_created(
++    run_tarx, plain_archive, tmp_path
++):
++    """FR-012: a destination that does not exist is created, parents included."""
++    dest = tmp_path / "not" / "yet" / "there"
++    assert not dest.parent.exists()
++    result = run_tarx("extract", plain_archive, dest)
++    assert result.returncode == 0
++    assert dest.is_dir()
++    assert (dest / "photos" / "a.jpg").is_file()
++
++
++def test_fr013_non_colliding_pre_existing_entries_untouched(
++    run_tarx, plain_archive, tmp_path
++):
++    """FR-013: unrelated pre-existing content under DEST is left alone.
++
++    US2 acceptance scenario 5.
++    """
++    dest = tmp_path / "out"
++    (dest / "unrelated").mkdir(parents=True)
++    keeper = dest / "unrelated" / "keep.txt"
++    keeper.write_bytes(b"do not touch")
++    result = run_tarx("extract", plain_archive, dest)
++    assert result.returncode == 0
++    assert keeper.read_bytes() == b"do not touch"
++
++
++def test_fr014_success_prints_summary_line_only(run_tarx, plain_archive, tmp_path):
++    """FR-014, SC-002: stdout is exactly ``extracted N files\\n``, exit 0, stderr empty."""
++    result = run_tarx("extract", plain_archive, tmp_path / "out")
++    assert result.stdout == "extracted 2 files\n"
++    assert result.stderr == ""
++    assert result.returncode == 0
++
++
++def test_fr015_count_excludes_directories(run_tarx, nested_archive, tmp_path):
++    """FR-015: the count includes only regular files, not directory members.
++
++    The nested archive holds three directory members and two regular files.
++    """
++    result = run_tarx("extract", nested_archive, tmp_path / "out")
++    assert result.stdout == "extracted 2 files\n"
++
++
++def test_fr015_literal_word_files_when_count_is_one(
++    run_tarx, symlink_archive, tmp_path
++):
++    """FR-015: the literal word ``files`` is used even when N is 1."""
++    result = run_tarx("extract", symlink_archive, tmp_path / "out")
++    assert result.stdout == "extracted 1 files\n"
++
++
++def test_fr015_literal_word_files_when_count_is_zero(
++    run_tarx, empty_archive, tmp_path
++):
++    """FR-015 and US2 scenario 4: ``files`` is used even when N is 0."""
++    result = run_tarx("extract", empty_archive, tmp_path / "out")
++    assert result.stdout == "extracted 0 files\n"
++    assert result.stderr == ""
++    assert result.returncode == 0
++
++
++def test_fr016_symlink_member_skipped_without_failing(
++    run_tarx, symlink_archive, tmp_path
++):
++    """FR-016: a member of neither handled kind is skipped and not counted.
++
++    The archive holds a directory, a regular file, and a symbolic link. The
++    link is neither created nor counted, and its presence is not an error.
++    """
++    dest = tmp_path / "out"
++    result = run_tarx("extract", symlink_archive, dest)
++    assert result.returncode == 0
++    assert result.stderr == ""
++    assert result.stdout == "extracted 1 files\n"
++    assert (dest / "mix").is_dir()
++    assert (dest / "mix" / "real.txt").read_bytes() == b"real"
++    assert not (dest / "mix" / "link.txt").exists()
++
++
++# --------------------------------------------------------------------------
++# Edge cases: duplicate member paths and zero-length members
++# --------------------------------------------------------------------------
++
++
++def test_fr015_duplicate_path_counted_once_later_contents_win(
++    run_tarx, duplicate_archive, duplicate_contents, tmp_path
++):
++    """FR-015: a path stored twice ends with the later contents, counted once.
++
++    Spec Edge Cases "Duplicate member names"; research R9. Writing in archive
++    order gives "later entry wins" for free, and counting distinct destination
++    paths rather than members processed gives the count.
++    """
++    _first, second = duplicate_contents
++    dest = tmp_path / "out"
++    result = run_tarx("extract", duplicate_archive, dest)
++    assert result.returncode == 0
++    assert result.stdout == "extracted 1 files\n"
++    assert (dest / "dup" / "same.txt").read_bytes() == second
++
++
++def test_zero_length_member_recreated_empty_and_counted(
++    run_tarx, zero_length_member_archive, tmp_path
++):
++    """Spec Edge Cases: a zero-length archived file is recreated and counted."""
++    dest = tmp_path / "out"
++    result = run_tarx("extract", zero_length_member_archive, dest)
++    assert result.returncode == 0
++    assert result.stdout == "extracted 2 files\n"
++    assert (dest / "zl" / "empty.txt").is_file()
++    assert (dest / "zl" / "empty.txt").read_bytes() == b""
++    assert (dest / "zl" / "full.txt").read_bytes() == b"full"
+diff --git a/tests/test_failures.py b/tests/test_failures.py
+new file mode 100644
+index 0000000..9fab0fc
+--- /dev/null
++++ b/tests/test_failures.py
+@@ -0,0 +1,246 @@
++"""FR-024 ... FR-028: diagnostics, containment, and exit statuses."""
++
++import os
++
++import pytest
++
++BOTH_COMMANDS = ("list", "extract")
++
++
++def assert_clean_failure(result, status, needle):
++    """Assert the shape every failure must have (FR-027, FR-028, SC-005).
++
++    Non-empty stderr, exactly one line, naming the offending path or member,
++    empty stdout, the assigned exit status, and no Python traceback.
++    """
++    assert result.returncode == status
++    assert result.stdout == ""
++    assert result.stderr != ""
++    assert len(result.stderr.splitlines()) == 1
++    assert needle in result.stderr
++    assert "Traceback (most recent call last)" not in result.stderr
++
++
++def run_either(run_tarx, command, archive, tmp_path):
++    """Invoke ``command`` against ``archive``, supplying DEST when needed."""
++    if command == "extract":
++        return run_tarx(command, archive, tmp_path / "out")
++    return run_tarx(command, archive)
++
++
++# --------------------------------------------------------------------------
++# FR-024: the archive is missing, unreadable, a directory, or not a tar
++# --------------------------------------------------------------------------
++
++
++@pytest.mark.parametrize("command", BOTH_COMMANDS)
++def test_fr024_missing_archive(run_tarx, command, tmp_path):
++    """FR-024: a nonexistent archive path names the path and exits 2."""
++    missing = tmp_path / "missing.tar"
++    result = run_either(run_tarx, command, missing, tmp_path)
++    assert_clean_failure(
++        result, 2, f"tarx: cannot read archive '{missing}': no such file"
++    )
++
++
++@pytest.mark.parametrize("command", BOTH_COMMANDS)
++def test_fr024_archive_is_a_directory(run_tarx, command, tmp_path):
++    """FR-024: an archive path that is a directory names it and exits 2."""
++    directory = tmp_path / "a-directory"
++    directory.mkdir()
++    result = run_either(run_tarx, command, directory, tmp_path)
++    assert_clean_failure(
++        result, 2, f"tarx: cannot read archive '{directory}': is a directory"
++    )
++
++
++@pytest.mark.parametrize("command", BOTH_COMMANDS)
++def test_fr024_unreadable_archive(run_tarx, command, plain_archive, tmp_path):
++    """FR-024: an unreadable archive names the path and exits 2.
++
++    Skipped under root, which bypasses the permission bits entirely.
++    """
++    if os.geteuid() == 0:
++        pytest.skip("running as root: mode 0o000 does not deny access")
++    plain_archive.chmod(0o000)
++    result = run_either(run_tarx, command, plain_archive, tmp_path)
++    assert_clean_failure(
++        result, 2, f"tarx: cannot read archive '{plain_archive}': permission denied"
++    )
++
++
++@pytest.mark.parametrize("command", BOTH_COMMANDS)
++def test_fr024_random_bytes_is_not_an_archive(
++    run_tarx, command, random_bytes_file, tmp_path
++):
++    """FR-024: a file of random bytes is reported as not a valid archive.
++
++    ``tarfile.ReadError``'s own text is multi-line and enumerates every
++    compression method tried, so it is replaced rather than forwarded
++    (research R4) -- which is what keeps the single-line assertion true.
++    """
++    result = run_either(run_tarx, command, random_bytes_file, tmp_path)
++    assert_clean_failure(
++        result, 2, f"tarx: '{random_bytes_file}' is not a valid tar archive"
++    )
++
++
++@pytest.mark.parametrize("command", BOTH_COMMANDS)
++def test_fr024_zero_byte_file_is_not_an_archive(
++    run_tarx, command, zero_byte_file, tmp_path
++):
++    """FR-024: a zero-byte file is *not* a valid archive and exits 2.
++
++    Deliberately asserted apart from the valid-empty-archive success case
++    (``test_list``, ``test_extract``), because the two are easy to conflate:
++    an archive of only end-of-archive blocks succeeds, a zero-byte file does
++    not (research R5).
++    """
++    result = run_either(run_tarx, command, zero_byte_file, tmp_path)
++    assert_clean_failure(
++        result, 2, f"tarx: '{zero_byte_file}' is not a valid tar archive"
++    )
++
++
++@pytest.mark.parametrize("command", BOTH_COMMANDS)
++def test_fr024_truncated_archive_fails_mid_parse_without_traceback(
++    run_tarx, command, truncated_archive, tmp_path
++):
++    """FR-024 / FR-027: a truncated archive is diagnosed, not traced back.
++
++    This archive's first header is intact, so it opens cleanly and only fails
++    once ``tarfile`` reads past the end of the data -- long after the open.
++    Both commands must still report a one-line diagnostic and exit 2.
++    """
++    result = run_tarx(command, truncated_archive) if command == "list" else run_tarx(
++        command, truncated_archive, tmp_path / "out"
++    )
++    assert result.returncode == 2
++    assert f"tarx: '{truncated_archive}' is not a valid tar archive" in result.stderr
++    assert "Traceback (most recent call last)" not in result.stderr
++    assert "ReadError" not in result.stderr
++
++
++def test_fr020_truncated_archive_writes_nothing_on_extract(
++    run_tarx, truncated_archive, tmp_path
++):
++    """FR-020: the mid-parse failure happens during planning, before any write.
++
++    The destination is therefore never even created.
++    """
++    dest = tmp_path / "out"
++    assert run_tarx("extract", truncated_archive, dest).returncode == 2
++    assert not dest.exists()
++
++
++def test_r5_zero_byte_and_empty_archive_differ(
++    run_tarx, zero_byte_file, empty_archive
++):
++    """Research R5: the zero-byte file fails where the empty archive succeeds."""
++    assert run_tarx("list", zero_byte_file).returncode == 2
++    assert run_tarx("list", empty_archive).returncode == 0
++
++
++# --------------------------------------------------------------------------
++# FR-025: the destination is unusable
++# --------------------------------------------------------------------------
++
++
++def test_fr025_destination_exists_as_regular_file(run_tarx, plain_archive, tmp_path):
++    """FR-025: a destination that is a regular file names it and exits 2.
++
++    US4 acceptance scenario 3: no extraction is performed, so the blocking
++    file is left exactly as it was.
++    """
++    blocker = tmp_path / "blocker"
++    blocker.write_bytes(b"i am not a directory")
++    result = run_tarx("extract", plain_archive, blocker)
++    assert_clean_failure(
++        result, 2, f"tarx: destination '{blocker}' exists and is not a directory"
++    )
++    assert blocker.read_bytes() == b"i am not a directory"
++
++
++def test_fr025_archive_error_reported_before_destination_error(
++    run_tarx, random_bytes_file, tmp_path
++):
++    """Research R8 follow-on: the archive is diagnosed before the destination.
++
++    Both conditions are exit 2, so no observable status depends on the order;
++    it is fixed only so the diagnostic is deterministic.
++    """
++    blocker = tmp_path / "blocker"
++    blocker.write_bytes(b"not a directory")
++    result = run_tarx("extract", random_bytes_file, blocker)
++    assert result.returncode == 2
++    assert "is not a valid tar archive" in result.stderr
++    assert "exists and is not a directory" not in result.stderr
++
++
++# --------------------------------------------------------------------------
++# FR-026: member paths that escape the destination
++# --------------------------------------------------------------------------
++
++
++def test_fr026_escaping_members_refused(run_tarx, escaping_archives, tmp_path):
++    """FR-026: every escaping member name is refused, naming that member.
++
++    Also asserts nothing was created outside the destination -- both at the
++    sibling path a ``../`` member would have reached and at the absolute path
++    an ``/etc/...`` member would have reached.
++    """
++    outside_sibling = tmp_path / "escape.txt"
++    for name, archive in escaping_archives.items():
++        dest = tmp_path / "out"
++        result = run_tarx("extract", archive, dest)
++        assert_clean_failure(
++            result,
++            2,
++            f"tarx: refusing to extract member '{name}' outside destination",
++        )
++        assert not outside_sibling.exists(), f"{name} wrote outside the destination"
++        assert not os.path.exists("/etc/escape.txt")
++
++
++def test_fr026_refusal_creates_no_destination(run_tarx, escaping_archives, tmp_path):
++    """FR-026 with FR-020: the refusal happens before the destination is made."""
++    archive = escaping_archives["../escape.txt"]
++    dest = tmp_path / "never-created"
++    assert run_tarx("extract", archive, dest).returncode == 2
++    assert not dest.exists()
++
++
++# --------------------------------------------------------------------------
++# FR-027, FR-028: every failure is a named one-line diagnostic
++# --------------------------------------------------------------------------
++
++
++def test_fr027_no_failure_is_signalled_by_status_alone(
++    run_tarx, plain_archive, random_bytes_file, tmp_path
++):
++    """FR-027 / SC-005: each failure writes a non-empty one-line diagnostic.
++
++    A sweep over one representative of every specified failure class.
++    """
++    dest = tmp_path / "out"
++    assert run_tarx("extract", plain_archive, dest).returncode == 0
++
++    blocker = tmp_path / "blocker"
++    blocker.write_bytes(b"x")
++    collision = tmp_path / "collide"
++    (collision / "photos" / "a.jpg").mkdir(parents=True)
++
++    failures = [
++        run_tarx("list", tmp_path / "missing.tar"),
++        run_tarx("list", random_bytes_file),
++        run_tarx("list", tmp_path),
++        run_tarx("extract", plain_archive, blocker),
++        run_tarx("extract", plain_archive, collision),
++        run_tarx("extract", plain_archive, dest),
++    ]
++    for result in failures:
++        assert result.returncode != 0
++        assert result.stdout == ""
++        assert result.stderr.startswith("tarx: ")
++        assert len(result.stderr.splitlines()) == 1
++        assert "Traceback (most recent call last)" not in result.stderr
+diff --git a/tests/test_invocation.py b/tests/test_invocation.py
+new file mode 100644
+index 0000000..e4b5354
+--- /dev/null
++++ b/tests/test_invocation.py
+@@ -0,0 +1,178 @@
++"""FR-001 ... FR-004: subcommands, argument arity, and usage errors.
++
++Also holds the two suite-wide assertions that belong to no single
++requirement cluster: FR-028's exit-status exclusivity and SC-006's
++requirement-to-test traceability.
++"""
++
++import pathlib
++import re
++
++
++def test_fr001_help_uses_prog_tarx(run_tarx):
++    """FR-001: ``--help`` succeeds and the usage line names the tool ``tarx``.
++
++    Running a package as ``python -m tarx`` leaves ``sys.argv[0]`` pointing at
++    ``__main__.py``, so without an explicit ``prog`` argparse would print
++    ``usage: __main__.py ...`` (research R7).
++    """
++    result = run_tarx("--help")
++    assert result.returncode == 0
++    assert result.stdout.startswith("usage: tarx")
++    assert "usage: __main__.py" not in result.stdout
++
++
++def test_fr002_list_rejects_zero_positional_arguments(run_tarx):
++    """FR-002: ``list`` requires its one archive argument."""
++    result = run_tarx("list")
++    assert result.returncode != 0
++    assert result.stdout == ""
++    assert "usage: tarx list" in result.stderr
++
++
++def test_fr002_list_rejects_two_positional_arguments(run_tarx, plain_archive):
++    """FR-002: ``list`` accepts exactly one archive argument, not two.
++
++    The surplus argument is rejected by the top-level parser, so the usage
++    guidance printed is the top-level one rather than ``list``'s -- either
++    satisfies FR-002's "write usage guidance to stderr".
++    """
++    result = run_tarx("list", plain_archive, plain_archive)
++    assert result.returncode != 0
++    assert result.stdout == ""
++    assert result.stderr.startswith("usage: tarx")
++
++
++def test_fr003_extract_rejects_one_positional_argument(run_tarx, plain_archive):
++    """FR-003: ``extract`` requires both the archive and the destination."""
++    result = run_tarx("extract", plain_archive)
++    assert result.returncode != 0
++    assert result.stdout == ""
++    assert "usage: tarx extract" in result.stderr
++
++
++def test_fr003_extract_rejects_three_positional_arguments(
++    run_tarx, plain_archive, tmp_path
++):
++    """FR-003: ``extract`` accepts exactly two positional arguments."""
++    result = run_tarx("extract", plain_archive, tmp_path / "out", "surplus")
++    assert result.returncode != 0
++    assert result.stdout == ""
++    assert result.stderr.startswith("usage: tarx")
++
++
++def test_fr003_extract_accepts_overwrite_flag(run_tarx, plain_archive, tmp_path):
++    """FR-003: ``--overwrite`` is a valid option on ``extract``."""
++    result = run_tarx("extract", plain_archive, tmp_path / "out", "--overwrite")
++    assert result.returncode == 0
++    assert result.stderr == ""
++
++
++# --------------------------------------------------------------------------
++# FR-004: usage guidance for invocation errors
++# --------------------------------------------------------------------------
++
++
++def test_fr004_no_subcommand(run_tarx):
++    """FR-004: invoked with no subcommand at all → usage on stderr, exit 2."""
++    result = run_tarx()
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert result.stderr.startswith("usage: tarx")
++
++
++def test_fr004_unrecognized_subcommand(run_tarx, plain_archive):
++    """FR-004: an unrecognized subcommand → usage on stderr, exit 2.
++
++    This is ``argparse``'s own default behaviour, confirmed here rather than
++    reimplemented.
++    """
++    result = run_tarx("frobnicate", plain_archive)
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert result.stderr.startswith("usage: tarx")
++    assert "frobnicate" in result.stderr
++
++
++def test_fr004_unrecognized_option(run_tarx, plain_archive):
++    """FR-004: an unrecognized option → usage on stderr, exit 2."""
++    result = run_tarx("list", plain_archive, "--nonsense")
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert result.stderr.startswith("usage: tarx")
++
++
++def test_fr004_invocation_error_performs_no_other_action(run_tarx, plain_archive):
++    """FR-004: an invocation error performs no other action.
++
++    A bad option alongside a perfectly good archive must not list it.
++    """
++    result = run_tarx("list", plain_archive, "--nonsense")
++    assert result.stdout == ""
++    assert "photos/a.jpg" not in result.stderr
++
++
++# --------------------------------------------------------------------------
++# FR-028: exit statuses are used consistently and exclusively
++# --------------------------------------------------------------------------
++
++
++def test_fr028_observed_status_set_is_exactly_zero_two_three(
++    run_tarx, plain_archive, random_bytes_file, tmp_path
++):
++    """FR-028: across every behaviour class the statuses are exactly {0, 2, 3}.
++
++    And 3 is produced *only* by the no-``--overwrite`` file-replacement
++    conflict: every other failure, including invocation errors and kind
++    collisions, is 2 (research R8).
++    """
++    populated = tmp_path / "populated"
++    assert run_tarx("extract", plain_archive, populated).returncode == 0
++
++    collision = tmp_path / "collide"
++    (collision / "photos" / "a.jpg").mkdir(parents=True)
++    blocker = tmp_path / "blocker"
++    blocker.write_bytes(b"x")
++
++    conflict_runs = [
++        run_tarx("extract", plain_archive, populated),
++    ]
++    other_runs = [
++        run_tarx("--help"),
++        run_tarx("list", plain_archive),
++        run_tarx("extract", plain_archive, tmp_path / "fresh"),
++        run_tarx("extract", plain_archive, populated, "--overwrite"),
++        run_tarx(),
++        run_tarx("frobnicate"),
++        run_tarx("list"),
++        run_tarx("list", tmp_path / "missing.tar"),
++        run_tarx("list", random_bytes_file),
++        run_tarx("extract", plain_archive, blocker),
++        run_tarx("extract", plain_archive, collision),
++        run_tarx("extract", plain_archive, collision, "--overwrite"),
++    ]
++
++    assert {r.returncode for r in conflict_runs} == {3}
++    assert {r.returncode for r in other_runs} <= {0, 2}
++    observed = {r.returncode for r in conflict_runs + other_runs}
++    assert observed == {0, 2, 3}
++
++
++def test_sc006_every_requirement_is_named_by_some_test():
++    """SC-006: each of FR-001 ... FR-028 is traceable to a covering test.
++
++    Constitution Principle III requires the requirement-to-test mapping to be
++    traceable by test name, docstring, or explicit requirement id. Asserting
++    it here makes the mapping a merge gate rather than a one-off audit: adding
++    a requirement without a covering test fails the suite.
++    """
++    sources = sorted(pathlib.Path(__file__).parent.glob("*.py"))
++    text = "\n".join(path.read_text() for path in sources)
++
++    expected = {f"FR-{number:03d}" for number in range(1, 29)}
++    named = {
++        f"FR-{int(match):03d}"
++        for match in re.findall(r"(?:FR-|fr)(\d{3})", text)
++    }
++    uncovered = sorted(expected - named)
++    assert uncovered == [], f"requirements with no covering test: {uncovered}"
+diff --git a/tests/test_list.py b/tests/test_list.py
+new file mode 100644
+index 0000000..188a000
+--- /dev/null
++++ b/tests/test_list.py
+@@ -0,0 +1,79 @@
++"""FR-005 ... FR-009: ``list`` output content, order, membership, and status."""
++
++
++def test_fr005_one_member_per_newline_terminated_line(run_tarx, plain_archive):
++    """FR-005, SC-001: each member's path on its own newline-terminated line."""
++    result = run_tarx("list", plain_archive)
++    assert result.stdout == "photos/a.jpg\nphotos/b.jpg\n"
++
++
++def test_fr006_archive_order_is_not_sorted(run_tarx, nested_archive):
++    """FR-006: members come out in archive order, with no sorting applied.
++
++    The nested archive's recorded order differs from its sorted order --
++    ``nest/a/one.txt`` precedes ``nest/a/b/c/deep.txt`` on tape but follows it
++    alphabetically -- so a sorting implementation cannot pass this.
++    """
++    result = run_tarx("list", nested_archive)
++    lines = result.stdout.splitlines()
++    assert lines == [
++        "nest",
++        "nest/a",
++        "nest/a/one.txt",
++        "nest/a/b/c/deep.txt",
++        "nest/empty",
++    ]
++    assert lines != sorted(lines)
++
++
++def test_fr006_no_de_duplication(run_tarx, duplicate_archive):
++    """FR-006: a path stored twice is printed twice; no de-duplication."""
++    result = run_tarx("list", duplicate_archive)
++    assert result.stdout.splitlines() == ["dup/same.txt", "dup/same.txt"]
++
++
++def test_fr007_every_member_type_is_printed(run_tarx, symlink_archive):
++    """FR-007: directories and non-file/non-directory members are listed too.
++
++    No filtering is applied: the symbolic link appears even though
++    ``extract`` will skip it (FR-016).
++    """
++    result = run_tarx("list", symlink_archive)
++    assert result.stdout.splitlines() == ["mix", "mix/real.txt", "mix/link.txt"]
++
++
++def test_fr008_directory_names_have_no_trailing_separator(
++    run_tarx, gnu_tar_dir_archive
++):
++    """FR-008: directory member names print without a trailing separator.
++
++    Asserted against an archive written by system GNU ``tar``, whose
++    directory headers really do store ``real/`` -- an archive written by
++    ``tarfile`` itself would not exercise the stripping at all (research R3).
++    """
++    result = run_tarx("list", gnu_tar_dir_archive)
++    lines = result.stdout.splitlines()
++    assert lines, "expected at least the directory members to be listed"
++    assert [line for line in lines if line.endswith("/")] == []
++    assert "real" in lines
++    assert "real/sub" in lines
++
++
++def test_fr009_success_exits_zero_with_empty_stderr(run_tarx, plain_archive):
++    """FR-009: on success ``list`` exits 0 and writes nothing to stderr."""
++    result = run_tarx("list", plain_archive)
++    assert result.returncode == 0
++    assert result.stderr == ""
++
++
++def test_us1_scenario4_empty_archive_prints_nothing(run_tarx, empty_archive):
++    """US1 acceptance scenario 4: a valid archive with no members.
++
++    Prints nothing and exits 0, with no special-casing needed (research R5).
++    Contrast ``test_failures`` for the zero-byte file, which is *not* an
++    archive and exits 2.
++    """
++    result = run_tarx("list", empty_archive)
++    assert result.stdout == ""
++    assert result.stderr == ""
++    assert result.returncode == 0
+diff --git a/tests/test_overwrite.py b/tests/test_overwrite.py
+new file mode 100644
+index 0000000..768ebbd
+--- /dev/null
++++ b/tests/test_overwrite.py
+@@ -0,0 +1,204 @@
++"""FR-019 ... FR-023: overwrite conflicts, ``--overwrite``, and kind collisions."""
++
++
++def snapshot(root):
++    """Return a ``{relative path: contents-or-marker}`` map of the whole tree.
++
++    Captures directories as well as files, so a run that creates, modifies,
++    truncates, or deletes anything under ``root`` changes the snapshot
++    (FR-020, SC-003).
++    """
++    entries = {}
++    for path in sorted(root.rglob("*")):
++        key = str(path.relative_to(root))
++        entries[key] = path.read_bytes() if path.is_file() else "<dir>"
++    return entries
++
++
++# --------------------------------------------------------------------------
++# FR-019 ... FR-022: the overwrite conflict and the flag that resolves it
++# --------------------------------------------------------------------------
++
++
++def test_fr019_conflict_without_flag_exits_three_with_diagnostic(
++    run_tarx, plain_archive, tmp_path
++):
++    """FR-019: an existing regular file at a file member's target → exit 3.
++
++    The diagnostic names the conflicting path and points at the flag that
++    resolves it; stdout stays empty.
++    """
++    dest = tmp_path / "out"
++    assert run_tarx("extract", plain_archive, dest).returncode == 0
++
++    result = run_tarx("extract", plain_archive, dest)
++    conflicting = dest / "photos" / "a.jpg"
++    expected = f"tarx: '{conflicting}' already exists; use --overwrite to replace it\n"
++    assert result.returncode == 3
++    assert result.stdout == ""
++    assert result.stderr == expected
++
++
++def test_fr020_failed_conflict_run_changes_nothing(
++    run_tarx, plain_archive, tmp_path
++):
++    """FR-020 / SC-003: the refused run leaves the destination byte-identical.
++
++    Verified by snapshotting the whole destination tree before and after.
++    Because every validation precedes the first write, this holds by
++    construction rather than by promise.
++    """
++    dest = tmp_path / "out"
++    assert run_tarx("extract", plain_archive, dest).returncode == 0
++    before = snapshot(dest)
++
++    result = run_tarx("extract", plain_archive, dest)
++    assert result.returncode == 3
++    assert snapshot(dest) == before
++
++
++def test_fr021_overwrite_replaces_contents_and_counts_them(
++    run_tarx, plain_archive, archive_members, tmp_path
++):
++    """FR-021, SC-004: with the flag, colliding files are replaced and counted."""
++    dest = tmp_path / "out"
++    assert run_tarx("extract", plain_archive, dest).returncode == 0
++    target = dest / "photos" / "a.jpg"
++    target.write_bytes(b"stale")
++
++    result = run_tarx("extract", plain_archive, dest, "--overwrite")
++    assert result.returncode == 0
++    assert result.stdout == "extracted 2 files\n"
++    assert result.stderr == ""
++    assert target.read_bytes() == archive_members["photos/a.jpg"]
++
++
++def test_fr022_existing_directory_for_directory_member_is_not_a_conflict(
++    run_tarx, nested_archive, tmp_path
++):
++    """FR-022: directory structures merge, with or without ``--overwrite``.
++
++    US3 acceptance scenario 4. The destination already holds directories at
++    the paths the archive stores as directory members; only the regular files
++    are new, so the run succeeds without the flag.
++    """
++    dest = tmp_path / "out"
++    (dest / "nest" / "a").mkdir(parents=True)
++    (dest / "nest" / "empty").mkdir(parents=True)
++
++    result = run_tarx("extract", nested_archive, dest)
++    assert result.returncode == 0
++    assert result.stdout == "extracted 2 files\n"
++    assert result.stderr == ""
++
++    with_flag = run_tarx("extract", nested_archive, dest, "--overwrite")
++    assert with_flag.returncode == 0
++    assert with_flag.stdout == "extracted 2 files\n"
++
++
++def test_us3_scenario3_partially_populated_destination_adds_nothing(
++    run_tarx, plain_archive, tmp_path
++):
++    """US3 scenario 3: a partial destination fails 3 and adds none of the rest."""
++    dest = tmp_path / "out"
++    (dest / "photos").mkdir(parents=True)
++    (dest / "photos" / "a.jpg").write_bytes(b"stale")
++
++    result = run_tarx("extract", plain_archive, dest)
++    assert result.returncode == 3
++    assert result.stdout == ""
++    assert (dest / "photos" / "a.jpg").read_bytes() == b"stale"
++    assert not (dest / "photos" / "b.jpg").exists()
++
++
++# --------------------------------------------------------------------------
++# FR-023: kind collisions, which exit 2 even when --overwrite is given
++# --------------------------------------------------------------------------
++
++
++def test_fr023_file_member_onto_existing_directory_exits_two(
++    run_tarx, plain_archive, tmp_path
++):
++    """FR-023: a directory is never replaced by a file, flag or no flag."""
++    dest = tmp_path / "out"
++    blocker = dest / "photos" / "a.jpg"
++    blocker.mkdir(parents=True)
++    expected = (
++        f"tarx: cannot replace directory '{blocker}' with file "
++        "from member 'photos/a.jpg'\n"
++    )
++
++    for argv in (
++        ("extract", plain_archive, dest),
++        ("extract", plain_archive, dest, "--overwrite"),
++    ):
++        result = run_tarx(*argv)
++        assert result.returncode == 2
++        assert result.stdout == ""
++        assert result.stderr == expected
++
++
++def test_fr023_directory_member_onto_existing_file_exits_two(
++    run_tarx, nested_archive, tmp_path
++):
++    """FR-023: a regular file is never replaced by a directory, flag or no flag."""
++    dest = tmp_path / "out"
++    dest.mkdir(parents=True)
++    blocker = dest / "nest"
++    blocker.write_bytes(b"in the way")
++    expected = (
++        f"tarx: cannot replace '{blocker}' with directory from member 'nest'\n"
++    )
++
++    for argv in (
++        ("extract", nested_archive, dest),
++        ("extract", nested_archive, dest, "--overwrite"),
++    ):
++        result = run_tarx(*argv)
++        assert result.returncode == 2
++        assert result.stdout == ""
++        assert result.stderr == expected
++
++
++def test_r8_regression_kind_collision_exits_two_not_three(
++    run_tarx, plain_archive, tmp_path
++):
++    """Research R8: a kind collision is exit 2 even without ``--overwrite``.
++
++    FR-019 read literally would say 3 here, but FR-023 and the Edge Cases
++    list are the more specific statements. Exit 3 must mean "re-running with
++    ``--overwrite`` would fix this", and it would not fix this -- so this case
++    is 2. This test locks that resolution in.
++    """
++    dest = tmp_path / "out"
++    (dest / "photos" / "a.jpg").mkdir(parents=True)
++
++    result = run_tarx("extract", plain_archive, dest)
++    assert result.returncode == 2
++    assert result.returncode != 3
++
++
++def test_non_directory_ancestor_reported_at_planning_time(
++    run_tarx, plain_archive, tmp_path
++):
++    """A non-directory between DEST and a target is a planning-time collision.
++
++    Without this check the failure would surface as a mid-write
++    ``NotADirectoryError`` traceback, after the destination had already been
++    created (data-model.md *ExtractionPlan*).
++    """
++    dest = tmp_path / "out"
++    dest.mkdir(parents=True)
++    blocker = dest / "photos"
++    blocker.write_bytes(b"not a directory")
++    expected = (
++        f"tarx: cannot replace '{blocker}' with directory "
++        "from member 'photos/a.jpg'\n"
++    )
++
++    result = run_tarx("extract", plain_archive, dest)
++    assert result.returncode == 2
++    assert result.stdout == ""
++    assert result.stderr == expected
++    assert "Traceback (most recent call last)" not in result.stderr
++    assert blocker.read_bytes() == b"not a directory"
+diff --git a/tests/test_performance.py b/tests/test_performance.py
+new file mode 100644
+index 0000000..6d39e0e
+--- /dev/null
++++ b/tests/test_performance.py
+@@ -0,0 +1,95 @@
++"""SC-007: timing on a 10,000-member archive and memory flat in member size.
++
++Kept in its own file because it is the only slow test in the suite
++(plan.md *Structure Decision*).
++"""
++
++import io
++import tarfile
++import time
++import tracemalloc
++
++import pytest
++
++MEMBER_COUNT = 10_000
++LIST_BUDGET_SECONDS = 5.0
++EXTRACT_BUDGET_SECONDS = 30.0
++
++# One member far larger than the 64 KiB copy buffer. If extraction ever
++# buffered a whole member, peak traced memory would jump by this much.
++LARGE_MEMBER_BYTES = 32 * 1024 * 1024
++PEAK_MEMORY_BUDGET_BYTES = 4 * 1024 * 1024
++
++
++@pytest.fixture(scope="module")
++def many_member_archive(tmp_path_factory):
++    """An archive of 10,000 small members, built once for the whole module."""
++    path = tmp_path_factory.mktemp("perf") / "many.tar"
++    payload = b"0123456789"
++    with tarfile.open(path, "w") as tar:
++        for index in range(MEMBER_COUNT):
++            info = tarfile.TarInfo(f"many/dir{index % 100}/member{index}.bin")
++            info.size = len(payload)
++            info.mtime = 0
++            tar.addfile(info, io.BytesIO(payload))
++    return path
++
++
++def test_sc007_list_of_ten_thousand_members_under_five_seconds(
++    run_tarx, many_member_archive
++):
++    """SC-007: a 10,000-member archive lists in under 5 seconds."""
++    start = time.perf_counter()
++    result = run_tarx("list", many_member_archive)
++    elapsed = time.perf_counter() - start
++
++    assert result.returncode == 0
++    assert len(result.stdout.splitlines()) == MEMBER_COUNT
++    assert elapsed < LIST_BUDGET_SECONDS, f"list took {elapsed:.2f}s"
++
++
++def test_sc007_extract_of_ten_thousand_members_under_thirty_seconds(
++    run_tarx, many_member_archive, tmp_path
++):
++    """SC-007: a 10,000-member archive extracts in under 30 seconds."""
++    start = time.perf_counter()
++    result = run_tarx("extract", many_member_archive, tmp_path / "out")
++    elapsed = time.perf_counter() - start
++
++    assert result.returncode == 0
++    assert result.stdout == f"extracted {MEMBER_COUNT} files\n"
++    assert elapsed < EXTRACT_BUDGET_SECONDS, f"extract took {elapsed:.2f}s"
++
++
++def test_sc007_memory_does_not_grow_with_largest_member(tmp_path):
++    """SC-007: peak memory stays flat with respect to the largest member.
++
++    Run in-process so ``tracemalloc`` can observe the extraction. The archive
++    holds a single member far larger than the copy buffer; because extraction
++    streams with ``copyfileobj`` at a fixed buffer size rather than calling
++    ``extractfile(...).read()``, the traced peak stays a small fraction of the
++    member's size (research R6).
++    """
++    from tarx.cli import main
++
++    archive = tmp_path / "large.tar"
++    with tarfile.open(archive, "w") as tar:
++        info = tarfile.TarInfo("large/payload.bin")
++        info.size = LARGE_MEMBER_BYTES
++        info.mtime = 0
++        tar.addfile(info, io.BytesIO(b"\0" * LARGE_MEMBER_BYTES))
++
++    dest = tmp_path / "out"
++    tracemalloc.start()
++    try:
++        status = main(["extract", str(archive), str(dest)])
++        _current, peak = tracemalloc.get_traced_memory()
++    finally:
++        tracemalloc.stop()
++
++    assert status == 0
++    assert (dest / "large" / "payload.bin").stat().st_size == LARGE_MEMBER_BYTES
++    assert peak < PEAK_MEMORY_BUDGET_BYTES, (
++        f"peak traced memory {peak} bytes is not flat with respect to a "
++        f"{LARGE_MEMBER_BYTES}-byte member"
++    )

@@ -1,0 +1,617 @@
+diff --git a/src/pastebin/server.py b/src/pastebin/server.py
+index 9192b5c..f8d863b 100644
+--- a/src/pastebin/server.py
++++ b/src/pastebin/server.py
+@@ -7,13 +7,15 @@ import re
+ import sys
+ from http import HTTPStatus
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+-from typing import Optional, Tuple
++from typing import NamedTuple, Optional
+ from urllib.parse import unquote, urlsplit
+ 
+ from .storage import (
+     MAX_CONTENT_BYTES,
+     MAX_EXPIRES_IN,
++    MAX_PASSWORD_LENGTH,
+     MIN_EXPIRES_IN,
++    MIN_PASSWORD_LENGTH,
+     Store,
+     to_iso,
+ )
+@@ -25,6 +27,9 @@ MAX_BODY_BYTES = 4 * MAX_CONTENT_BYTES + 4096
+ PASTE_PATH = re.compile(r"\A/pastes/(?P<id>[^/]+)\Z")
+ PASTE_RAW_PATH = re.compile(r"\A/pastes/(?P<id>[^/]+)/raw\Z")
+ 
++#: Header carrying the read password of a protected paste.
++PASSWORD_HEADER = "X-Paste-Password"
++
+ 
+ class HTTPError(Exception):
+     """An error that maps directly onto a status code and JSON message."""
+@@ -35,8 +40,15 @@ class HTTPError(Exception):
+         self.message = message
+ 
+ 
+-def _parse_create_request(body: bytes) -> Tuple[str, Optional[int]]:
+-    """Validate a ``POST /pastes`` body, returning ``(content, expires_in)``."""
++class CreateRequest(NamedTuple):
++    content: str
++    expires_in: Optional[int] = None
++    burn_after_reading: bool = False
++    password=[REDACTED:assigned_secret][str] = None
++
++
++def _parse_create_request(body: bytes) -> CreateRequest:
++    """Validate a ``POST /pastes`` body into a :class:`CreateRequest`."""
+     try:
+         payload = json.loads(body.decode("utf-8"))
+     except (ValueError, UnicodeDecodeError):
+@@ -54,20 +66,40 @@ def _parse_create_request(body: bytes) -> Tuple[str, Optional[int]]:
+             f"content must be at most {MAX_CONTENT_BYTES} bytes",
+         )
+ 
+-    if "expires_in" not in payload:
+-        return content, None
++    # Each remaining field is optional, but a value that is present and of the
++    # wrong type (including ``null``) is an error rather than a default.
++    expires_in = None
++    if "expires_in" in payload:
++        expires_in = payload["expires_in"]
++        if isinstance(expires_in, bool) or not isinstance(expires_in, int):
++            raise HTTPError(HTTPStatus.BAD_REQUEST, "expires_in must be an integer")
++        if not MIN_EXPIRES_IN <= expires_in <= MAX_EXPIRES_IN:
++            raise HTTPError(
++                HTTPStatus.BAD_REQUEST,
++                f"expires_in must be between {MIN_EXPIRES_IN} and {MAX_EXPIRES_IN} seconds",
++            )
+ 
+-    # Present but not a usable integer (including ``null`` and booleans) is an
+-    # error: the field is optional, but only an integer is accepted for it.
+-    expires_in = payload["expires_in"]
+-    if isinstance(expires_in, bool) or not isinstance(expires_in, int):
+-        raise HTTPError(HTTPStatus.BAD_REQUEST, "expires_in must be an integer")
+-    if not MIN_EXPIRES_IN <= expires_in <= MAX_EXPIRES_IN:
+-        raise HTTPError(
+-            HTTPStatus.BAD_REQUEST,
+-            f"expires_in must be between {MIN_EXPIRES_IN} and {MAX_EXPIRES_IN} seconds",
+-        )
+-    return content, expires_in
++    burn_after_reading = False
++    if "burn_after_reading" in payload:
++        burn_after_reading = payload["burn_after_reading"]
++        if not isinstance(burn_after_reading, bool):
++            raise HTTPError(
++                HTTPStatus.BAD_REQUEST, "burn_after_reading must be a boolean"
++            )
++
++    password = None
++    if "password" in payload:
++        password = payload["password"]
++        if not isinstance(password, str):
++            raise HTTPError(HTTPStatus.BAD_REQUEST, "password must be a string")
++        if not MIN_PASSWORD_LENGTH <= len(password) <= MAX_PASSWORD_LENGTH:
++            raise HTTPError(
++                HTTPStatus.BAD_REQUEST,
++                f"password must be between {MIN_PASSWORD_LENGTH} and "
++                f"{MAX_PASSWORD_LENGTH} characters",
++            )
++
++    return CreateRequest(content, expires_in, burn_after_reading, password)
+ 
+ 
+ class PasteRequestHandler(BaseHTTPRequestHandler):
+@@ -209,8 +241,13 @@ class PasteRequestHandler(BaseHTTPRequestHandler):
+                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                 f"content must be at most {MAX_CONTENT_BYTES} bytes",
+             )
+-        content, expires_in = _parse_create_request(self.body)
+-        paste = self.store.create(content, expires_in)
++        request = _parse_create_request(self.body)
++        paste = self.store.create(
++            request.content,
++            request.expires_in,
++            burn_after_reading=request.burn_after_reading,
++            password=[REDACTED:assigned_secret],
++        )
+         self._send_json(
+             HTTPStatus.CREATED,
+             {
+@@ -241,6 +278,8 @@ class PasteRequestHandler(BaseHTTPRequestHandler):
+                     "content": paste.content,
+                     "created_at": to_iso(paste.created_at),
+                     "expires_at": to_iso(paste.expires_at) if paste.expires_at else None,
++                    "burn_after_reading": paste.burn_after_reading,
++                    "protected": paste.protected,
+                 },
+             )
+             return
+@@ -259,10 +298,39 @@ class PasteRequestHandler(BaseHTTPRequestHandler):
+             raise HTTPError(HTTPStatus.FORBIDDEN, "invalid delete token")
+         self._send_no_content()
+ 
++    def _password_header(self) -> Optional[str]:
++        """The supplied read password, or ``None`` if the header is absent.
++
++        Header bytes are decoded as latin-1 by :mod:`http.server`, while a
++        password given at creation time is JSON, i.e. real text.  Re-encoding
++        recovers the characters a client sent as UTF-8 (the usual choice); for
++        an ASCII password this is the identity.
++        """
++        raw = self.headers.get(PASSWORD_HEADER)
++        if raw is None:
++            return None
++        try:
++            return raw.encode("latin-1").decode("utf-8")
++        except (UnicodeEncodeError, UnicodeDecodeError):
++            return raw
++
+     def _lookup(self, raw_id: str):
+-        paste = self.store.get(unquote(raw_id))
+-        if paste is None:
++        """Fetch a paste for a read request, enforcing its password.
++
++        A burn-after-reading paste is consumed here, so the content is gone by
++        the time the response goes out.  ``HEAD`` returns no content at all, so
++        it deliberately does not burn the paste it describes.
++        """
++        outcome, paste = self.store.read(
++            unquote(raw_id),
++            password=[REDACTED:assigned_secret](),
++            consume=self.command != "HEAD",
++        )
++        if outcome == "not_found":
+             raise HTTPError(HTTPStatus.NOT_FOUND, "paste not found")
++        if outcome == "forbidden":
++            raise HTTPError(HTTPStatus.FORBIDDEN, "invalid paste password")
++        assert paste is not None
+         return paste
+ 
+ 
+diff --git a/src/pastebin/storage.py b/src/pastebin/storage.py
+index a615298..7bea8da 100644
+--- a/src/pastebin/storage.py
++++ b/src/pastebin/storage.py
+@@ -7,6 +7,7 @@ pastes survive a restart of the server.  Writes go through a temporary file and
+ 
+ from __future__ import annotations
+ 
++import hashlib
+ import json
+ import os
+ import re
+@@ -15,7 +16,7 @@ import tempfile
+ import threading
+ from dataclasses import dataclass
+ from datetime import datetime, timedelta, timezone
+-from typing import Optional
++from typing import Optional, Tuple
+ 
+ #: Pastes ids are generated by us; this pattern is also used to reject ids from
+ #: request paths that could escape the data directory (e.g. ``../../etc/passwd``).
+@@ -24,6 +25,26 @@ ID_PATTERN = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
+ MAX_CONTENT_BYTES = 65_536
+ MIN_EXPIRES_IN = 1
+ MAX_EXPIRES_IN = 2_592_000  # 30 days
++MIN_PASSWORD_LENGTH = 1
++MAX_PASSWORD_LENGTH = 128
++
++#: Passwords are never stored, only a salted PBKDF2 digest of them.
++PBKDF2_ITERATIONS = 100_000
++_SALT_BYTES = 16
++
++
++def hash_password(password: str, salt: Optional[bytes] = None) -> Tuple[str, str]:
++    """Derive ``(salt_hex, digest_hex)`` for ``password``.
++
++    A fresh random salt is used unless one is supplied (which is what verifying
++    an existing paste's password does).
++    """
++    if salt is None:
++        salt = secrets.token_bytes(_SALT_BYTES)
++    digest = hashlib.pbkdf2_hmac(
++        "sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS
++    )
++    return salt.hex(), digest.hex()
+ 
+ 
+ def utcnow() -> datetime:
+@@ -51,12 +72,34 @@ class Paste:
+     created_at: datetime
+     expires_at: Optional[datetime]
+     delete_token: str
++    #: One-time paste: the first successful read deletes it.
++    burn_after_reading: bool = False
++    #: Salt and PBKDF2 digest of the read password; both ``None`` when the
++    #: paste is not password protected.
++    password_salt: Optional[str] = None
++    password_hash: Optional[str] = None
++
++    @property
++    def protected(self) -> bool:
++        return self.password_hash is not None
+ 
+     def is_expired(self, now: Optional[datetime] = None) -> bool:
+         if self.expires_at is None:
+             return False
+         return (now or utcnow()) >= self.expires_at
+ 
++    def check_password(self, candidate: Optional[str]) -> bool:
++        """Whether ``candidate`` may read this paste.
++
++        An unprotected paste accepts anything, including no password at all.
++        """
++        if self.password_hash is None or self.password_salt is None:
++            return True
++        if candidate is None:
++            return False
++        _, digest = hash_password(candidate, bytes.fromhex(self.password_salt))
++        return secrets.compare_digest(digest, self.password_hash)
++
+     def to_json(self) -> dict:
+         return {
+             "id": self.id,
+@@ -64,17 +107,29 @@ class Paste:
+             "created_at": to_iso(self.created_at),
+             "expires_at": to_iso(self.expires_at) if self.expires_at else None,
+             "delete_token": self.delete_token,
++            "burn_after_reading": self.burn_after_reading,
++            "password_salt": self.password_salt,
++            "password_hash": self.password_hash,
+         }
+ 
+     @classmethod
+     def from_json(cls, raw: dict) -> "Paste":
++        # The last three fields were added after the first release, so files
++        # written by an older version simply lack them.
+         expires_at = raw.get("expires_at")
++        password_salt = raw.get("password_salt")
++        password_hash = raw.get("password_hash")
++        if (password_hash is None) != (password_salt is None):
++            raise ValueError("password_salt and password_hash must both be set")
+         return cls(
+             id=raw["id"],
+             content=raw["content"],
+             created_at=from_iso(raw["created_at"]),
+             expires_at=from_iso(expires_at) if expires_at else None,
+             delete_token=raw["delete_token"],
++            burn_after_reading=bool(raw.get("burn_after_reading", False)),
++            password_salt=password_salt,
++            password_hash=password_hash,
+         )
+ 
+ 
+@@ -132,11 +187,21 @@ class Store:
+ 
+     # -- public API --------------------------------------------------------
+ 
+-    def create(self, content: str, expires_in: Optional[int] = None) -> Paste:
++    def create(
++        self,
++        content: str,
++        expires_in: Optional[int] = None,
++        burn_after_reading: bool = False,
++        password=[REDACTED:assigned_secret][str] = None,
++    ) -> Paste:
+         created_at = utcnow()
+         expires_at = (
+             created_at + timedelta(seconds=expires_in) if expires_in is not None else None
+         )
++        # Hashing is slow by design, so it happens before the lock is taken.
++        password_salt, password_hash = (
++            hash_password(password) if password is not None else (None, None)
++        )
+         with self._lock:
+             for _ in range(10):
+                 paste_id = secrets.token_urlsafe(8)
+@@ -150,12 +215,20 @@ class Store:
+                 created_at=created_at,
+                 expires_at=expires_at,
+                 delete_token=secrets.token_urlsafe(24),
++                burn_after_reading=burn_after_reading,
++                password_salt=password_salt,
++                password_hash=password_hash,
+             )
+             self._write(paste)
+         return paste
+ 
+     def get(self, paste_id: str) -> Optional[Paste]:
+-        """Return a live paste, or ``None`` if it is unknown or expired."""
++        """Return a live paste, or ``None`` if it is unknown or expired.
++
++        This is a plain lookup: it neither checks a password nor consumes a
++        burn-after-reading paste.  Serving a read request goes through
++        :meth:`read` instead.
++        """
+         if not ID_PATTERN.match(paste_id):
+             return None
+         with self._lock:
+@@ -167,6 +240,41 @@ class Store:
+                 return None
+             return paste
+ 
++    def read(
++        self,
++        paste_id: str,
++        password=[REDACTED:assigned_secret][str] = None,
++        consume: bool = True,
++    ) -> Tuple[str, Optional[Paste]]:
++        """Read a paste on behalf of a ``GET`` request.
++
++        Returns ``("not_found", None)`` for an unknown or expired paste,
++        ``("forbidden", None)`` when the paste is protected and ``password``
++        is missing or wrong, and ``("ok", paste)`` otherwise.  "Not found"
++        wins over "forbidden", so a password cannot be used to probe for the
++        existence of a paste.
++
++        A burn-after-reading paste is deleted by the successful read that
++        returns it, unless ``consume`` is false.  The whole operation holds
++        the store lock, so two concurrent readers cannot both be served a
++        one-time paste; the cost is that a protected read serialises the
++        (deliberately slow) password check.
++        """
++        if not ID_PATTERN.match(paste_id):
++            return "not_found", None
++        with self._lock:
++            paste = self._read(paste_id)
++            if paste is None:
++                return "not_found", None
++            if paste.is_expired():
++                self._unlink(paste_id)
++                return "not_found", None
++            if not paste.check_password(password):
++                return "forbidden", None
++            if consume and paste.burn_after_reading:
++                self._unlink(paste_id)
++            return "ok", paste
++
+     def delete(self, paste_id: str, token=[REDACTED:assigned_secret][str]) -> str:
+         """Delete a paste.
+ 
+diff --git a/tests/test_pastebin.py b/tests/test_pastebin.py
+index 307c1f2..818dd61 100644
+--- a/tests/test_pastebin.py
++++ b/tests/test_pastebin.py
+@@ -154,6 +154,29 @@ def test_expires_in_bounds_are_accepted(client, expires_in):
+     assert client.create(content="x", expires_in=expires_in)
+ 
+ 
++@pytest.mark.parametrize("value", ["true", 1, 0, None, "yes", []])
++def test_invalid_burn_after_reading_is_400(client, value):
++    status, _, parsed = client.json_request(
++        "POST", "/pastes", {"content": "x", "burn_after_reading": value}
++    )
++    assert status == 400
++    assert list(parsed) == ["error"]
++
++
++@pytest.mark.parametrize("value", ["", "a" * 129, None, 5, True, ["s"], {"a": 1}])
++def test_invalid_password_is_400(client, value):
++    status, _, parsed = client.json_request(
++        "POST", "/pastes", {"content": "x", "password": value}
++    )
++    assert status == 400
++    assert list(parsed) == ["error"]
++
++
++@pytest.mark.parametrize("value", ["a", "a" * 128, "pässwörd ✓"])
++def test_password_bounds_are_accepted(client, value):
++    assert client.create(content="x", password=value)
++
++
+ def test_oversized_content_is_413(client):
+     status, _, parsed = client.json_request(
+         "POST", "/pastes", {"content": "a" * (MAX_CONTENT_BYTES + 1)}
+@@ -282,6 +305,214 @@ def test_expired_paste_behaves_as_missing(client):
+     assert status == 404
+ 
+ 
++# -- burn after reading -----------------------------------------------------
++
++
++def test_burn_defaults_to_false_and_is_reported(client):
++    created = client.create(content="hello")
++    _, _, paste = client.json_request("GET", f"/pastes/{created['id']}")
++    assert paste["burn_after_reading"] is False
++    assert paste["protected"] is False
++    # Reading it twice changes nothing.
++    status, _, _ = client.request("GET", f"/pastes/{created['id']}")
++    assert status == 200
++
++
++def test_explicit_burn_false_behaves_like_the_default(client):
++    created = client.create(content="hello", burn_after_reading=False)
++    _, _, paste = client.json_request("GET", f"/pastes/{created['id']}")
++    assert paste["burn_after_reading"] is False
++    status, _, _ = client.request("GET", f"/pastes/{created['id']}/raw")
++    assert status == 200
++
++
++def test_burn_on_raw_read_deletes_the_paste(client):
++    created = client.create(content="hello", burn_after_reading=True)
++    status, _, body = client.request("GET", f"/pastes/{created['id']}/raw")
++    assert status == 200
++    assert body == b"hello"
++    for path in (f"/pastes/{created['id']}", f"/pastes/{created['id']}/raw"):
++        status, _, parsed = client.json_request("GET", path)
++        assert status == 404
++        assert list(parsed) == ["error"]
++
++
++def test_burn_on_json_read_deletes_the_paste(client):
++    created = client.create(content="hello", burn_after_reading=True)
++    status, _, paste = client.json_request("GET", f"/pastes/{created['id']}")
++    assert status == 200
++    assert paste["content"] == "hello"
++    assert paste["burn_after_reading"] is True
++    status, _, _ = client.request("GET", f"/pastes/{created['id']}")
++    assert status == 404
++
++
++def test_burnt_paste_cannot_be_deleted_afterwards(client):
++    created = client.create(content="hello", burn_after_reading=True)
++    client.request("GET", f"/pastes/{created['id']}/raw")
++    status, _, _ = client.request(
++        "DELETE",
++        f"/pastes/{created['id']}",
++        headers={"X-Delete-Token": created["delete_token"]},
++    )
++    assert status == 404
++
++
++def test_burn_paste_can_be_deleted_before_being_read(client):
++    created = client.create(content="hello", burn_after_reading=True)
++    status, _, _ = client.request(
++        "DELETE",
++        f"/pastes/{created['id']}",
++        headers={"X-Delete-Token": created["delete_token"]},
++    )
++    assert status == 204
++    status, _, _ = client.request("GET", f"/pastes/{created['id']}/raw")
++    assert status == 404
++
++
++def test_only_one_concurrent_reader_sees_a_burn_paste(client):
++    created = client.create(content="one shot", burn_after_reading=True)
++    statuses = []
++    lock = threading.Lock()
++
++    def worker() -> None:
++        status, _, _ = client.request("GET", f"/pastes/{created['id']}/raw")
++        with lock:
++            statuses.append(status)
++
++    threads = [threading.Thread(target=worker) for _ in range(10)]
++    for thread in threads:
++        thread.start()
++    for thread in threads:
++        thread.join(timeout=15)
++    assert statuses.count(200) == 1
++    assert statuses.count(404) == 9
++
++
++def test_failed_read_of_a_protected_burn_paste_does_not_burn_it(client):
++    created = client.create(content="hello", burn_after_reading=True, password="s3cret")
++    status, _, _ = client.request("GET", f"/pastes/{created['id']}/raw")
++    assert status == 403
++    status, _, body = client.request(
++        "GET", f"/pastes/{created['id']}/raw", headers={"X-Paste-Password": "s3cret"}
++    )
++    assert status == 200 and body == b"hello"
++    status, _, _ = client.request(
++        "GET", f"/pastes/{created['id']}/raw", headers={"X-Paste-Password": "s3cret"}
++    )
++    assert status == 404
++
++
++# -- passwords --------------------------------------------------------------
++
++
++def test_protected_paste_needs_the_password(client):
++    created = client.create(content="hello", password="s3cret")
++
++    for path in (f"/pastes/{created['id']}", f"/pastes/{created['id']}/raw"):
++        status, _, parsed = client.json_request("GET", path)
++        assert status == 403
++        assert list(parsed) == ["error"]
++
++        status, _, parsed = client.json_request(
++            "GET", path, headers={"X-Paste-Password": "wrong"}
++        )
++        assert status == 403
++        assert list(parsed) == ["error"]
++
++    status, _, paste = client.json_request(
++        "GET", f"/pastes/{created['id']}", headers={"X-Paste-Password": "s3cret"}
++    )
++    assert status == 200
++    assert paste["content"] == "hello"
++    assert paste["protected"] is True
++    assert "password" not in paste and "password_hash" not in paste
++
++    status, _, body = client.request(
++        "GET", f"/pastes/{created['id']}/raw", headers={"X-Paste-Password": "s3cret"}
++    )
++    assert status == 200 and body == b"hello"
++
++
++def test_empty_password_header_on_a_protected_paste_is_403(client):
++    created = client.create(content="hello", password="s3cret")
++    status, _, _ = client.request(
++        "GET", f"/pastes/{created['id']}", headers={"X-Paste-Password": ""}
++    )
++    assert status == 403
++
++
++def test_password_header_is_ignored_for_unprotected_pastes(client):
++    created = client.create(content="hello")
++    status, _, _ = client.request(
++        "GET", f"/pastes/{created['id']}/raw", headers={"X-Paste-Password": "whatever"}
++    )
++    assert status == 200
++
++
++def test_unknown_paste_is_404_not_403(client):
++    status, _, _ = client.request(
++        "GET", "/pastes/nosuchpaste", headers={"X-Paste-Password": "s3cret"}
++    )
++    assert status == 404
++
++
++def test_expired_protected_paste_is_404_not_403(client):
++    created = client.create(content="hello", password="s3cret", expires_in=1)
++    time.sleep(1.5)
++    for headers in ({}, {"X-Paste-Password": "s3cret"}, {"X-Paste-Password": "wrong"}):
++        status, _, _ = client.request("GET", f"/pastes/{created['id']}", headers=headers)
++        assert status == 404
++
++
++def test_protected_paste_is_deleted_with_only_the_delete_token(client):
++    created = client.create(content="hello", password="s3cret")
++    status, _, _ = client.request(
++        "DELETE",
++        f"/pastes/{created['id']}",
++        headers={"X-Delete-Token": created["delete_token"]},
++    )
++    assert status == 204
++    status, _, _ = client.request(
++        "GET", f"/pastes/{created['id']}", headers={"X-Paste-Password": "s3cret"}
++    )
++    assert status == 404
++
++
++def test_delete_of_a_protected_paste_without_a_token_is_403(client):
++    created = client.create(content="hello", password="s3cret")
++    status, _, _ = client.request(
++        "DELETE", f"/pastes/{created['id']}", headers={"X-Paste-Password": "s3cret"}
++    )
++    assert status == 403
++
++
++def test_password_is_not_stored_in_plain_text(client, tmp_path):
++    client.create(content="hello", password="s3cret")
++    files = list((tmp_path / "data").glob("*.json"))
++    assert files
++    for path in files:
++        assert "s3cret" not in path.read_text(encoding="utf-8")
++
++
++def test_unicode_password_round_trips(client):
++    # Header values are bytes on the wire; a non-ASCII password is sent UTF-8
++    # encoded (which is what curl and friends do).
++    created = client.create(content="hello", password="pässwörd ✓")
++    status, _, _ = client.request(
++        "GET",
++        f"/pastes/{created['id']}/raw",
++        headers={"X-Paste-Password": "pässwörd ✓".encode("utf-8")},
++    )
++    assert status == 200
++    status, _, _ = client.request(
++        "GET",
++        f"/pastes/{created['id']}/raw",
++        headers={"X-Paste-Password": "pässwörd x".encode("utf-8")},
++    )
++    assert status == 403
++
++
+ # -- connection handling ----------------------------------------------------

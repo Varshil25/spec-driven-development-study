@@ -1,0 +1,97 @@
+diff --git a/specs/001-pastebin-service/spec.md b/specs/001-pastebin-service/spec.md
+index a1cb873..40176f8 100644
+--- a/specs/001-pastebin-service/spec.md
++++ b/specs/001-pastebin-service/spec.md
+@@ -8,6 +8,16 @@
+ 
+ **Input**: User description: "Build a small HTTP service for sharing text snippets ("pastes"), using only Python's standard library (for example `http.server`). Run it as `python -m pastebin serve --port PORT --data DIR`. It listens on 127.0.0.1 at PORT, stores pastes under the directory DIR (creating it if needed) so that they survive a restart, and prints `listening on 127.0.0.1:PORT` to standard output once it is ready to accept requests. [full API, error, and packaging details as given in the request]"
+ 
++## Clarifications
++
++### Session 2026-11-09
++
++- Q: When the service encounters a stored snippet whose file it cannot read or parse (truncated by a crash, hand-edited, incompatible format), what should it do? → A: Report an internal error (500) with an explanatory error body for that snippet only, write a diagnostic to the error stream, and keep serving every other snippet; do not scan storage at startup.
++- Q: When a publish request carries a body far larger than the maximum snippet size, how should the service handle it? → A: Reject with 413 from the declared body length before reading the body, and independently never read more than the limit plus a small margin from the connection.
++- Q: Must a publish request declare that its body is JSON? → A: No — the declared content type is ignored entirely; a submission is accepted if and only if its body parses as the expected structured data.
++- Q: Does the service need to serve overlapping requests at the same time, or may it finish one before starting the next? → A: Concurrently — overlapping requests are served at the same time, with each snippet written so that a concurrent reader sees it either complete or not at all, and a concurrent delete never yields a partial read.
++- Q: Should the service log each request it handles? → A: No — silent on normal traffic. Standard output carries the ready line only; the error stream is used only for genuine failures (startup problems, damaged storage).
++
+ ## User Scenarios & Testing *(mandatory)*
+ 
+ ### User Story 1 - Publish a snippet and share a link to it (Priority: P1)
+@@ -87,13 +97,17 @@ An operator restarts the service — to apply a configuration change, after a cr
+ 
+ - **Text at and over the size limit**: text of exactly 65,536 bytes when UTF-8 encoded is accepted; text of 65,537 bytes is rejected as too large. The limit is measured in encoded bytes, not characters, so a snippet of 40,000 multi-byte characters can exceed the limit even though its character count does not.
+ - **Empty text**: an empty string is valid text and produces a readable snippet whose plain-text form is an empty body.
+-- **Malformed submissions**: a body that is not well-formed structured data, a body that is well-formed but is not an object (a bare list, number, or string), a submission with no text field at all, and a submission whose text field is a number, boolean, list, object, or null are each rejected as invalid input.
++- **A body far over the size limit**: a submission declaring a body of hundreds of megabytes is rejected as too large immediately, before its body is read. A submission that understates or omits its declared length cannot make the service read without bound — it stops reading at the same ceiling and rejects.
++- **Malformed submissions**: a body that is not well-formed structured data, a body that is well-formed but is not an object (a bare list, number, or string), a submission with no text field at all, and a submission whose text field is a number, boolean, list, object, or null are each rejected as invalid input. What the submission *claims* its body is, however, carries no weight: a well-formed submission is accepted whether it declares a JSON content type, declares some other type, or declares none at all.
+ - **Lifetime field present but empty-valued**: a lifetime explicitly given as null is treated as "no expiry" and is accepted; a lifetime given as a numeric string such as `"3600"` is rejected as invalid.
+ - **Precedence between "not found" and "refused"**: when a deletion names an unknown or already-expired snippet *and* presents a wrong credential, the service reports not found. A caller must never be able to use the deletion endpoint to learn that an identifier exists when reading it would not have revealed that.
+ - **Unrecognised locations and methods**: any path the service does not define — including the service root, a snippet path with extra trailing segments, and a snippet path with an unexpected suffix — is reported as not found. The same applies to a defined path used with a method it does not support.
+ - **A snippet that expires between two requests**: a read that arrives before the expiry moment succeeds and a read arriving at or after it reports not found; there is no window in which a snippet is partially available.
++- **A snippet deleted while it is being read**: a read that overlaps a deletion returns either the whole snippet or not found — never a truncated body or an error. Likewise a read that overlaps the publication of a snippet never observes it half-written.
++- **A caller that connects and goes quiet**: a caller that opens a connection and sends nothing, or stops partway through its body, does not prevent other callers from being served.
+ - **Unknown extra fields in a submission**: additional fields the service does not define are ignored rather than treated as errors, so that callers written against a future version are not broken by this one.
+ - **Storage location problems**: if the storage location cannot be created or written to, the service reports the problem clearly and refuses to start rather than silently serving snippets that will be lost.
++- **A damaged stored snippet**: a snippet whose stored form has been truncated, corrupted, or hand-edited into something unreadable is reported as an internal error, not as not found — a caller is never told that a snippet is absent when the truth is that it is damaged. The service notices this only when that snippet is requested; other snippets are unaffected and startup does not scan for it.
+ - **Port already in use**: if the requested port cannot be bound, the service reports the problem clearly and exits without printing its ready message.
+ 
+ ## Requirements *(mandatory)*
+@@ -108,6 +122,8 @@ An operator restarts the service — to apply a configuration change, after a cr
+ - **FR-004**: The service MUST write the line `listening on 127.0.0.1:PORT`, with `PORT` replaced by the actual port, to standard output once — and not before — it is ready to accept requests.
+ - **FR-005**: If the service cannot bind the requested port or cannot create or write to the storage location, it MUST report the reason on the error stream and exit with a non-zero status, without printing the ready message.
+ - **FR-006**: The service MUST reject a missing, non-numeric, or out-of-range port, and a missing storage location, with a clear message on the error stream and a non-zero exit status.
++- **FR-042**: The service MUST serve overlapping requests concurrently, so that one caller's request — including a caller that opens a connection and then stops sending — does not delay another caller's request.
++- **FR-044**: The service MUST NOT write anything to standard output other than the single ready line of FR-004, and MUST NOT write per-request log lines to the error stream; the error stream carries only the failure diagnostics this specification requires (FR-005, FR-006, FR-038).
+ 
+ **Publishing a snippet**
+ 
+@@ -121,6 +137,8 @@ An operator restarts the service — to apply a configuration change, after a cr
+ - **FR-014**: The service MUST assign each snippet a deletion credential that is unpredictable and not derivable from the snippet's identifier, and MUST return it only in the publication response.
+ - **FR-015**: The service MUST ignore fields in a submission that it does not define, rather than rejecting the submission.
+ - **FR-016**: The service MUST reject a submission whose body is not well-formed structured data, or is well-formed but is not an object, as invalid input.
++- **FR-040**: The service MUST reject a submission as too large, without reading its body, when the body length the caller declares exceeds what the largest valid submission could occupy. Independently of any declared length, the service MUST NOT read more from a connection than that same bound, so that a caller who understates or omits the length cannot cause the service to consume unbounded memory.
++- **FR-041**: The service MUST NOT require a submission to declare the content type of its body, and MUST NOT reject a submission on the strength of the type it declares; acceptance depends only on whether the body parses as the expected structured data.
+ 
+ **Reading a snippet**
+ 
+@@ -148,6 +166,8 @@ An operator restarts the service — to apply a configuration change, after a cr
+ - **FR-029**: The service MUST store published snippets in the storage location such that a later instance started against the same location can read, serve, and delete them.
+ - **FR-030**: The service MUST preserve a snippet's identifier, text, creation time, expiry time, and deletion credential across a restart.
+ - **FR-031**: The service MUST treat a snippet as deleted permanently, so that a restart does not resurrect it.
++- **FR-043**: The service MUST make a published snippet visible to a concurrent reader either complete or not at all, never partially written, and MUST ensure that deleting a snippet while it is being read yields either the whole snippet or not found, never a partial or corrupt result.
++- **FR-038**: When a request names a snippet whose stored form cannot be read or parsed, the service MUST report the failure as an internal error rather than as not found, MUST write a diagnostic naming the affected snippet to the error stream, and MUST continue to serve and delete every other snippet normally. The service MUST NOT inspect stored snippets at startup in order to detect this condition.
+ 
+ **Errors**
+ 
+@@ -156,7 +176,8 @@ An operator restarts the service — to apply a configuration change, after a cr
+ - **FR-034**: The service MUST report text exceeding the size limit as a payload-too-large error (413), distinct from other invalid input.
+ - **FR-035**: The service MUST report a refused deletion as a forbidden error (403).
+ - **FR-036**: The service MUST report an unknown snippet, an expired snippet, any undefined path, and any defined path used with an unsupported method, as not found (404).
+-- **FR-037**: The service MUST NOT return an unhandled-failure response for any input described in this specification; every rejection MUST be one of the defined error responses.
++- **FR-037**: The service MUST NOT return an unhandled-failure response for any input described in this specification; every rejection MUST be one of the defined error responses. No caller input can provoke the internal error of FR-039, which is reachable only from damaged storage.
++- **FR-039**: The service MUST report an unreadable or unparseable stored snippet as an internal error (500), carrying the same single-error-field body as every other unsuccessful response.
+ 
+ ### Key Entities
+ 
+@@ -175,6 +196,8 @@ An operator restarts the service — to apply a configuration change, after a cr
+ - **SC-006**: Someone who does not hold a snippet's deletion credential cannot delete it, and cannot learn anything from a deletion attempt that reading the snippet would not already have told them.
+ - **SC-007**: The service becomes ready and announces itself within 2 seconds of being started on a storage location holding up to 1,000 snippets.
+ - **SC-008**: Every functional requirement above is exercised by at least one automated test that names its identifier, and the whole suite passes.
++- **SC-009**: Across a session of valid and invalid requests, the service writes exactly one line to standard output — its ready line — and writes to the error stream only for the failures this specification names.
++- **SC-010**: With 10 callers issuing overlapping publish, read, and delete requests, every response is correct for the moment it was served, no snippet is ever returned partially written or corrupt, and no caller is delayed by another caller that has opened a connection and stopped sending.
+ 
+ ## Assumptions
+ 
+@@ -183,8 +206,9 @@ An operator restarts the service — to apply a configuration change, after a cr
+ - **Identifier and credential shape are unspecified**: the specification requires identifiers to be unique and unguessable and credentials to be unpredictable, but does not dictate their length or alphabet. Both are assumed to be URL-safe text, since the identifier appears in a location path.
+ - **Clock is the host clock**: creation and expiry times come from the host's wall clock in UTC. Behaviour under a clock that jumps backwards is not specified.
+ - **Second precision is sufficient**: timestamps are specified to the second, so two snippets published within the same second share a creation time. This is acceptable because nothing in the service orders snippets by time.
+-- **Concurrency is modest**: the service is expected to handle occasional overlapping requests correctly — a read must never see a half-written snippet — but is not required to sustain high concurrent load. No throughput target is set.
++- **Concurrency is required but modest**: overlapping requests are served concurrently and correctly (FR-042, FR-043), but the service is not required to sustain high concurrent load. No throughput target is set, and no limit is placed on how many connections may be in flight.
+ - **Storage is a local filesystem**: the nominated storage location is an ordinary writable directory on the host, not a network share with unusual semantics. Snippets are the only thing the service puts there, and no other process modifies them while it is running.
++- **No observability beyond failure diagnostics**: the service reports failures and nothing else (FR-044). There is no request log, no metrics, and no tracing, so an operator cannot reconstruct who read a snippet. This is a deliberate tradeoff for a single-operator loopback service; adding a request log would be a change to the output contract, not an implementation detail.
+ - **Out of scope for this feature**: listing or searching snippets, editing a published snippet, syntax highlighting or any rendering of content, web pages or forms, authentication and user accounts, transport encryption, and snippet size or count limits beyond the per-snippet byte limit.
+ 
+ ## Constraints *(imposed by the request)*

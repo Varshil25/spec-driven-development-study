@@ -1,0 +1,746 @@
+diff --git a/README.md b/README.md
+index b2343bc..784ed6e 100644
+--- a/README.md
++++ b/README.md
+@@ -13,13 +13,15 @@ The store is the file at `PATH`; it is created on first use and persists
+ between runs. Passwords are never passed as command-line arguments — each
+ command reads the passwords it needs from standard input, one per line.
+ 
+-| Command            | Reads from stdin                | On success               |
+-| ------------------ | ------------------------------- | ------------------------ |
+-| `register USERNAME`| new password                     | `registered USERNAME`    |
+-| `login USERNAME`   | password                         | `ok`                     |
+-| `unlock USERNAME`  | nothing                          | `unlocked USERNAME`      |
+-| `passwd USERNAME`  | current password, then new one   | `changed password for …`  |
+-| `delete USERNAME`  | password                         | `deleted USERNAME`       |
++| Command                            | Reads from stdin                | On success               |
++| ---------------------------------- | ------------------------------- | ------------------------ |
++| `register USERNAME`                | new password                     | `registered USERNAME`    |
++| `login USERNAME`                   | password                         | `ok`                     |
++| `unlock USERNAME`                  | nothing                          | `unlocked USERNAME`      |
++| `passwd USERNAME`                  | current password, then new one   | `changed password for …`  |
++| `delete USERNAME`                  | password                         | `deleted USERNAME`       |
++| `reset-token USERNAME [--ttl SECONDS]` | nothing                      | the token, on one line   |
++| `reset USERNAME`                   | reset token, then new password    | `password reset`         |
+ 
+ A username is 3–32 characters of letters, digits and underscores. A password
+ must be at least 12 characters.
+@@ -29,14 +31,14 @@ must be at least 12 characters.
+ | Status | Meaning                                                   |
+ | ------ | --------------------------------------------------------- |
+ | 0      | success                                                   |
+-| 1      | `invalid credentials` (wrong password)                    |
++| 1      | `invalid credentials` (wrong password) or `invalid token`  |
+ | 2      | invalid username, password too short, or bad usage        |
+ | 3      | no such user, or `register` of a name that already exists |
+ | 4      | `account locked`                                          |
+ | 5      | the store is missing a parent it cannot create, unreadable, or corrupt |
+ 
+-Error messages go to standard error; `invalid credentials` and
+-`account locked` are written verbatim, as specified.
++Error messages go to standard error; `invalid credentials`, `account locked`
++and `invalid token` are written verbatim, as specified.
+ 
+ ## Lockout
+ 
+@@ -46,6 +48,36 @@ consecutive failure locks the account; that fifth attempt still reports
+ `account locked` (status 4) — even with the correct password. A successful
+ `login` resets the counter, and `unlock` clears both the lock and the counter.
+ 
++## Password reset
++
++A user who has forgotten their password cannot use `passwd`, which needs the
++current one. Instead an administrator issues a one-time reset token and passes
++it on to the user:
++
++```
++python -m accounts --store PATH reset-token USERNAME [--ttl SECONDS]
++```
++
++`reset-token` prints the token on a line of its own on standard output, and
++nothing else, so it can be captured directly (`token=$(… reset-token alice)`).
++The token is valid for `--ttl` seconds, 900 (15 minutes) by default; `--ttl`
++must be a positive whole number of seconds and is accepted only by this
++command.
++
++`reset USERNAME` then reads the token and the new password from standard
++input, one per line. With a valid token it sets the new password and prints
++`password reset`. A wrong, already used or expired token prints
++`invalid token` on standard error and exits with status 1; a new password
++shorter than 12 characters exits with status 2 and leaves the token usable for
++another attempt. Either command fails with status 3 for a username that does
++not exist.
++
++A token works only once, only for the account it was issued for, and only
++until it expires. Issuing a token replaces any token the account still had, so
++only the most recent one works. Neither command needs the old password, and
++both work on a locked account — a successful `reset` also clears the lock and
++the failed-attempt counter, so the user can log in again straight away.
++
+ ## Examples
+ 
+ ```console
+@@ -57,6 +89,17 @@ $ printf 'wrong password!!\n' | python -m accounts --store users.db login alice
+ invalid credentials          # on stderr, exit status 1
+ $ printf 'short\n' | python -m accounts --store users.db register bob
+ password too short: at least 12 characters required   # stderr, exit status 2
++$ token=$(python -m accounts --store users.db reset-token alice)
++$ echo "$token"
++3Hk2hV1s_QfbUO4m9c0ApXnJ7YtRzLwEgDvB6qKiSxM
++$ printf 'not-the-token\nbrand new password\n' | python -m accounts --store users.db reset alice
++invalid token                # on stderr, exit status 1
++$ printf '%s\nbrand new password\n' "$token" | python -m accounts --store users.db reset alice
++password reset
++$ printf '%s\nanother new password\n' "$token" | python -m accounts --store users.db reset alice
++invalid token                # the token was one-time; exit status 1
++$ python -m accounts --store users.db reset-token nobody
++no such user: nobody         # on stderr, exit status 3
+ ```
+ 
+ ## Layout
+@@ -64,8 +107,9 @@ password too short: at least 12 characters required   # stderr, exit status 2
+ ```
+ src/accounts/__main__.py    python -m accounts entry point
+ src/accounts/cli.py         argument parsing, stdin handling, exit statuses
+-src/accounts/service.py     register / login / unlock / passwd / delete, validation, lockout
++src/accounts/service.py     register / login / unlock / passwd / delete / reset, validation, lockout
+ src/accounts/passwords.py   scrypt hashing and constant-time verification
++src/accounts/tokens.py      one-time reset tokens: generation, hashing, expiry
+ src/accounts/store.py       the JSON store file: tolerant reads, atomic writes
+ src/accounts/errors.py      exit statuses and the error type carrying them
+ tests/test_accounts.py      end-to-end tests driving python -m accounts
+@@ -84,6 +128,14 @@ account, n=2^14, r=8, p=1, 32-byte key) and compared with
+ `hmac.compare_digest`. Each record keeps its own salt and cost parameters, so
+ the parameters can be raised later without invalidating existing accounts.
+ 
++A reset token is 32 random bytes in URL-safe text form
++(`secrets.token_urlsafe`) and is shown only once, by `reset-token`. The account
++record keeps a `reset_token` entry with a SHA-256 digest of the token, the
++moment it was issued and the moment it expires — so a copy of the store file
++yields no usable tokens. A plain digest is enough here, unlike for passwords:
++a 256-bit random token cannot be guessed or looked up in a dictionary. Using a
++token deletes that entry, which is what makes it one-time.
++
+ The store is a JSON object (`{"version": 1, "users": {…}}`) written with
+ owner-only permissions (0600). Writes go to a temporary file in the same
+ directory, are flushed and fsynced, then renamed over the target, so an
+@@ -112,3 +164,23 @@ reads as an empty store; a corrupt one is reported rather than silently reset.
+   trailing spaces are significant; a trailing `\r` from CRLF input is removed.
+ - `unlock`, `passwd` and `delete` print a short confirmation line; only the
+   `registered USERNAME` and `ok` outputs are fixed by the specification.
++- `reset-token` and `reset` report a username that does not exist as no such
++  user (status 3), as specified, even though `login` deliberately does not.
++- In `reset` the token is checked before the new password's length, so a wrong
++  token together with a short password gives status 1. A rejected password
++  writes nothing to the store, which is what keeps the token usable.
++- A failed `reset` does not count towards the lockout: the counter exists to
++  slow password guessing, and a 256-bit token is not worth guessing. The lock
++  does not block `reset-token` or `reset` either, since a reset is how a
++  locked-out user gets back in; a successful `reset` therefore also clears the
++  lock and the counter, so the new password works immediately.
++- Issuing a token invalidates any token the account still had, rather than
++  letting several be valid at once.
++- The token line is read like a password except that surrounding whitespace is
++  removed — a token never contains whitespace, so stripping it only forgives
++  copy-and-paste and can never make an invalid token valid. End of input is an
++  empty token, which is reported as `invalid token`.
++- `--ttl` applies only to `reset-token`; giving it to another command, or a
++  value that is not a positive whole number of seconds, is a usage error
++  (status 2). A token expires the moment `--ttl` seconds have elapsed, and an
++  entry whose expiry cannot be read counts as expired.
+diff --git a/src/accounts/__init__.py b/src/accounts/__init__.py
+index 4512337..1b1e131 100644
+--- a/src/accounts/__init__.py
++++ b/src/accounts/__init__.py
+@@ -6,4 +6,4 @@ Run as ``python -m accounts --store PATH COMMAND USERNAME`` with ``src/`` on
+ 
+ __all__ = ["__version__"]
+ 
+-__version__ = "1.0.0"
++__version__ = "1.1.0"
+diff --git a/src/accounts/cli.py b/src/accounts/cli.py
+index e787509..3999a92 100644
+--- a/src/accounts/cli.py
++++ b/src/accounts/cli.py
+@@ -3,6 +3,7 @@
+ Usage::
+ 
+     python -m accounts --store PATH COMMAND USERNAME
++    python -m accounts --store PATH reset-token USERNAME [--ttl SECONDS]
+ 
+ Passwords are never given on the command line: each command reads the
+ passwords it needs from standard input, one per line.
+@@ -18,18 +19,35 @@ from . import __version__
+ from .errors import EXIT_OK, AccountsError, ValidationError
+ from .service import AccountService
+ from .store import Store
++from .tokens import DEFAULT_TTL_SECONDS
+ 
+-COMMANDS = ("register", "login", "unlock", "passwd", "delete")
++COMMANDS = ("register", "login", "unlock", "passwd", "delete", "reset-token", "reset")
+ 
+-# How many password lines each command consumes from standard input.
+-PASSWORD_LINES = {
++# How many lines each command consumes from standard input.
++STDIN_LINES = {
+     "register": 1,  # new password
+     "login": 1,  # password
+     "unlock": 0,
+     "passwd": 2,  # current password, then new password
+     "delete": 1,  # password
++    "reset-token": 0,
++    "reset": 2,  # reset token, then new password
+ }
+ 
++# Commands that accept --ttl.
++TTL_COMMANDS = ("reset-token",)
++
++
++def ttl_seconds(value: str) -> int:
++    """argparse type for ``--ttl``: a positive whole number of seconds."""
++    try:
++        seconds = int(value, 10)
++    except ValueError:
++        raise argparse.ArgumentTypeError(f"{value!r} is not a whole number of seconds") from None
++    if seconds <= 0:
++        raise argparse.ArgumentTypeError("a positive number of seconds is required")
++    return seconds
++
+ 
+ def build_parser() -> argparse.ArgumentParser:
+     parser = argparse.ArgumentParser(
+@@ -39,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
+             "Passwords are read from standard input, one per line."
+         ),
+         epilog=(
+-            "exit status: 0 success, 1 invalid credentials, 2 invalid username or "
++            "exit status: 0 success, 1 invalid credentials or reset token, 2 invalid username or "
+             "password, 3 no such user / user already exists, 4 account locked, "
+             "5 store error"
+         ),
+@@ -50,6 +68,16 @@ def build_parser() -> argparse.ArgumentParser:
+         metavar="PATH",
+         help="path to the account store file (created on first use)",
+     )
++    parser.add_argument(
++        "--ttl",
++        type=ttl_seconds,
++        default=None,
++        metavar="SECONDS",
++        help=(
++            "lifetime of a reset-token, in seconds "
++            f"(default {DEFAULT_TTL_SECONDS}); only for reset-token"
++        ),
++    )
+     parser.add_argument("--version", action="version", version=f"accounts {__version__}")
+     parser.add_argument("command", choices=COMMANDS, metavar="COMMAND", help=", ".join(COMMANDS))
+     parser.add_argument("username", metavar="USERNAME", help="the account to act on")
+@@ -57,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
+ 
+ 
+ def read_password(stream: IO[str]) -> str:
+-    """Read one password line from ``stream``.
++    """Read one password line from ``stream`` (also used for a reset token).
+ 
+     The trailing newline (and a preceding carriage return) is removed; any
+     other character, including leading or trailing spaces, is part of the
+@@ -83,23 +111,36 @@ def main(argv: Sequence[str] | None = None) -> int:
+     stdout = sys.stdout
+     stderr = sys.stderr
+ 
++    if args.ttl is not None and args.command not in TTL_COMMANDS:
++        parser.error(f"--ttl is only valid with {', '.join(TTL_COMMANDS)}")
++
+     try:
+-        passwords = [read_password(stdin) for _ in range(PASSWORD_LINES[args.command])]
++        lines = [read_password(stdin) for _ in range(STDIN_LINES[args.command])]
+ 
+         store = Store(args.store)
+         store.ensure_exists()
+         service = AccountService(store)
+ 
+         if args.command == "register":
+-            message = service.register(args.username, passwords[0])
++            message = service.register(args.username, lines[0])
+         elif args.command == "login":
+-            message = service.login(args.username, passwords[0])
++            message = service.login(args.username, lines[0])
+         elif args.command == "unlock":
+             message = service.unlock(args.username)
+         elif args.command == "passwd":
+-            message = service.passwd(args.username, passwords[0], passwords[1])
++            message = service.passwd(args.username, lines[0], lines[1])
+         elif args.command == "delete":
+-            message = service.delete(args.username, passwords[0])
++            message = service.delete(args.username, lines[0])
++        elif args.command == "reset-token":
++            # The token is the whole of standard output: one line, nothing else.
++            message = service.reset_token(
++                args.username, args.ttl if args.ttl is not None else DEFAULT_TTL_SECONDS
++            )
++        elif args.command == "reset":
++            # A token cannot contain whitespace, so surrounding whitespace in
++            # the first line is stripped: pasting a token stays forgiving
++            # without ever making an invalid token valid.
++            message = service.reset(args.username, lines[0].strip(), lines[1])
+         else:  # pragma: no cover - argparse restricts the choices
+             parser.error(f"unknown command: {args.command}")
+     except AccountsError as exc:
+diff --git a/src/accounts/errors.py b/src/accounts/errors.py
+index 997b35c..93f3af2 100644
+--- a/src/accounts/errors.py
++++ b/src/accounts/errors.py
+@@ -30,6 +30,13 @@ class InvalidCredentialsError(AccountsError):
+         super().__init__(message, EXIT_INVALID_CREDENTIALS)
+ 
+ 
++class InvalidTokenError(AccountsError):
++    """A reset token that is wrong, already used or expired."""
++
++    def __init__(self, message: str = "invalid token") -> None:
++        super().__init__(message, EXIT_INVALID_CREDENTIALS)
++
++
+ class NoSuchUserError(AccountsError):
+     def __init__(self, username: str) -> None:
+         super().__init__(f"no such user: {username}", EXIT_NOT_FOUND)
+diff --git a/src/accounts/service.py b/src/accounts/service.py
+index 576a53b..f8b0611 100644
+--- a/src/accounts/service.py
++++ b/src/accounts/service.py
+@@ -1,4 +1,4 @@
+-"""Account operations: register, login, unlock, passwd, delete.
++"""Account operations: register, login, unlock, passwd, delete, reset.
+ 
+ Each operation loads the store, applies its change, and saves the store again
+ (only when something actually changed).  Operations raise ``AccountsError``
+@@ -14,12 +14,14 @@ from typing import Any
+ from .errors import (
+     AccountLockedError,
+     InvalidCredentialsError,
++    InvalidTokenError,
+     NoSuchUserError,
+     UserExistsError,
+     ValidationError,
+ )
+ from .passwords import MIN_PASSWORD_LENGTH, dummy_verify, hash_password, verify_password
+ from .store import Store
++from .tokens import DEFAULT_TTL_SECONDS, make_record, new_token, verify_token
+ 
+ USERNAME_MIN = 3
+ USERNAME_MAX = 32
+@@ -169,3 +171,49 @@ class AccountService:
+         del data["users"][username]
+         self.store.save(data)
+         return f"deleted {username}"
++
++    def reset_token(self, username: str, ttl_seconds: int = DEFAULT_TTL_SECONDS) -> str:
++        """Issue a one-time reset token for ``username`` and return it.
++
++        The token itself is returned (and printed) only here; the store keeps
++        just its digest and expiry.  Issuing a token replaces any token the
++        account already had, and does not change the password, the lock or the
++        failed-attempt counter — an administrator can issue one for a locked
++        account, which is the point of a reset.
++        """
++        if ttl_seconds <= 0:
++            raise ValidationError("invalid --ttl: a positive number of seconds is required")
++
++        data = self.store.load()
++        record = self._get(data, username)
++
++        token=[REDACTED:assigned_secret]()
++        record["reset_token"] = make_record(token, ttl_seconds)
++        record["updated_at"] = _now()
++        self.store.save(data)
++        return token
++
++    def reset(self, username: str, token: str, new_password: str) -> str:
++        """Set a new password for ``username`` using a valid reset token.
++
++        The token is checked first, so a wrong, used or expired token fails
++        (status 1) whatever the new password looks like.  A new password that
++        is too short is rejected without touching the store, which leaves the
++        token usable for another try.  A token that is accepted is consumed:
++        its record is removed, so it cannot be used a second time.
++        """
++        data = self.store.load()
++        record = self._get(data, username)
++
++        if not verify_token(token, record.get("reset_token")):
++            raise InvalidTokenError()
++        validate_password(new_password)
++
++        record.pop("reset_token", None)
++        record.update(hash_password(new_password))
++        # The reset is the account's way back in, so it also clears a lockout.
++        record["failed_attempts"] = 0
++        record["locked"] = False
++        record["updated_at"] = _now()
++        self.store.save(data)
++        return "password reset"
+diff --git a/src/accounts/tokens.py b/src/accounts/tokens.py
+new file mode 100644
+index 0000000..2e579ce
+--- /dev/null
++++ b/src/accounts/tokens.py
+@@ -0,0 +1,104 @@
++"""One-time password-reset tokens.
++
++A token is 32 random bytes rendered as URL-safe text (``secrets.token_urlsafe``)
++and is shown exactly once, when ``reset-token`` prints it.  Only a SHA-256
++digest of it is kept in the store, together with the moment it expires::
++
++    "reset_token": {
++      "algorithm": "sha256",
++      "hash": "<hex>",
++      "issued_at": "2026-11-14T12:00:00+00:00",
++      "expires_at": "2026-11-14T12:15:00.123456+00:00"
++    }
++
++Hashing the token means a stolen store file does not hand out working reset
++tokens.  A plain digest is enough here (unlike for passwords): the token has
++256 bits of entropy, so it cannot be guessed or attacked with a dictionary.
++
++The record is removed from the account as soon as the token is used, which is
++what makes the token one-time; issuing a new token replaces any earlier one.
++"""
++
++from __future__ import annotations
++
++import datetime as _dt
++import hashlib
++import hmac
++import secrets
++from typing import Any
++
++#: Default lifetime of a reset token, in seconds (15 minutes).
++DEFAULT_TTL_SECONDS = 900
++
++TOKEN_BYTES = 32
++TOKEN_ALGORITHM = "sha256"
++
++
++def now_utc() -> _dt.datetime:
++    """Return the current time as an aware UTC timestamp."""
++    return _dt.datetime.now(_dt.timezone.utc)
++
++
++def new_token() -> str:
++    """Return a fresh, unpredictable reset token."""
++    return secrets.token_urlsafe(TOKEN_BYTES)
++
++
++def hash_token(token: str) -> str:
++    """Return the hex digest stored for ``token``."""
++    return hashlib.sha256(token.encode("utf-8")).hexdigest()
++
++
++def make_record(token: str, ttl_seconds: int, now: _dt.datetime | None = None) -> dict[str, Any]:
++    """Return the JSON-serialisable record describing ``token``."""
++    moment = now or now_utc()
++    expires = moment + _dt.timedelta(seconds=ttl_seconds)
++    return {
++        "algorithm": TOKEN_ALGORITHM,
++        "hash": hash_token(token),
++        "issued_at": moment.replace(microsecond=0).isoformat(),
++        "expires_at": expires.isoformat(),
++    }
++
++
++def _expires_at(record: dict[str, Any]) -> _dt.datetime | None:
++    """Return the expiry of ``record``, or ``None`` if it cannot be read."""
++    raw = record.get("expires_at")
++    if not isinstance(raw, str):
++        return None
++    try:
++        moment = _dt.datetime.fromisoformat(raw)
++    except ValueError:
++        return None
++    if moment.tzinfo is None:  # a naive timestamp is read as UTC
++        moment = moment.replace(tzinfo=_dt.timezone.utc)
++    return moment
++
++
++def is_expired(record: dict[str, Any], now: _dt.datetime | None = None) -> bool:
++    """Say whether ``record`` has expired.
++
++    A record without a readable expiry counts as expired, so a damaged or
++    hand-edited entry can never be used to reset a password.
++    """
++    expires = _expires_at(record)
++    if expires is None:
++        return True
++    return (now or now_utc()) >= expires
++
++
++def verify_token(token: str, record: Any, now: _dt.datetime | None = None) -> bool:
++    """Check ``token`` against a record made by :func:`make_record`.
++
++    Returns ``False`` for a wrong token, for an expired one, and for a missing
++    or unusable record (which is also how an already used token looks, since
++    using a token deletes its record).
++    """
++    if not isinstance(record, dict) or record.get("algorithm") != TOKEN_ALGORITHM:
++        return False
++    expected = record.get("hash")
++    if not isinstance(expected, str) or not expected or not token:
++        return False
++    if is_expired(record, now):
++        return False
++    return hmac.compare_digest(hash_token(token), expected)
+diff --git a/tests/test_accounts.py b/tests/test_accounts.py
+index efc9c84..4f6876a 100644
+--- a/tests/test_accounts.py
++++ b/tests/test_accounts.py
+@@ -12,6 +12,7 @@ import os
+ import subprocess
+ import sys
+ import tempfile
++import time
+ import unittest
+ from pathlib import Path
+ 
+@@ -336,6 +337,194 @@ class TestDelete(CliTestCase):
+         self.assertResult(self.login("alice", OTHER_PASSWORD), EXIT_OK)
+ 
+ 
++class ResetTestCase(CliTestCase):
++    """Shared helpers for the password-reset commands."""
++
++    def reset_token(self, username: str = "alice", *ttl: str):
++        return self.run_cmd("reset-token", username, *ttl)
++
++    def token_for(self, username: str = "alice", *ttl: str) -> str:
++        proc = self.reset_token(username, *ttl)
++        self.assertResult(proc, EXIT_OK, stderr="")
++        lines = proc.stdout.splitlines()
++        self.assertEqual(len(lines), 1, f"expected one line, got {proc.stdout!r}")
++        self.assertTrue(lines[0])
++        return lines[0]
++
++    def reset(self, username: str, token: str, new_password: str):
++        return self.run_cmd("reset", username, stdin=f"{token}\n{new_password}\n")
++
++
++class TestResetToken(ResetTestCase):
++    def test_token_is_printed_on_a_line_of_its_own(self):
++        self.register()
++        proc = self.reset_token()
++        self.assertResult(proc, EXIT_OK, stderr="")
++        self.assertEqual(len(proc.stdout.splitlines()), 1)
++        self.assertEqual(proc.stdout, proc.stdout.strip() + "\n")
++
++    def test_unknown_user_fails_with_status_three(self):
++        self.register()
++        proc = self.reset_token("ghost")
++        self.assertResult(proc, EXIT_NOT_FOUND, stdout="")
++        self.assertTrue(proc.stderr.strip())
++
++    def test_unknown_user_in_a_missing_store(self):
++        self.assertResult(self.reset_token("ghost"), EXIT_NOT_FOUND, stdout="")
++
++    def test_token_is_not_stored_in_cleartext(self):
++        self.register()
++        token=[REDACTED:assigned_secret]()
++        self.assertNotIn(token, self.store.read_text(encoding="utf-8"))
++
++    def test_issuing_a_token_does_not_change_the_password(self):
++        self.register()
++        self.token_for()
++        self.assertResult(self.login(), EXIT_OK, stdout="ok\n")
++
++    def test_each_token_is_different(self):
++        self.register()
++        self.assertNotEqual(self.token_for(), self.token_for())
++
++    def test_a_new_token_replaces_the_previous_one(self):
++        self.register()
++        first = self.token_for()
++        second = self.token_for()
++        self.assertResult(self.reset("alice", first, OTHER_PASSWORD), EXIT_CREDS)
++        self.assertResult(self.reset("alice", second, OTHER_PASSWORD), EXIT_OK)
++
++    def test_token_can_be_issued_for_a_locked_account(self):
++        self.register()
++        for _ in range(5):
++            self.login("alice", "definitely wrong pw")
++        self.assertResult(self.login(), EXIT_LOCKED)
++        self.assertResult(self.reset("alice", self.token_for(), OTHER_PASSWORD), EXIT_OK)
++
++    def test_reset_token_reads_no_stdin(self):
++        self.register()
++        self.assertResult(self.run_cmd("reset-token", "alice", stdin=""), EXIT_OK)
++
++    def test_invalid_ttl_is_a_usage_error(self):
++        self.register()
++        for ttl in ("0", "-1", "abc", "1.5", ""):
++            with self.subTest(ttl=ttl):
++                proc = self.reset_token("alice", "--ttl", ttl)
++                self.assertResult(proc, EXIT_VALIDATION, stdout="")
++
++    def test_ttl_is_rejected_for_other_commands(self):
++        self.register()
++        proc = self.run_cmd("login", "alice", "--ttl", "60", stdin=f"{PASSWORD}\n")
++        self.assertResult(proc, EXIT_VALIDATION, stdout="")
++
++
++class TestReset(ResetTestCase):
++    def test_reset_sets_the_new_password(self):
++        self.register()
++        proc = self.reset("alice", self.token_for(), OTHER_PASSWORD)
++        self.assertResult(proc, EXIT_OK, stdout="password reset\n", stderr="")
++        self.assertResult(self.login("alice", OTHER_PASSWORD), EXIT_OK, stdout="ok\n")
++        self.assertResult(self.login("alice", PASSWORD), EXIT_CREDS)
++
++    def test_token_works_only_once(self):
++        self.register()
++        token=[REDACTED:assigned_secret]()
++        self.assertResult(self.reset("alice", token, OTHER_PASSWORD), EXIT_OK)
++        proc = self.reset("alice", token, "yet another password")
++        self.assertResult(proc, EXIT_CREDS, stdout="", stderr="invalid token\n")
++        self.assertResult(self.login("alice", OTHER_PASSWORD), EXIT_OK)
++
++    def test_wrong_token_is_rejected_and_keeps_the_password(self):
++        self.register()
++        self.token_for()
++        proc = self.reset("alice", "not-the-token", OTHER_PASSWORD)
++        self.assertResult(proc, EXIT_CREDS, stdout="", stderr="invalid token\n")
++        self.assertResult(self.login("alice", PASSWORD), EXIT_OK)
++
++    def test_reset_without_any_token_issued(self):
++        self.register()
++        proc = self.reset("alice", "made-up-token", OTHER_PASSWORD)
++        self.assertResult(proc, EXIT_CREDS, stdout="", stderr="invalid token\n")
++
++    def test_empty_stdin_is_an_invalid_token(self):
++        self.register()
++        self.token_for()
++        proc = self.run_cmd("reset", "alice", stdin="")
++        self.assertResult(proc, EXIT_CREDS, stdout="", stderr="invalid token\n")
++
++    def test_expired_token_is_rejected(self):
++        self.register()
++        token=[REDACTED:assigned_secret]("alice", "--ttl", "1")
++        time.sleep(1.5)
++        proc = self.reset("alice", token, OTHER_PASSWORD)
++        self.assertResult(proc, EXIT_CREDS, stdout="", stderr="invalid token\n")
++        self.assertResult(self.login("alice", PASSWORD), EXIT_OK)
++
++    def test_token_within_its_ttl_is_accepted(self):
++        self.register()
++        token=[REDACTED:assigned_secret]("alice", "--ttl", "600")
++        self.assertResult(self.reset("alice", token, OTHER_PASSWORD), EXIT_OK)
++
++    def test_short_new_password_is_rejected_and_token_survives(self):
++        self.register()
++        token=[REDACTED:assigned_secret]()
++        proc = self.reset("alice", token, "tiny")
++        self.assertResult(proc, EXIT_VALIDATION, stdout="")
++        self.assertTrue(proc.stderr.strip())
++        self.assertResult(self.login("alice", PASSWORD), EXIT_OK)
++        self.assertResult(self.reset("alice", token, OTHER_PASSWORD), EXIT_OK)
++        self.assertResult(self.login("alice", OTHER_PASSWORD), EXIT_OK)
++
++    def test_new_password_of_exactly_twelve_characters(self):
++        self.register()
++        self.assertResult(self.reset("alice", self.token_for(), "c" * 12), EXIT_OK)
++        self.assertResult(self.login("alice", "c" * 12), EXIT_OK)
++
++    def test_wrong_token_beats_a_short_password(self):
++        self.register()
++        self.token_for()
++        proc = self.reset("alice", "wrong", "tiny")
++        self.assertResult(proc, EXIT_CREDS, stderr="invalid token\n")
++
++    def test_unknown_user_fails_with_status_three(self):
++        self.register()
++        proc = self.reset("ghost", "some-token", OTHER_PASSWORD)
++        self.assertResult(proc, EXIT_NOT_FOUND, stdout="")
++
++    def test_a_token_is_only_good_for_its_own_account(self):
++        self.register("alice")
++        self.register("bob", OTHER_PASSWORD)
++        token=[REDACTED:assigned_secret]("alice")
++        proc = self.reset("bob", token, "bobs new password")
++        self.assertResult(proc, EXIT_CREDS, stderr="invalid token\n")
++        self.assertResult(self.login("bob", OTHER_PASSWORD), EXIT_OK)
++
++    def test_reset_uses_a_new_salt(self):
++        self.register()
++        before = self.users()["alice"]["salt"]
++        self.reset("alice", self.token_for(), OTHER_PASSWORD)
++        self.assertNotEqual(before, self.users()["alice"]["salt"])
++
++    def test_reset_clears_a_lockout(self):
++        self.register()
++        for _ in range(5):
++            self.login("alice", "definitely wrong pw")
++        self.assertResult(self.reset("alice", self.token_for(), OTHER_PASSWORD), EXIT_OK)
++        self.assertEqual(self.users()["alice"]["failed_attempts"], 0)
++        self.assertFalse(self.users()["alice"]["locked"])
++        self.assertResult(self.login("alice", OTHER_PASSWORD), EXIT_OK, stdout="ok\n")
++
++    def test_used_token_leaves_no_record_behind(self):
++        self.register()
++        self.reset("alice", self.token_for(), OTHER_PASSWORD)
++        self.assertNotIn("reset_token", self.users()["alice"])
++
++    def test_reset_leaves_other_accounts_alone(self):
++        self.register("alice")
++        self.register("bob", OTHER_PASSWORD)
++        self.reset("alice", self.token_for("alice"), "alices new password")
++        self.assertResult(self.login("bob", OTHER_PASSWORD), EXIT_OK)
++
++
+ class TestStoreFile(CliTestCase):
+     def test_store_is_created_on_first_use(self):
+         self.assertFalse(self.store.exists())
+@@ -456,6 +645,48 @@ class TestUnits(unittest.TestCase):
+         with self.assertRaises(ValidationError):
+             validate_password("a" * 11)
+ 
++    def test_tokens_are_unguessable_and_verifiable(self):
++        from accounts.tokens import make_record, new_token, verify_token
++
++        token=[REDACTED:assigned_secret]()
++        self.assertGreaterEqual(len(token), 32)
++        self.assertNotEqual(token, new_token())
++        record = make_record(token, 900)
++        self.assertNotIn(token, json.dumps(record))
++        self.assertTrue(verify_token(token, record))
++        self.assertFalse(verify_token(token + "x", record))
++        self.assertFalse(verify_token("", record))
++
++    def test_token_expiry(self):
++        import datetime as dt
++
++        from accounts.tokens import is_expired, make_record, verify_token
++
++        issued = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.timezone.utc)
++        token = "a-token"
++        record = make_record(token, 900, now=issued)
++        self.assertFalse(is_expired(record, issued + dt.timedelta(seconds=899)))
++        self.assertTrue(is_expired(record, issued + dt.timedelta(seconds=900)))
++        self.assertTrue(verify_token(token, record, issued + dt.timedelta(seconds=1)))
++        self.assertFalse(verify_token(token, record, issued + dt.timedelta(seconds=901)))
++
++    def test_verify_token_rejects_missing_or_damaged_records(self):
++        from accounts.tokens import make_record, verify_token
++
++        token = "a-token"
++        record = make_record(token, 900)
++        self.assertFalse(verify_token(token, None))
++        self.assertFalse(verify_token(token, {}))
++        self.assertFalse(verify_token(token, "nonsense"))
++        for key, value in (
++            ("algorithm", "rot13"),
++            ("hash", ""),
++            ("expires_at", "not a timestamp"),
++            ("expires_at", None),
++        ):
++            with self.subTest(key=key, value=value):
++                self.assertFalse(verify_token(token, dict(record, **{key: value})))
++
+     def test_main_is_callable_in_process(self):
+         from accounts.cli import main

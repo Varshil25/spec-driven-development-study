@@ -1,0 +1,456 @@
+diff --git a/specs/001-logredact-cli/checklists/requirements.md b/specs/001-logredact-cli/checklists/requirements.md
+new file mode 100644
+index 0000000..d764f90
+--- /dev/null
++++ b/specs/001-logredact-cli/checklists/requirements.md
+@@ -0,0 +1,99 @@
++# Specification Quality Checklist: Log Redaction CLI
++
++**Purpose**: Validate specification completeness and quality before proceeding to planning
++**Created**: 2026-11-05
++**Feature**: [spec.md](../spec.md)
++
++**Review Ownership**: This checklist is a reviewer-owned requirements-quality review artifact. Mark an item `[x]` only when the reviewer determines the requirements-quality criterion is satisfied.
++**Marker Semantics**: `[x]` means the criterion has been reviewed and satisfied for requirements quality. It does not mean implementation work is complete.
++
++## Content Quality
++
++- [x] No implementation details (languages, frameworks, APIs) — see Note 1
++- [x] Focused on user value and business needs
++- [x] Written for non-technical stakeholders
++- [x] All mandatory sections completed
++
++## Requirement Completeness
++
++- [x] No [NEEDS CLARIFICATION] markers remain — resolved in iteration 2
++- [x] Requirements are testable and unambiguous
++- [x] Success criteria are measurable
++- [x] Success criteria are technology-agnostic (no implementation details)
++- [x] All acceptance scenarios are defined
++- [x] Edge cases are identified
++- [x] Scope is clearly bounded
++- [x] Dependencies and assumptions identified
++
++## Feature Readiness
++
++- [x] All functional requirements have clear acceptance criteria
++- [x] User scenarios cover primary flows
++- [x] Feature meets measurable outcomes defined in Success Criteria
++- [x] No implementation details leak into specification
++
++## Constitution Alignment (v1.0.0)
++
++- [x] Principle I (Standard Library Only): runtime dependency constraint recorded (A-10); no
++      third-party runtime dependency implied by any requirement
++- [x] Principle II (Fail Loudly): error behaviour stated for every invalid-input case —
++      unreadable file (FR-012), unrecognised option (SR-001), unreadable standard input (A-6),
++      failed output write (SR-009)
++- [x] Principle III (Every Requirement Is Testable): every FR/SR stated in observable terms;
++      SC-002 requires a complete requirement-to-test mapping
++- [x] Principle IV (Simplicity): A-9 forecloses configuration, extension points, and options
++      beyond `--count`; A-8 bounds the redaction categories
++- [x] Principle V (Secure by Default): dedicated Security Requirements section (SR-001..SR-009)
++      mapped to the Security Baseline controls, each stated testably
++- [x] Security Baseline — resource limits: enforced maximum input size fixed at 1 MiB per line
++      with memory-bounded detection (SR-005) and a fail-loud refusal path (FR-018)
++
++## Validation Iterations
++
++**Iteration 1 (2026-11-05)**: Initial spec reviewed. Findings and resolutions:
++
++1. *Overlap behaviour between the three redaction kinds was unspecified* — two different
++   implementations could produce different output for the same line. Resolved by adding FR-014
++   (fixed email → IPv4 → card precedence, redact once, never re-scan placeholders) and
++   Assumption A-2 recording why.
++2. *Fragment matching was unspecified* — whether a Luhn-valid 16-digit substring inside a longer
++   digit run is a card, and whether a dotted quad inside a version string is an IP. Resolved by
++   adding FR-013 and the corresponding edge cases.
++3. *Card separator rules were ambiguous* — "groups separated by single spaces or single hyphens"
++   did not say whether separators could be mixed within one number. Resolved in FR-006 (one
++   separator character throughout) with the rejected shapes listed under Edge Cases.
++4. *Byte-level output fidelity was implied but not required* — resolved by FR-008, FR-009, and
++   the edge cases covering trailing newlines, CRLF, and invalid UTF-8 (A-4).
++5. *Security requirements were absent*, which Principle V makes a blocking defect. Resolved by
++   adding SR-001..SR-009 and this Constitution Alignment section.
++6. *Resource limits* — the Security Baseline mandates an enforced maximum size per input, and no
++   reasonable default reconciles that with FR-009's promise that every line is emitted.
++   **Not resolved in this iteration**: raised as Question 1 for the requester.
++
++**Iteration 2 (2026-11-05)**: Question 1 answered — requester delegated the decision with the
++single constraint that it be handled safely. Resolution:
++
++1. SR-005 now fixes an enforced maximum single-line length of 1 MiB inclusive, and requires that
++   detection of an over-length line be itself memory-bounded (no unbounded read before refusal).
++2. FR-018 added: an over-length line stops the run with a diagnostic naming the input source and
++   exit status 2; no part of the line reaches standard output, and no `--count` summary is
++   written, so a partial tally cannot be mistaken for a complete one.
++3. FR-009 amended to name FR-018 as its one exception, so the two requirements no longer conflict.
++4. Edge case, User Story 4 scenarios 6-8, SC-010, and Assumption A-12 added to cover the cap
++   boundary (exactly 1 MiB accepted), the refusal path, the suppressed summary, and the rationale
++   for refusing over chunking.
++
++All 18 checklist items and all 6 constitution-alignment items now pass. No [NEEDS CLARIFICATION]
++markers remain.
++
++## Notes
++
++- **Note 1 (implementation details)**: The only technology names in the spec are the requester's
++  explicit delivery constraints — the invocation `python -m logredact [--count] [FILE ...]` in
++  FR-001, which is the tool's user-facing contract, and the runtime/packaging constraint recorded
++  in Assumption A-10. No framework, library, algorithm, or code-structure choice appears in any
++  requirement or success criterion. Reviewer judgement: this is a stated constraint on the
++  delivery, not implementation leakage, so the item passes.
++- No items remain open. The specification passes the Specification Gate in **Development Workflow
++  and Quality Gates** and is ready for `/speckit-plan`.
++- Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`.
+diff --git a/specs/001-logredact-cli/spec.md b/specs/001-logredact-cli/spec.md
+new file mode 100644
+index 0000000..9c14bcc
+--- /dev/null
++++ b/specs/001-logredact-cli/spec.md
+@@ -0,0 +1,345 @@
++# Feature Specification: Log Redaction CLI
++
++**Feature Branch**: `001-logredact-cli`
++
++**Created**: 2026-11-05
++
++**Status**: Draft
++
++**Input**: User description: "Build a command-line tool that removes personal data from log files before they are shared. Run it as `python -m logredact [--count] [FILE ...]`. It reads each FILE in the order given, or standard input when no FILE is given, and writes every line to standard output with emails replaced by `[EMAIL]`, IPv4 addresses replaced by `[IP]`, and Luhn-valid 13-19 digit payment card numbers (optionally grouped with single spaces or hyphens) replaced by `[CARD]`. Everything else is output unchanged. With `--count`, a summary `emails=N ips=N cards=N` is written to standard error after all output. If a FILE cannot be read, an error naming the file goes to standard error and the exit status is 2; otherwise the exit status is 0. Python 3.11+, standard library only, package `logredact` under `src/`."
++
++## User Scenarios & Testing *(mandatory)*
++
++### User Story 1 - Redact a piped log stream (Priority: P1)
++
++An engineer is about to paste a chunk of application log into a ticket. They pipe the log through
++the tool and get back the same text with every email address, IPv4 address, and payment card
++number replaced by a fixed placeholder, so the text is safe to share while still being readable
++and diffable against the original.
++
++**Why this priority**: This is the whole purpose of the tool and the smallest useful slice. With
++only this story implemented the tool already prevents personal data from leaving the
++organisation. Every other story is a convenience layered on top.
++
++**Independent Test**: Feed a known line on standard input with no arguments and compare standard
++output byte-for-byte against the expected redacted line. Delivers the core protective value with
++no file handling and no flags.
++
++**Acceptance Scenarios**:
++
++1. **Given** no FILE arguments, **When** `user jane@example.com from 10.0.0.7\n` is written to
++   standard input, **Then** standard output is exactly `user [EMAIL] from [IP]\n` and the exit
++   status is 0.
++2. **Given** no FILE arguments, **When** `paid with 4111 1111 1111 1111, ref 1234567890123\n` is
++   written to standard input, **Then** standard output is exactly
++   `paid with [CARD], ref 1234567890123\n` (the Luhn-failing 13-digit run is untouched).
++3. **Given** no FILE arguments, **When** a line containing no email, no IPv4 address, and no
++   Luhn-valid card number is written to standard input, **Then** standard output is that line,
++   byte-for-byte unchanged.
++4. **Given** no FILE arguments, **When** `host 999.1.1.1 and 192.168.0.10\n` is written to
++   standard input, **Then** standard output is exactly `host 999.1.1.1 and [IP]\n`.
++5. **Given** no FILE arguments, **When** standard input is empty, **Then** standard output is
++   empty and the exit status is 0.
++
++---
++
++### User Story 2 - Redact named log files in order (Priority: P2)
++
++An operator has several rotated log files to hand to a vendor. They name the files on the command
++line in the order they want them read and capture one redacted stream, rather than redacting each
++file by hand.
++
++**Why this priority**: It is the common real-world invocation, but it is additive — the redaction
++behaviour it depends on is already proven by Story 1.
++
++**Independent Test**: Create two small files with known content, run the tool with both names, and
++confirm standard output is the redaction of the first file followed by the redaction of the
++second. Testable without `--count` and without error cases.
++
++**Acceptance Scenarios**:
++
++1. **Given** files `a.log` and `b.log` exist and are readable, **When** the tool is run with
++   `a.log b.log`, **Then** standard output is the redacted contents of `a.log` followed
++   immediately by the redacted contents of `b.log`, and the exit status is 0.
++2. **Given** files `a.log` and `b.log` exist, **When** the tool is run with `b.log a.log`,
++   **Then** the output order is reversed accordingly (operand order is honoured, not sorted).
++3. **Given** one FILE argument is given, **When** the tool runs, **Then** standard input is not
++   read at all.
++4. **Given** the same file name is given twice, **When** the tool runs, **Then** its redacted
++   contents appear twice in standard output.
++
++---
++
++### User Story 3 - See how much was redacted (Priority: P3)
++
++A reviewer needs to confirm that redaction actually happened — and roughly how much — before
++approving a log for release. They add `--count` and read a one-line tally on standard error,
++leaving the redacted log on standard output clean enough to redirect to a file.
++
++**Why this priority**: It is a verification aid, not a protective function. The tool is already
++safe without it.
++
++**Independent Test**: Run with `--count` over input with a known number of each kind of match and
++assert the exact standard-error line, while standard output is unaffected by the flag.
++
++**Acceptance Scenarios**:
++
++1. **Given** `--count` is supplied, **When** `a@b.io 1.2.3.4\n` is read from standard input,
++   **Then** standard output is exactly `[EMAIL] [IP]\n` and standard error is exactly
++   `emails=1 ips=1 cards=0\n`.
++2. **Given** `--count` is supplied, **When** the input contains no redactable values, **Then**
++   standard error is exactly `emails=0 ips=0 cards=0\n` and the exit status is 0.
++3. **Given** `--count` is supplied and multiple FILE operands are read, **When** the run finishes,
++   **Then** the summary reports the totals across all operands, not per file.
++4. **Given** `--count` is not supplied, **When** the run succeeds, **Then** nothing is written to
++   standard error.
++5. **Given** `--count` is supplied, **When** standard output is redirected to a file, **Then** the
++   summary does not appear in that file.
++
++---
++
++### User Story 4 - Fail loudly on an unreadable file (Priority: P3)
++
++An operator mistypes a file name or points at a file they cannot read. Instead of silently
++producing a short, apparently-complete redacted log, the tool tells them which file it could not
++read and exits with a failure status their script can detect.
++
++**Why this priority**: Low frequency, but a silent partial redaction would be mistaken for a
++complete one, which is the most expensive failure mode this tool has.
++
++**Independent Test**: Run the tool naming a path that does not exist and assert the exit status is
++2 and that standard error identifies that path.
++
++**Acceptance Scenarios**:
++
++1. **Given** a FILE operand naming a path that does not exist, **When** the tool runs, **Then**
++   standard error contains a message that includes that path as written on the command line, and
++   the exit status is 2.
++2. **Given** a FILE operand naming a path whose permissions deny reading, **When** the tool runs,
++   **Then** standard error contains a message naming that path and the exit status is 2.
++3. **Given** a FILE operand naming a directory, **When** the tool runs, **Then** standard error
++   contains a message naming that path and the exit status is 2.
++4. **Given** an unreadable FILE, **When** the tool exits, **Then** standard error contains no
++   Python traceback and no contents of any input file.
++5. **Given** an unrecognised option such as `--verbose`, **When** the tool runs, **Then** standard
++   error describes the rejected option, nothing is written to standard output, and the exit status
++   is non-zero.
++6. **Given** an input whose third line is 1 MiB + 1 characters long, **When** the tool runs,
++   **Then** the first two lines appear redacted on standard output, no part of the third line
++   appears on standard output, standard error names the input source and reports that a line
++   exceeded the maximum length, and the exit status is 2.
++7. **Given** an input containing a line of exactly 1 MiB including its terminator, **When** the
++   tool runs, **Then** that line is redacted and emitted normally and the exit status is 0.
++8. **Given** an over-length line and the `--count` flag, **When** the tool exits with status 2,
++   **Then** no `emails=N ips=N cards=N` summary is written, so a partial tally cannot be mistaken
++   for a complete one.
++
++---
++
++### Edge Cases
++
++- **Adjacent and overlapping candidates**: a value that could be read as more than one kind of
++  personal data (for example a digit run that is both a Luhn-valid card and contains dots) is
++  redacted exactly once, under the fixed precedence in FR-014. Placeholders already written are
++  never themselves re-scanned or re-counted.
++- **Digits adjacent to a card candidate**: a 22-digit run that happens to contain a Luhn-valid
++  16-digit substring is not a card number — a card candidate must not be flanked by another digit
++  (FR-013).
++- **Separator shape**: `4111 1111 1111 1111` and `4111-1111-1111-1111` are card numbers;
++  `4111  1111  1111  1111` (double spaces), `4111 1111-1111 1111` (mixed), and
++  `4111--1111--1111--1111` are not card candidates under FR-006 and are left alone.
++- **Octet boundaries**: `0.0.0.0` and `255.255.255.255` are IPv4 addresses; `256.1.1.1`,
++  `999.1.1.1`, `1.2.3`, and `1.2.3.4.5` are not and are left alone.
++- **Dotted version-like numbers**: `10.0.0.7` inside a longer token such as `v10.0.0.7-beta` —
++  behaviour is fixed by FR-013 (an IPv4 candidate must not be flanked by a digit or a dot).
++- **Email shapes**: `jane.doe+test@mail.example.com` is redacted. A trailing sentence period
++  (`mail jane@example.com.`) leaves the period in place.
++- **Last line without a trailing newline**: the final line is emitted without a newline the tool
++  did not receive; no newline is added and none is removed.
++- **CRLF and other line endings**: the bytes that terminate each line are passed through
++  unchanged.
++- **Bytes that are not valid UTF-8**: such bytes are passed through to standard output unchanged
++  rather than causing a failure or being replaced (Assumption A-4).
++- **Empty input / empty file**: produces empty output, exit status 0, and (with `--count`) an
++  all-zero summary.
++- **Very long single line**: a line of up to 1 MiB is redacted and emitted normally. A longer line
++  is refused rather than processed: the run stops with a diagnostic naming the source and exit
++  status 2 (FR-018), and none of that line reaches standard output. A line exactly at the cap is
++  accepted; the cap is inclusive.
++- **Downstream pipe closed early** (for example `| head -1`): the tool stops without a traceback
++  and without claiming success it did not achieve (Assumption A-7).
++- **A later FILE is unreadable after earlier ones were written**: output already written to
++  standard output stays written; the run still ends with status 2 (FR-012), so a caller must treat
++  a non-zero status as "output is incomplete".
++
++## Requirements *(mandatory)*
++
++### Functional Requirements
++
++- **FR-001**: The tool MUST be invocable as `python -m logredact [--count] [FILE ...]` and MUST
++  accept zero or more FILE operands.
++- **FR-002**: With no FILE operand, the tool MUST read its input from standard input.
++- **FR-003**: With one or more FILE operands, the tool MUST read every operand in the order given
++  and MUST NOT read standard input.
++- **FR-004**: The tool MUST replace every email address in the input with the literal `[EMAIL]`.
++  An email address is a local part of one or more characters drawn from letters, digits, and
++  `. _ % + -`, followed by `@`, followed by a dot-separated domain of letter/digit/hyphen labels
++  whose last label is at least two letters (so `jane.doe+test@mail.example.com` is redacted).
++- **FR-005**: The tool MUST replace every IPv4 address in the input with the literal `[IP]`. An
++  IPv4 address is four dot-separated decimal numbers, each 0-255 with no leading zeros beyond a
++  single `0`. A dotted quad with any component outside 0-255 (for example `999.1.1.1`) MUST be
++  left unchanged.
++- **FR-006**: The tool MUST replace every payment card number in the input with the literal
++  `[CARD]`. A card number is 13 to 19 decimal digits, written either as an unbroken run or as
++  groups of digits joined by a single space or a single hyphen, where the same separator
++  character is used throughout, and whose digits pass the Luhn checksum.
++- **FR-007**: A digit sequence that matches the shape of FR-006 but fails the Luhn checksum MUST
++  be left unchanged (for example `1234567890123`).
++- **FR-008**: Every character of input that is not part of a redacted match MUST be written to
++  standard output unchanged, in its original order and position relative to the placeholders.
++- **FR-009**: A line containing nothing to redact MUST be written to standard output byte-for-byte
++  as it was read, including its line terminator or the absence of one on a final line. The single
++  exception is a line exceeding the length cap of SR-005, which is governed by FR-018.
++- **FR-010**: With `--count`, the tool MUST write, after all redacted output has been written and
++  flushed, exactly one line to standard error of the form `emails=N ips=N cards=N`, where each N
++  is the total number of replacements of that kind made across all inputs in the run.
++- **FR-011**: Without `--count`, a successful run MUST write nothing to standard error.
++- **FR-012**: If any FILE operand cannot be opened or read, the tool MUST write a message to
++  standard error that includes that file name as given on the command line, and MUST exit with
++  status 2.
++- **FR-013**: Redaction MUST NOT match a fragment of a larger token: a card candidate MUST NOT be
++  immediately preceded or followed by a decimal digit, and an IPv4 candidate MUST NOT be
++  immediately preceded or followed by a decimal digit or a dot.
++- **FR-014**: When two candidate matches would overlap, the tool MUST apply a single fixed,
++  documented precedence — email, then IPv4 address, then card number — and MUST redact the
++  overlapping region exactly once, counting it once, under the winning kind. Text already
++  replaced by a placeholder MUST NOT be re-scanned.
++- **FR-015**: Any run that is not an error MUST exit with status 0.
++- **FR-016**: The tool MUST process input as a stream of lines, so that a run over an input far
++  larger than available memory completes without accumulating the whole input.
++- **FR-017**: The tool MUST NOT modify, truncate, or write to any FILE operand.
++- **FR-018**: On encountering a line longer than the SR-005 cap, the tool MUST stop processing,
++  write a message to standard error that names the input source (the file operand as given, or
++  standard input) and states that a line exceeded the maximum length, and exit with status 2. No
++  part of the over-length line — redacted, unredacted, or truncated — may be written to standard
++  output, and no `--count` summary is written for a run that ends this way. Output already
++  written for earlier lines remains written; the non-zero status is what tells the caller the
++  output is incomplete.
++
++### Security Requirements
++
++Derived from OWASP ASVS and the project Security Baseline; each is a functional requirement and
++MUST have at least one automated test.
++
++- **SR-001**: Command-line arguments MUST be validated against an allowlist — the single option
++  `--count`, the `--` end-of-options separator, and file operands. Any other option MUST be
++  rejected with a diagnostic on standard error and a non-zero exit status, with nothing written to
++  standard output (ASVS V5.1 input validation; Principle II fail-loudly).
++- **SR-002**: All input — command-line arguments, file contents, and standard input — MUST be
++  treated as untrusted data. No part of any input may be interpreted as a command, a format
++  string, a path to construct another path from, or code. The tool MUST NOT invoke a shell or any
++  subprocess.
++- **SR-003**: Diagnostics MUST NOT disclose personal data. An error message may name the file
++  operand the caller supplied, but MUST NOT include file contents, any input line, any matched
++  email address, IP address, or card number, or any fragment of one. No Python traceback may reach
++  standard error on a handled error path.
++- **SR-004**: The `--count` summary MUST consist only of the three integer totals in the FR-010
++  format. It MUST NOT include sample values, line numbers, or any other content derived from the
++  redacted data.
++- **SR-005**: Resource consumption MUST be bounded for any single input. Peak memory MUST be
++  bounded by one line at a time rather than by total input size (FR-016), and every pattern used
++  for matching MUST run in time linear in the length of the line, with no input able to trigger
++  catastrophic backtracking. The tool MUST enforce a maximum single-line length of 1 MiB
++  (1,048,576 characters, including the line terminator); a longer line MUST be handled per
++  FR-018. Detection of an over-length line MUST itself be memory-bounded: the tool MUST NOT read
++  more than the cap plus a small fixed margin of a single line into memory before rejecting it.
++- **SR-006**: Redaction MUST be complete, not partial: a redacted value MUST be replaced in full
++  by its placeholder, leaving no digits, characters, or length information from the original value
++  in the output.
++- **SR-007**: The tool MUST NOT write input data anywhere other than standard output and MUST NOT
++  create temporary files, caches, or log files containing input data.
++- **SR-008**: FILE operands MUST be opened read-only and exactly as supplied, with no path
++  construction, no globbing, and no following of a path outside what the caller named.
++- **SR-009**: A failure to write output MUST NOT be silently discarded: the tool MUST NOT report
++  success for a run whose redacted output was not fully written.
++
++### Key Entities
++
++- **Input source**: either a named file operand or standard input; carries the name used in any
++  diagnostic about it, and the order in which it is read.
++- **Line**: the unit of reading and writing; a run of input text with its original terminator,
++  processed independently of every other line.
++- **Redaction kind**: one of email, IPv4 address, or card number; each has a recognition rule, a
++  fixed placeholder (`[EMAIL]`, `[IP]`, `[CARD]`), and a precedence rank.
++- **Match**: a region of a line identified as one redaction kind, which is replaced by that kind's
++  placeholder and increments that kind's counter exactly once.
++- **Run tally**: three non-negative integers, one per redaction kind, accumulated over the whole
++  run and reported only when `--count` is given.
++
++## Success Criteria *(mandatory)*
++
++### Measurable Outcomes
++
++- **SC-001**: All three worked examples in the feature description reproduce byte-for-byte on
++  standard output and standard error, with the stated exit statuses — 3 of 3.
++- **SC-002**: 100% of FR and SR items in this specification map to at least one automated test,
++  with no unmapped requirement at the implementation gate.
++- **SC-003**: Across a corpus of lines containing no personal data, 100% are returned
++  byte-for-byte identical to the input.
++- **SC-004**: Across a corpus of near-miss values (out-of-range dotted quads such as `999.1.1.1`,
++  Luhn-failing digit runs, digit runs shorter than 13 or longer than 19, mis-separated groupings,
++  non-email `@` usages), 0 are redacted.
++- **SC-005**: Across a corpus of genuine emails, IPv4 addresses, and Luhn-valid card numbers in
++  all the groupings FR-006 allows, 100% are redacted and none appears in any form in the output.
++- **SC-006**: A run over an input at least 100 times larger than the tool's peak memory completes
++  successfully, and peak memory does not grow with total input size.
++- **SC-007**: Every trial that names an unreadable file ends with exit status 2 and a standard
++  error message containing that file name — 100% of trials.
++- **SC-008**: In every trial, no email address, IP address, card number, or fragment of one
++  appears on standard error — 100% of trials, including error and `--count` runs.
++- **SC-009**: A reviewer can confirm from the `--count` summary alone how many values of each kind
++  were removed, without opening the redacted output.
++- **SC-010**: Peak memory for any single run stays within a fixed bound of roughly the 1 MiB line
++  cap regardless of input size or line length, and no input — including a single line of 1 GB —
++  can make the tool exhaust memory or emit any part of an over-length line.
++
++## Assumptions
++
++- **A-1** (counting): Counts are per replacement made, not per distinct value and not per line; a
++  value appearing three times counts three times.
++- **A-2** (precedence): The email → IPv4 → card precedence of FR-014 is chosen because an email's
++  domain or local part can contain dotted-quad-like and digit-run-like text, so matching emails
++  first avoids carving a redacted email into pieces.
++- **A-3** (ordering of streams): The `--count` summary is written after standard output has been
++  flushed, so a caller watching both streams sees the complete log before the tally, as the
++  feature description requires.
++- **A-4** (encoding): Input is decoded as UTF-8 and bytes that are not valid UTF-8 are passed
++  through to standard output unchanged, so a log with a few corrupt bytes is still redacted rather
++  than rejected. Redaction rules operate on ASCII-range characters only.
++- **A-5** (exit status for bad usage): An unrecognised option exits with status 2, matching the
++  only failure status the feature description names, rather than introducing a second one.
++- **A-6** (standard input is never "unreadable"): A read failure on standard input is reported the
++  same way as a file read failure, naming the input as standard input, and exits with status 2.
++- **A-7** (closed downstream pipe): If standard output is closed early by the consumer, the tool
++  stops writing and terminates by the usual convention for that signal, without a traceback; this
++  is not counted as a successful complete run.
++- **A-8** (scope): Only the three categories named are in scope. Names, phone numbers, MAC
++  addresses, IPv6 addresses, national identifiers, and URLs containing credentials are explicitly
++  out of scope for this feature.
++- **A-9** (no configuration): Placeholders, patterns, and the output format are fixed. There is no
++  configuration file, no environment variable, and no option other than `--count`.
++- **A-10** (runtime constraint, given by the requester and required by project Principle I): the
++  tool runs on Python 3.11 or newer using only the standard library, as the package `logredact`
++  under `src/`, runnable via `python -m logredact` with `src/` on `PYTHONPATH`. This is a stated
++  constraint on the delivery, not a design choice made in this specification.
++- **A-11** (verification): Automated tests are written with `pytest`, the one development
++  dependency the project constitution permits.
++- **A-12** (line cap, decided on the requester's delegation to handle this safely): the cap is
++  1 MiB per line and an over-length line fails the run (FR-018). Reasoning: refusing is the only
++  option that cannot produce a silent redaction gap. Chunking a long line would bound memory too,
++  but a value straddling a chunk boundary could escape redaction — un-redacted personal data in
++  output that looks clean, which is precisely the failure this tool exists to prevent. Omitting
++  the cap would leave peak memory controlled by the input, which the Security Baseline forbids.
++  1 MiB is roughly 500x a typical syslog line and well above a single-line JSON payload, so the
++  refusal path should be unreachable for real logs; when it does fire, it is loud and the caller
++  learns which source was at fault.

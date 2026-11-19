@@ -1,0 +1,488 @@
+# Feature Specification: Phone Number Redaction and Output Folder
+
+**Feature Branch**: `002-phone-redaction-out-dir`
+
+**Created**: 2026-11-14
+
+**Status**: Draft
+
+**Input**: User description: "This repository already contains `logredact`, a command-line tool that removes personal data from log files. Read the existing code and any documentation in the repository before changing it. Change it as follows; everything else it does now must keep working exactly as it does. 1. **Phone numbers.** Phone numbers in international format, a `+` followed by 8 to 15 digits such as `+14155552671`, become `[PHONE]`. With `--count`, the summary on standard error becomes `emails=N ips=N cards=N phones=N`. 2. **Output folder.** A new option `--out-dir DIR` writes the redacted lines of each FILE to a file with the same name in DIR (the file's name only, without its directories) instead of to standard output. DIR is created, with any missing parent directories, if it does not exist, and an existing file of that name in DIR is replaced. When every FILE has been processed, the tool prints `wrote N files` to standard output, where N is the number of output files written. A FILE that cannot be read is handled as it is now: an error message naming the file on standard error, and exit status 2."
+
+## Context
+
+This feature **amends an existing, shipped tool**. The behaviour it starts from is specified in
+[`specs/001-redact-log-pii/spec.md`](../001-redact-log-pii/spec.md) and its CLI contract in
+[`specs/001-redact-log-pii/contracts/cli-contract.md`](../001-redact-log-pii/contracts/cli-contract.md).
+
+Requirement IDs below (`FR-001`, …) are **local to this document**. Where a requirement of the
+existing feature is referenced, it is written as `001:FR-025` to make the source unambiguous.
+
+Everything the tool does today that this document does not explicitly amend MUST continue to
+behave exactly as it does today (FR-023).
+
+## Clarifications
+
+### Session 2026-11-14
+
+- Q: When a `+` is followed by 16 or more digits that form a Luhn-valid card number (for
+  example `+4111111111111111`, today redacted to `+[CARD]`), is it still redacted as a card? →
+  A: No. A digit run immediately preceded by `+` is never a card. The phone rule keeps the
+  requested 8–15 digit bound, so a run of 16 or more digits is not a phone number either and is
+  left entirely unchanged. (The choice between dropping the upper bound and keeping it was
+  delegated; the 8–15 bound is kept because it is the bound the original request states.)
+- Q: When an `--out-dir` run fails partway, may the destination be left holding a stray or
+  half-written output file for the input that failed? → A: No — handle it safely. The
+  destination contains only complete output files at every exit: an input's output file is
+  created only once that input has opened successfully, and a partly-written output file is
+  removed before the tool exits 2. (Exact mechanism delegated.)
+- Q: Does the "output file would be its own input" check run for all FILEs up front, or only
+  when the offending FILE is reached? → A: Up front, with the FR-015 destination check, before
+  any FILE is read — a collision anywhere on the command line fails the run having read nothing
+  and written nothing. (Choice delegated; matches FR-015's fail-before-consuming pattern.)
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - Remove phone numbers from a shared log (Priority: P1)
+
+An engineer sanitizing a log before attaching it to a support ticket finds that customer and
+staff phone numbers written in international form (`+14155552671`) survive redaction today.
+They run the same command and the phone numbers are now replaced by a fixed placeholder, like
+every other identifier the tool already removes.
+
+**Why this priority**: It closes a live privacy gap in a tool that is already in use, and it
+needs no new options — every existing invocation benefits immediately.
+
+**Independent Test**: Pipe a line containing an international-format phone number into the tool
+with no arguments and confirm standard output contains `[PHONE]` in that position and is
+otherwise identical to the input.
+
+**Acceptance Scenarios**:
+
+1. **Given** the line `call +14155552671 now` on standard input, **When** the tool is run with
+   no arguments, **Then** standard output is exactly `call [PHONE] now` followed by a newline,
+   and the exit status is 0.
+2. **Given** the line `a@b.io +442071838750`, **When** the tool is run with `--count`, **Then**
+   standard output is exactly `[EMAIL] [PHONE]` and standard error is
+   `emails=1 ips=0 cards=0 phones=1`.
+3. **Given** the text `+1234567` (seven digits), **When** the tool is run, **Then** it appears
+   unchanged, because fewer than eight digits is not a phone number.
+4. **Given** the text `+1234567890123456` (sixteen digits), **When** the tool is run, **Then**
+   no `[PHONE]` placeholder is produced and no part of the digit run is replaced by `[PHONE]`.
+5. **Given** the line `ring +14155552671, then +442071838750.`, **When** the tool is run,
+   **Then** standard output is exactly `ring [PHONE], then [PHONE].` — both are replaced and the
+   trailing punctuation is preserved.
+6. **Given** input containing an email address, an IPv4 address, a Luhn-valid card number and a
+   phone number, **When** the tool is run with `--count`, **Then** each is replaced by its own
+   placeholder and the summary reports `emails=1 ips=1 cards=1 phones=1`.
+7. **Given** input that already contains the literal text `[PHONE]`, **When** the tool is run,
+   **Then** it passes through unchanged and the phone count is not incremented.
+8. **Given** the line `pay +4111111111111111 now` (a `+` followed by a Luhn-valid 16-digit run,
+   which today yields `pay +[CARD] now`), **When** the tool is run with `--count`, **Then**
+   standard output is exactly `pay +4111111111111111 now` and standard error is
+   `emails=0 ips=0 cards=0 phones=0` — a `+`-prefixed digit run is never a card (FR-003a).
+9. **Given** the line `pay 4111111111111111 now` with no `+`, **When** the tool is run with
+   `--count`, **Then** standard output is `pay [CARD] now` and the summary reports `cards=1`,
+   unchanged from today.
+
+---
+
+### User Story 2 - Sanitize a set of log files into an output folder (Priority: P2)
+
+The engineer has several rotated log files and wants a sanitized copy of **each one**, under its
+own name, rather than one concatenated stream. They name a destination folder and get one
+redacted file per input, ready to attach or archive, plus a one-line confirmation of how many
+files were produced.
+
+**Why this priority**: It is the main new capability for the file-based workflow, but it builds
+on redaction (Story 1 and the existing behaviour) and the tool remains fully usable without it.
+
+**Independent Test**: Run the tool with `--out-dir` and two input files, then confirm the
+destination folder contains two files named after the inputs, each holding that input's redacted
+lines, and that standard output is exactly `wrote 2 files`.
+
+**Acceptance Scenarios**:
+
+1. **Given** readable files `app.log` (containing `user jane@example.com`) and `web.log`
+   (containing `GET / from 10.0.0.7`), **When** the tool is run as
+   `python -m logredact --out-dir clean app.log web.log`, **Then** `clean/app.log` contains
+   `user [EMAIL]`, `clean/web.log` contains `GET / from [IP]`, standard output is exactly
+   `wrote 2 files` followed by a newline, and the exit status is 0.
+2. **Given** the same run, **When** it completes, **Then** no redacted log line appears on
+   standard output — the only thing written there is the `wrote N files` line.
+3. **Given** a destination folder that does not exist, and whose parent folders do not exist
+   either, **When** the tool is run with `--out-dir` naming it, **Then** the folder and all its
+   missing parents are created and the output files are written inside it.
+4. **Given** a destination folder that already contains a file with the same name as an output
+   file, **When** the tool is run, **Then** that file's previous contents are gone and it holds
+   only the redacted lines of this run.
+5. **Given** an input named with a path such as `logs/2026/app.log`, **When** the tool is run
+   with `--out-dir clean`, **Then** the output file is `clean/app.log` — the input's directories
+   are not reproduced inside the destination.
+6. **Given** an empty input file, **When** the tool is run with `--out-dir`, **Then** an empty
+   output file of that name exists in the destination and it counts towards `wrote N files`.
+7. **Given** one input file, **When** the tool is run with `--out-dir`, **Then** standard output
+   is exactly `wrote 1 files` — the wording does not change with the number.
+8. **Given** two input files and `--count`, **When** the tool is run with `--out-dir`, **Then**
+   standard output is `wrote 2 files`, standard error carries the one combined four-key summary
+   covering both files, and the summary is written after the `wrote N files` line.
+9. **Given** an input file whose redacted content has no trailing newline, carries CRLF line
+   endings, or contains bytes that are not valid UTF-8, **When** the tool is run with
+   `--out-dir`, **Then** the output file is byte-for-byte what standard output would have
+   received for that input without `--out-dir`.
+
+---
+
+### User Story 3 - Fail clearly when the output folder cannot be used (Priority: P3)
+
+The engineer points `--out-dir` at a path the tool cannot write into, or forgets to name any
+input file. Instead of silently dropping sanitized output or leaving a half-finished folder
+presented as complete, the tool says what went wrong and reports failure.
+
+**Why this priority**: It guards the new write path against the tool's worst failure mode — an
+apparently-complete set of sanitized files that is actually incomplete — but only matters once
+Story 2 exists.
+
+**Independent Test**: Run the tool with `--out-dir` naming a path that is an existing regular
+file, and confirm standard error names that path, nothing is written, and the exit status is 2.
+
+**Acceptance Scenarios**:
+
+1. **Given** a `--out-dir` path that cannot be created (for example, it names an existing
+   regular file, or permission is denied on its parent), **When** the tool is run, **Then**
+   standard error carries a diagnostic naming that path and stating what went wrong, no input
+   file is read, no `wrote N files` line and no `--count` summary are printed, no stack trace is
+   shown, and the exit status is 2.
+2. **Given** an output file inside the destination that cannot be written (for example it is an
+   existing directory, or permission is denied), **When** the tool is run, **Then** standard
+   error carries a diagnostic naming that output path, processing stops, no `wrote N files` line
+   and no `--count` summary are printed, and the exit status is 2.
+3. **Given** `--out-dir` and no input file at all, **When** the tool is run, **Then** standard
+   error carries a usage diagnostic explaining that `--out-dir` requires at least one FILE,
+   standard input is not read, standard output is empty, and the exit status is 2.
+4. **Given** two input files where the second cannot be read, **When** the tool is run with
+   `--out-dir`, **Then** the first input's output file exists and is complete, the destination
+   holds **no** file named after the second input, standard error names the unreadable input, no
+   `wrote N files` line and no `--count` summary are printed, and the exit status is 2.
+5. **Given** a run that stops partway through writing one input's output file (the destination
+   fills up, or the input fails mid-read), **When** the tool exits, **Then** the destination
+   holds no truncated file for that input — the partly-written file has been removed — while any
+   output file completed for an earlier input is still present and complete, and the exit
+   status is 2.
+6. **Given** an input file and a `--out-dir` whose output path is the very same file on disk
+   (for example `python -m logredact --out-dir . app.log` run in the folder holding `app.log`),
+   **When** the tool is run, **Then** standard error names that file, the file is left exactly
+   as it was, no `wrote N files` line is printed, and the exit status is 2.
+7. **Given** two inputs where only the **second** collides with its own output path (for
+   example `python -m logredact --out-dir out a.log out/b.log`), **When** the tool is run,
+   **Then** the run fails before reading anything: standard error names `out/b.log`, `out/b.log`
+   is unmodified, **no** `out/a.log` is written, no `wrote N files` line is printed, and the
+   exit status is 2.
+8. **Given** every input file is readable and the destination is writable, **When** the tool is
+   run with `--out-dir`, **Then** nothing is written to standard error (unless `--count` was
+   given) and the exit status is 0.
+
+---
+
+### Edge Cases
+
+**Phone numbers**
+
+- **Digit-count boundaries**: exactly 8 digits and exactly 15 digits after the `+` are phone
+  numbers; 7 digits and 16 digits are not, and neither is partially redacted.
+- **Longer digit run**: a `+` followed by more than 15 digits is not a phone number, and the
+  tool does not redact a 15-digit prefix of it and leave the remaining digits behind. It is not
+  redacted as a card number either (FR-003a), so the whole run including the `+` is left exactly
+  as it was, even when its digits are Luhn-valid and 16 to 19 long.
+- **Separators and spacing**: only an unbroken run of digits counts — `+1 415 555 2671` and
+  `+1-415-555-2671` are not phone numbers in this form, so the `+1` prefix is left alone and the
+  remaining text is treated exactly as it is today.
+- **Overlap with a card number**: in `+4111111111119` (a `+` followed by a Luhn-valid 13-digit
+  run) the phone candidate begins one character earlier than the card candidate, so the
+  leftmost-match rule already in force resolves it as a phone number. Such text is now `[PHONE]`
+  rather than `+[CARD]`, and it is counted as a phone rather than a card.
+- **Card-length digit run after a `+`**: in `+4111111111111111` (a `+` followed by a Luhn-valid
+  16-digit run) there is no phone number, because 16 digits exceeds the bound, and FR-003a
+  forbids reading it as a card. The whole text is left unchanged and nothing is counted, where
+  today it is `+[CARD]` counted as a card. Together with the previous bullet these are the only
+  two input shapes whose existing output changes beyond the addition of `[PHONE]` itself.
+- **Overlap with an email address**: in `+15551234567@example.com` the email address and the
+  phone number both start at the `+`, and the existing email-first precedence keeps the whole
+  span `[EMAIL]`, counted as an email. In `jane+15551234567@example.com` the email match starts
+  earlier and wins outright.
+- **No phone inside a longer number**: a `+` that is itself preceded by a digit (`5+14155552671`)
+  is still examined, because what precedes the `+` is not part of a phone number.
+- **Placeholder already present**: input containing the literal `[PHONE]` passes through
+  unchanged and is not counted.
+- **Nothing to count**: with `--count` and no phone number anywhere, the summary reports
+  `phones=0`, and the three existing keys keep their current meanings and positions.
+
+**Output folder**
+
+- **Destination already exists**: an existing folder is used as it is; nothing in it other than
+  the files this run writes is touched.
+- **Same name twice**: naming two inputs that share a file name (`a/app.log b/app.log`) writes
+  both, the second replacing the first, and both count towards `wrote N files`.
+- **Same input named twice**: naming the same input twice writes its output file twice, and it
+  counts twice, consistent with that input being read twice today (`001:FR-003`).
+- **Nothing to redact**: an input with no identifiers produces an output file byte-identical to
+  it.
+- **Unreadable input**: handled exactly as it is today — diagnostic naming the input, processing
+  stops, exit status 2 — with the `wrote N files` line suppressed so a partial run is never
+  presented as a complete one, and with no output file left in the destination under that
+  input's name (FR-017a).
+- **Interrupted write**: if a run stops partway through one output file, that partly-written
+  file is removed, so the destination never holds a truncated redaction that could be mistaken
+  for a finished one (FR-017a). Files completed for earlier inputs are kept.
+- **Output path that is its own input**: refused for any FILE on the command line, not just the
+  first, and refused before anything is read or written (FR-020).
+- **Without the option**: with no `--out-dir`, redacted lines go to standard output exactly as
+  today and no `wrote N files` line is ever printed.
+- **Early-closing consumer**: the `wrote N files` line is the only thing written to standard
+  output in an `--out-dir` run, so the existing quiet exit on an early-closing consumer
+  (`001:FR-028`) continues to apply to it.
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+**Phone numbers**
+
+- **FR-001**: The tool MUST replace each phone number with the literal text `[PHONE]`.
+- **FR-002**: A phone number is a `+` immediately followed by 8 to 15 decimal digits inclusive,
+  with no decimal digit immediately following the last of them. The `+` is part of the match and
+  MUST be replaced along with the digits.
+- **FR-003**: A `+` followed by fewer than 8 digits, or by more than 15 digits, MUST be left
+  entirely unchanged and MUST NOT be partially redacted.
+- **FR-003a**: An unbroken run of decimal digits whose first digit is immediately preceded by
+  `+` MUST NOT be recognised as a payment card number, whatever its length or Luhn status. A
+  `+`-prefixed digit run is therefore either a phone number (FR-002) or untouched; it is never
+  `[CARD]`. This overrides `001:FR-013` to `001:FR-017` for that shape only, and changes today's
+  output for a `+` immediately followed by a Luhn-valid run of 16 to 19 digits: `+4111111111111111`
+  is now left unchanged where it is `+[CARD]` today, and is counted as neither a phone nor a card.
+  Card candidates written with separators (`+4111 1111 1111 1111`) are not unbroken digit runs
+  and keep their current behaviour.
+- **FR-004**: Phone numbers MUST be resolved by the same single left-to-right pass as every
+  other type (`001:FR-018`): the candidate starting at the earliest position wins and scanning
+  resumes after the text it replaced.
+- **FR-005**: When a phone number and another type both start at the same position, precedence
+  MUST be email address, then IPv4 address, then payment card number, then phone number —
+  `001:FR-019` extended with phone number last. Consequently `+15551234567@example.com` is
+  replaced in full by `[EMAIL]` and counted as an email.
+- **FR-006**: The `[PHONE]` placeholder inserted by the tool MUST NOT itself be matched or
+  counted, consistent with `001:FR-020`.
+
+**Counting**
+
+- **FR-007**: With `--count`, the summary line written to standard error MUST have the exact
+  form `emails=N ips=N cards=N phones=N` — the three existing keys unchanged, in their existing
+  order, with `phones` appended as a fourth. All other properties of the summary are unchanged
+  from `001:FR-021`: one line, one summary per run covering every input together, written to
+  standard error after all output has been written, and suppressed both when an input cannot be
+  read and when the output consumer closes early.
+- **FR-008**: The `phones` count MUST equal the number of phone replacements actually made,
+  totalled across every input read in this run, and MUST be reported as `0` when none was made.
+
+**Output folder**
+
+- **FR-009**: The tool MUST accept an option `--out-dir DIR` taking one directory path, usable
+  in any position relative to `--count` and the FILE arguments, as `001:FR-001` already allows
+  for `--count`.
+- **FR-010**: With `--out-dir DIR`, the redacted lines of each FILE MUST be written to a file
+  inside DIR whose name is that FILE's own name with its directories removed, and MUST NOT be
+  written to standard output.
+- **FR-011**: DIR MUST be created if it does not exist, including any missing parent
+  directories. An existing DIR MUST be used as it is.
+- **FR-012**: An existing file of that name in DIR MUST be replaced: after the run it MUST
+  contain exactly the redacted lines of the corresponding FILE and nothing of its former
+  contents.
+- **FR-013**: The contents of each output file MUST be byte-for-byte what standard output would
+  have received for that FILE in a run without `--out-dir`, preserving the same encoding,
+  undecodable-byte round-trip, and line-terminator guarantees (`001:FR-004`, `001:FR-005`,
+  `001:FR-005a`, `001:FR-005b`).
+- **FR-014**: When every FILE has been processed successfully, the tool MUST write the single
+  line `wrote N files` to standard output, where N is the number of output files written — one
+  per FILE argument processed, counted again for a repeated FILE argument.
+- **FR-015**: DIR MUST be created, or confirmed usable, before the first FILE is read, so that
+  an unusable destination fails before any input is consumed. The FR-020 collision check for
+  every FILE MUST happen in this same pre-flight, before any FILE is read.
+- **FR-016**: When DIR cannot be created or used, the tool MUST write a diagnostic to standard
+  error naming DIR as given on the command line and stating what went wrong, MUST NOT read any
+  FILE, MUST NOT write the `wrote N files` line or a `--count` summary, MUST NOT emit an
+  unhandled error trace, and MUST exit with status 2.
+- **FR-017**: When an output file cannot be created or written, the tool MUST write a diagnostic
+  to standard error naming that output file and stating what went wrong, MUST stop processing
+  further FILEs, MUST NOT write the `wrote N files` line or a `--count` summary, MUST NOT emit
+  an unhandled error trace, MUST leave the destination in the state FR-017a requires, and MUST
+  exit with status 2.
+- **FR-017a**: However a run ends, the destination MUST contain only complete output files —
+  never a stray empty file and never a truncated one. Specifically: the output file for a FILE
+  MUST NOT be created until that FILE has been opened for reading successfully, so a FILE that
+  cannot be opened leaves no file of its name in DIR; and when writing or reading stops partway
+  through a FILE, the partly-written output file MUST be removed before the tool exits, so no
+  truncated redaction is left to be mistaken for a finished one. Output files completed for
+  earlier FILEs MUST be left in place, except where a later FILE writes to that same destination
+  path (two FILEs sharing a file name): that path follows the later write's outcome, so a cut
+  short later write removes it rather than leaving the earlier content under a name that no
+  longer describes it.
+- **FR-018**: When a FILE cannot be read, behaviour MUST be exactly as it is today
+  (`001:FR-025`, `001:FR-026`, `001:FR-027`): a diagnostic naming that FILE as given on the
+  command line, processing stops, exit status 2. In addition the `wrote N files` line MUST be
+  suppressed, output files already written for earlier FILEs MUST remain complete and valid, and
+  the destination MUST be left in the state FR-017a requires — in particular no file named after
+  the unreadable FILE is left behind.
+- **FR-019**: When `--out-dir` is given with no FILE argument, the tool MUST write a usage
+  diagnostic to standard error stating that `--out-dir` requires at least one FILE, MUST NOT
+  read standard input, MUST write nothing to standard output, MUST NOT print a `--count`
+  summary, and MUST exit with status 2.
+- **FR-020**: When the output file for any FILE would be the same file on disk as that FILE, the
+  tool MUST write a diagnostic to standard error naming it, MUST leave that file unmodified,
+  MUST NOT write the `wrote N files` line or a `--count` summary, and MUST exit with status 2.
+  This check MUST cover every FILE on the command line and MUST run with the FR-015 destination
+  check, before any FILE is read — so a collision at any position fails the run with no FILE
+  read, no output file written, and the destination otherwise untouched.
+- **FR-021**: Without `--out-dir`, redacted lines MUST continue to be written to standard output
+  exactly as today, and the `wrote N files` line MUST NOT be written.
+- **FR-022**: With both `--out-dir` and `--count`, both outputs MUST be produced: the
+  `wrote N files` line on standard output, and the summary of FR-007 on standard error written
+  after it.
+
+**Preservation of existing behaviour**
+
+- **FR-023**: Every behaviour specified by feature `001-redact-log-pii` and not amended by
+  FR-001 to FR-022 above (FR-003a and FR-017a included) MUST be preserved unchanged, including the `[EMAIL]`, `[IP]` and
+  `[CARD]` placeholders and their recognition rules, input selection and ordering, text and
+  encoding fidelity, the quiet exit when the output consumer closes early, the usage failure for
+  an unrecognised argument, and the exit-status set `{0, 2}` with no other value.
+
+### Key Entities
+
+- **Redaction type**: extended from three to four — email address, IPv4 address, payment card
+  number, and phone number — each with its own recognition rule, its own fixed placeholder
+  (`[EMAIL]`, `[IP]`, `[CARD]`, `[PHONE]`), and its own counter name (`emails`, `ips`, `cards`,
+  `phones`).
+- **Redaction counts**: four running totals, one per redaction type, accumulated across all
+  input sources in a run and reported only when `--count` is given.
+- **Output destination**: either standard output (the default, one combined stream) or a
+  destination folder, in which each input source has exactly one output file named after it.
+- **Output file**: one file per FILE argument inside the destination folder, named with that
+  argument's file name only, holding that input's redacted lines and nothing else.
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: On a sample log containing known international-format phone numbers of 8 to 15
+  digits, 100% of them are absent from the output and replaced by `[PHONE]`.
+- **SC-002**: On a control sample of near-misses — a `+` with 7 digits, a `+` with 16 or more
+  digits including a Luhn-valid 16-digit run, and `+` prefixes followed by separated digit
+  groups — the output is byte-identical to the input: zero false positives, zero partial
+  redactions, and no `[CARD]` placeholder on the `+`-prefixed runs (FR-003a).
+- **SC-003**: With `--count`, the reported `phones` total equals the number of `[PHONE]`
+  placeholders present in the output, exactly, for every test input, and the three existing
+  totals keep matching their own placeholder counts.
+- **SC-004**: The complete existing test suite of feature `001-redact-log-pii` passes unchanged
+  except for the summary-format assertions required by FR-007, demonstrating that no other
+  behaviour moved.
+- **SC-005**: For any set of readable input files and a writable destination, running with
+  `--out-dir` produces exactly one output file per FILE argument, each byte-identical to that
+  file's redacted output from a run without `--out-dir`, with `wrote N files` on standard output
+  and exit status 0.
+- **SC-006**: Every failure path of this feature — an unusable destination folder, an unwritable
+  output file, `--out-dir` with no FILE, an output path that is its own input, and an unreadable
+  FILE — yields a standard-error diagnostic naming the offending path, no `wrote N files` line,
+  no `--count` summary, no stack trace, and exit status 2. In each case the destination holds
+  only complete output files: no empty file for an input that was never read, and no truncated
+  file for one whose write was cut short. The tool still never exits with a status other than 0
+  or 2.
+- **SC-007**: Memory use in an `--out-dir` run does not grow with input size, and a
+  one-million-line log is still processed in under 60 seconds on a typical developer machine
+  (`001:SC-007` preserved).
+- **SC-008**: Every functional requirement and every edge case listed in this document is
+  covered by at least one automated test, and the full suite passes.
+
+## Assumptions
+
+**Explicit constraints carried from the request** (stated by the user, not chosen here): phone
+numbers are `+` followed by 8 to 15 digits; the summary gains a fourth key `phones` in final
+position; `--out-dir DIR` uses each FILE's own name without its directories; DIR is created with
+missing parents; an existing file of that name is replaced; `wrote N files` goes to standard
+output after every FILE is processed; an unreadable FILE keeps its current handling; and
+everything else must keep working exactly as it does. The existing constraints of feature 001 —
+Python 3.11+, standard library only, package `logredact` under `src/` — continue to apply.
+
+Defaults chosen where the request did not specify:
+
+- **Phone numbers are an unbroken digit run**: the request's example (`+14155552671`) and its
+  wording "a `+` followed by 8 to 15 digits" are read literally, so no internal spaces, hyphens,
+  parentheses, or dots are accepted. Accepting separators would require inventing grouping rules
+  the request does not state and would broaden the match far beyond the example
+  (Constitution Principle IV).
+- **Too many digits means no match at all** (FR-003): a `+` followed by 16 or more digits could
+  have had its first 15 digits redacted. Leaving the whole run alone instead mirrors the rules
+  already in force for over-long digit runs and over-long dotted runs (`001:FR-016`,
+  `001:FR-012`), so the tool never emits a placeholder glued to leftover digits.
+- **A `+`-prefixed digit run is never a card** (FR-003a): clarified 2026-11-14. The user's rule
+  is that anything starting with `+` belongs to the phone form and is never reported as a card.
+  Combined with the 8–15 bound the request states, a `+` followed by 16 to 19 Luhn-valid digits
+  is consequently left unchanged rather than redacted — it is neither a phone number nor a card.
+  This is a deliberate, accepted narrowing of what the tool hides today: the concern that it
+  removes an existing card redaction was raised and the rule was reaffirmed. The alternative
+  considered and rejected was dropping the 15-digit upper bound so the run became `[PHONE]`;
+  it was rejected because the request states the 8–15 bound explicitly, and widening it would
+  make every long digit run after a `+` a phone number.
+- **Phone is last in the same-position tie-break** (FR-005): the only type a phone number can
+  tie with is an email address, because neither an IPv4 address nor a card number can start at a
+  `+`. Appending phone to the existing order therefore keeps `001:FR-019` literally unchanged
+  and keeps `+15551234567@example.com` redacting whole, which is the safe direction already
+  chosen for `user@1.2.3.4` (`001:FR-007a`).
+- **A phone number beats an overlapping card number**: for a run of 13 to 15 digits no new rule
+  is needed; the existing leftmost-match rule decides it, because the `+` sits one character
+  before the first digit. For 16 to 19 digits FR-003a is required, because no phone candidate
+  exists there to win the race. Both are direct consequences of the requested phone rule, and
+  together they are the only places where an input that is redacted today is treated
+  differently.
+- **`--out-dir` with no FILE is a usage error** (FR-019): the request defines the option purely
+  in terms of each FILE's name, so standard input has no name to derive an output file from.
+  Silently writing to standard output instead would ignore an option the user typed — the
+  behaviour `001:FR-029` explicitly forbids for unknown arguments — and reporting `wrote 0 files`
+  while discarding the redacted text would be a silent wrong answer, which Constitution
+  Principle II forbids. Failing with the existing status 2 adds no new exit status.
+- **Writing over an input is refused** (FR-020): the request says an existing file in DIR is
+  replaced, but when that file *is* the input being read, replacing it would destroy the input
+  mid-stream and leave a truncated or empty result that looks like a successful redaction. This
+  is in-place editing, which feature 001 placed out of scope; refusing with a diagnostic
+  (Principle II) is chosen over silently producing a damaged file.
+- **The collision check is a pre-flight over every FILE** (FR-015, FR-020): clarified
+  2026-11-14. Checking on arrival instead would let a command line whose last input is doomed
+  still write output files for the earlier ones, which is the half-done folder FR-015 exists to
+  prevent. Checking all of them up front costs one pass over the argument list and makes the
+  outcome a function of the command line alone, not of how far the run got.
+- **N counts FILE arguments, not distinct paths** (FR-014): two inputs sharing a file name write
+  the destination file twice and report `wrote 2 files`. Counting write operations keeps the
+  number a direct function of the command line, matching the existing rule that a repeated FILE
+  is read again (`001:FR-003`).
+- **`wrote N files` is never pluralized** (Story 2 scenario 7): the request gives the literal
+  form `wrote N files`, so a single file reports `wrote 1 files`. Inventing a singular form
+  would depart from the stated output.
+- **Destination is validated before any input is read** (FR-015): failing fast means an
+  unusable destination never leaves a run half-done, and never consumes input it cannot write.
+- **Only complete output files ever remain** (FR-017a): clarified 2026-11-14, with the
+  mechanism left to the plan. Suppressing `wrote N files` stops a partial run being *reported*
+  as complete, but a stray empty file or a truncated redaction sitting beside the complete ones
+  carries no marker saying so, and the whole point of the folder is that its contents can be
+  attached or archived as they stand. Creating an output file only after its input opens, and
+  removing a partly-written one on failure, keeps that guarantee. Nothing is lost by the
+  removal: FR-012 already forfeits whatever the file held before this run.
+- **Write failures reuse exit status 2** (FR-016, FR-017): the request names only 0 and 2, and
+  `001:SC-006` makes `{0, 2}` part of the contract. New failure modes are distinguished by their
+  diagnostics, not by a third status.
+- **Output files use the same text contract as standard output** (FR-013): UTF-8 with
+  undecodable bytes round-tripped and line terminators preserved. Any other choice would make
+  `--out-dir` output differ from what the same run prints today.
+- **The destination folder is not cleaned**: files already in DIR that this run does not write
+  are left untouched. The request asks only that same-named files be replaced.
+- **Out of scope**: recursive directory input, preserving input directory structure inside DIR,
+  configurable placeholders, phone formats other than the international `+` form, and in-place
+  editing of inputs.
+- **Testing**: `pytest`, with tests under `tests/` runnable by a bare `pytest` from the
+  repository root, per the project constitution.

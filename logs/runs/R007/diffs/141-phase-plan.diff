@@ -1,0 +1,1067 @@
+diff --git a/specs/001-pastebin-service/contracts/cli.md b/specs/001-pastebin-service/contracts/cli.md
+new file mode 100644
+index 0000000..8fd881b
+--- /dev/null
++++ b/specs/001-pastebin-service/contracts/cli.md
+@@ -0,0 +1,63 @@
++# Contract: Command line, output streams, exit statuses
++
++**Feature**: `001-pastebin-service` | **Plan**: [../plan.md](../plan.md)
++
++## Invocation
++
++```text
++python -m pastebin serve --port PORT --data DIR
++```
++
++Requires `src/` on the module search path (e.g. `PYTHONPATH=src`). Python 3.11 or newer.
++
++| Argument | Required | Accepted | Meaning |
++|----------|----------|----------|---------|
++| `serve` | yes | the only subcommand | Start the service |
++| `--port` | yes | integer `1`…`65535` | TCP port on `127.0.0.1` |
++| `--data` | yes | filesystem path | Storage directory; created if absent, including parents |
++
++No other options exist. Nothing is configurable by environment variable.
++
++## Standard output
++
++Exactly one line, ever (FR-004, FR-044, SC-009):
++
++```text
++listening on 127.0.0.1:8765
++```
++
++Written once, after the listening socket is bound and accepting, and before the first request is
++served. The port shown is the port actually bound. Nothing else is ever written to standard output —
++no request logs, no shutdown message.
++
++## Standard error
++
++Written to only for the failures this specification names:
++
++| Occasion | Output | Exit |
++|----------|--------|------|
++| Missing, non-numeric, or out-of-range `--port`; missing `--data`; unknown or missing subcommand | `argparse` usage and a message naming the offending argument | `2` |
++| `--data` cannot be created or is not writable | one line naming the directory and the OS reason | `1` |
++| `--port` cannot be bound (in use, or privileged) | one line naming the port and the OS reason | `1` |
++| A request names a snippet whose stored record cannot be read or parsed | one line naming the snippet id and the reason (FR-038) | — (service keeps running) |
++
++No per-request lines are written for any status, including 4xx — `http.server`'s default
++`log_message`/`log_error` output is suppressed ([../research.md](../research.md) R-09).
++
++On a startup failure the ready line is never printed, so a caller that waits for it can distinguish
++"started" from "failed" without a timeout heuristic.
++
++## Exit statuses
++
++| Status | Meaning |
++|--------|---------|
++| `0` | Interrupted cleanly (`SIGINT`/`SIGTERM`) after having served |
++| `1` | Startup failure: storage unusable, or port unbindable |
++| `2` | Invalid command line (`argparse`) |
++
++## Shutdown
++
++`SIGINT` (Ctrl-C) stops `serve_forever`, closes the socket, and exits `0` without writing anything.
++In-flight requests are not drained — handler threads are daemons — which is acceptable because every
++published snippet is already `fsync`ed and linked into place before its response is sent
++([storage.md](./storage.md)), so no acknowledged publication can be lost by an abrupt stop.
+diff --git a/specs/001-pastebin-service/contracts/http-api.md b/specs/001-pastebin-service/contracts/http-api.md
+new file mode 100644
+index 0000000..b818cc0
+--- /dev/null
++++ b/specs/001-pastebin-service/contracts/http-api.md
+@@ -0,0 +1,116 @@
++# Contract: HTTP API
++
++**Feature**: `001-pastebin-service` | **Plan**: [../plan.md](../plan.md)
++
++Fixed by the spec's Constraints section — paths, methods, header name, JSON field names, and status
++codes are not implementation choices. All request and response bodies are JSON encoded as UTF-8
++unless stated otherwise. The service binds `127.0.0.1` only.
++
++Every response carries an accurate `Content-Length`. Connections are HTTP/1.0 and close after one
++response ([../research.md](../research.md) R-01).
++
++## Endpoints
++
++### `POST /pastes` — publish a snippet
++
++Request body (a JSON object):
++
++| Field | Type | Required | Meaning |
++|-------|------|----------|---------|
++| `content` | string | yes | The snippet text. ≤ 65,536 bytes UTF-8 encoded. Empty string allowed. |
++| `expires_in` | integer or `null` | no | Lifetime in seconds, `1`…`2592000`. Absent or `null` means never expires. |
++
++Unknown fields are ignored. The `Content-Type` header is not required and is never used to accept or
++reject a request (FR-041).
++
++Response `201 Created`:
++
++```json
++{"id": "Vk3q7mB2x9aLpR4sTzYwQg", "delete_token": "…43 chars…", "url": "/pastes/Vk3q7mB2x9aLpR4sTzYwQg"}
++```
++
++`url` is always exactly `/pastes/<id>`. `delete_token` is disclosed here and nowhere else.
++
++Failures: `400` (body not valid JSON, body not an object, `content` missing or not a string,
++`expires_in` invalid, `Content-Length` unparseable), `413` (`content` over 65,536 encoded bytes, or a
++request body over 394,240 bytes / a declared `Content-Length` over that bound).
++
++### `GET /pastes/<id>` — read a snippet
++
++Response `200 OK`:
++
++```json
++{"id": "Vk3q7mB2x9aLpR4sTzYwQg", "content": "hello", "created_at": "2026-10-23T20:15:00Z", "expires_at": null}
++```
++
++`expires_at` is `null` for a snippet with no lifetime, otherwise an ISO 8601 UTC timestamp with
++second precision and a trailing `Z`. `delete_token` is never present.
++
++Failures: `404` (unknown id, expired, deleted, or an id that is not `^[A-Za-z0-9_-]{1,64}$`),
++`500` (stored record unreadable or unparseable).
++
++### `GET /pastes/<id>/raw` — read a snippet's text
++
++Response `200 OK` with the snippet's text as the entire body — no wrapper, no added newline — and
++`Content-Type: text/plain; charset=utf-8`. An empty snippet yields an empty body with
++`Content-Length: 0`.
++
++Failures: as `GET /pastes/<id>`.
++
++### `DELETE /pastes/<id>` — withdraw a snippet
++
++Request header `X-Delete-Token: <delete_token>`. No request body.
++
++Response `204 No Content` with an empty body.
++
++Failures:
++- `404` — unknown, expired, or already-deleted id, **regardless of the token presented**. Not-found
++  takes precedence over refusal (FR-026), so the endpoint never reveals the existence of an id that
++  a read would not have revealed.
++- `403` — the snippet exists and is unexpired but `X-Delete-Token` is absent or does not match. The
++  snippet remains readable.
++
++The token comparison uses `secrets.compare_digest`, so it does not leak how much of a presented
++token was correct (FR-025).
++
++## Everything else
++
++Any other path — including `/`, `/pastes/<id>/extra`, `/pastes/<id>/text` — and any defined path used
++with a method it does not support (`GET`/`DELETE`/`PUT`/`PATCH`/`HEAD`/`OPTIONS` on `/pastes`,
++`POST`/`PUT`/`PATCH`/`HEAD`/`OPTIONS` on `/pastes/<id>`) responds `404` with the standard error body.
++A query string is ignored when matching the path.
++
++## Error body
++
++Every unsuccessful response (4xx and 5xx) has exactly this shape (FR-032):
++
++```json
++{"error": "human-readable message naming what was wrong"}
++```
++
++Canonical messages — tests assert the status and that `error` is a non-empty string naming the
++problem, so wording may be refined without breaking the contract:
++
++| Status | Condition | Message |
++|--------|-----------|---------|
++| 400 | body is not valid JSON / not UTF-8 | `request body is not valid JSON` |
++| 400 | body is valid JSON but not an object | `request body must be a JSON object` |
++| 400 | `content` missing or not a string | `'content' is required and must be a string` |
++| 400 | `expires_in` invalid | `'expires_in' must be an integer from 1 to 2592000, or null` |
++| 400 | `Content-Length` not a non-negative integer | `invalid Content-Length header` |
++| 400 | body shorter than declared / connection went quiet | `request body incomplete` |
++| 413 | `content` over the size limit | `content exceeds the maximum of 65536 bytes` |
++| 413 | request body over the read ceiling | `request body exceeds the maximum of 394240 bytes` |
++| 403 | delete token missing or wrong | `missing or invalid X-Delete-Token` |
++| 404 | unknown / expired / deleted paste, or any undefined path or method | `not found` |
++| 500 | stored record unreadable or unparseable | `stored paste could not be read` |
++
++A `500` never discloses a filesystem path or exception text to the caller; the detail goes to the
++service's standard error stream instead ([cli.md](./cli.md)).
++
++## Status codes used
++
++`201`, `200`, `204`, `400`, `403`, `404`, `413`, `500`. No other status is produced by any input this
++specification describes (FR-037). The malformed-HTTP responses `http.server` itself emits (`400` on
++an unparseable request line, `414`, `505`) are outside that set and are reachable only by sending
++something that is not an HTTP request — see [../research.md](../research.md) R-07.
+diff --git a/specs/001-pastebin-service/contracts/storage.md b/specs/001-pastebin-service/contracts/storage.md
+new file mode 100644
+index 0000000..bbd543d
+--- /dev/null
++++ b/specs/001-pastebin-service/contracts/storage.md
+@@ -0,0 +1,85 @@
++# Contract: On-disk storage format
++
++**Feature**: `001-pastebin-service` | **Plan**: [../plan.md](../plan.md)
++
++This is the restart contract (FR-029, FR-030): a later instance of the service started against the
++same directory must read, serve, and delete records written by an earlier one. It is published here
++because tests depend on it to construct expired and damaged records
++([../research.md](../research.md) R-10).
++
++## Layout
++
++```text
++<DIR>/
++├── Vk3q7mB2x9aLpR4sTzYwQg.json     # one live-or-expired snippet
++├── 7pL0nZ4cQw8xKdRm2vYbSa.json
++└── .tmp-aK8xQ2mv                   # transient, exists only during a publication
++```
++
++Flat; no subdirectories. The file name is `<id>.json` where `<id>` is the snippet identifier
++verbatim. A deleted snippet has no file. An expired snippet keeps its file (expiry is lazy) and is
++indistinguishable from a live one on disk — the `expires_at` value decides.
++
++Files whose names do not end in `.json` are ignored; nothing enumerates the directory during normal
++operation anyway, so a stray file cannot affect any request.
++
++## Record
++
++A single JSON object, UTF-8 encoded, with exactly these five keys:
++
++```json
++{
++  "id": "Vk3q7mB2x9aLpR4sTzYwQg",
++  "content": "hello",
++  "created_at": "2026-10-23T20:15:00Z",
++  "expires_at": "2026-10-23T21:15:00Z",
++  "delete_token": "3bW9…"
++}
++```
++
++| Key | Type | Rule |
++|-----|------|------|
++| `id` | string | Matches the file name stem |
++| `content` | string | The snippet text, unmodified |
++| `created_at` | string | `%Y-%m-%dT%H:%M:%SZ` |
++| `expires_at` | string or `null` | `%Y-%m-%dT%H:%M:%SZ`, or `null` for never |
++| `delete_token` | string | Non-empty |
++
++A record is **valid** if it decodes as UTF-8 JSON, is an object, has all five keys with the types
++above, `id` equals the file-name stem, and both timestamps parse under that exact format. Anything
++else is **damaged** and yields `500` for that identifier plus a stderr diagnostic (FR-038, FR-039) —
++never `404`. Extra keys are not expected and make the record damaged; nothing the service writes
++produces them.
++
++## Write protocol (publication)
++
++1. Serialise the record.
++2. Create `<DIR>/.tmp-<random>` exclusively, write the bytes, `flush`, `os.fsync`, close.
++3. `os.link(tmp, "<DIR>/<id>.json")` — atomic; raises `FileExistsError` if the identifier is already
++   in use, in which case a fresh identifier is generated and the attempt repeats (up to 5 times).
++4. `os.unlink(tmp)`.
++5. Only then is the `201` response sent.
++
++A reader therefore sees `<id>.json` either absent or complete, never partial (FR-043). If the process
++dies between steps 2 and 3, a `.tmp-*` file is left behind holding a snippet that was never
++acknowledged to any caller; it is inert and is not cleaned up (no requirement asks for it, and
++sweeping it would mean enumerating the directory at startup, which FR-038 forbids).
++
++## Read protocol
++
++One `read_bytes()` of `<DIR>/<id>.json`, then decode and validate. `FileNotFoundError` → `404`.
++Any other `OSError`, a decode failure, or a validation failure → `500`.
++
++## Delete protocol
++
++Read and validate the record, check expiry, compare the presented token with
++`secrets.compare_digest`, then a single `os.unlink`. A reader that already opened the file keeps
++reading the unlinked inode to completion, so a concurrent read returns the whole snippet or `404`,
++never a fragment (FR-043). `FileNotFoundError` on the unlink means another deletion won the race →
++`404`.
++
++## Assumptions
++
++POSIX semantics on a single local filesystem: `link` is atomic and fails on an existing destination,
++and an unlinked open file remains readable. The spec's Assumptions already exclude network shares
++with unusual semantics and other processes modifying the directory.
+diff --git a/specs/001-pastebin-service/data-model.md b/specs/001-pastebin-service/data-model.md
+new file mode 100644
+index 0000000..7481eed
+--- /dev/null
++++ b/specs/001-pastebin-service/data-model.md
+@@ -0,0 +1,132 @@
++# Phase 1 Data Model: Pastebin Service
++
++**Feature**: `001-pastebin-service` | **Date**: 2026-11-09 | **Plan**: [plan.md](./plan.md)
++
++Two entities come from the spec's Key Entities section: **Snippet** (a paste) and **Storage
++location** (the nominated directory). There is no relationship table because there is exactly one
++relationship — the storage location contains snippets — and no snippet refers to another.
++
++Wire field names are fixed by the spec's Constraints section; see
++[contracts/http-api.md](./contracts/http-api.md). The on-disk encoding is fixed by
++[contracts/storage.md](./contracts/storage.md).
++
++## Snippet (paste)
++
++Represented in code as a plain `dict` (Constitution Principle IV — plain data over classes), created
++by `store.create_paste()` and returned by `store.read_paste()`.
++
++| Field | Type | Origin | Constraints |
++|-------|------|--------|-------------|
++| `id` | `str` | generated | 22 URL-safe chars from `secrets.token_urlsafe(16)`; unique among all ever issued; appears in the location path. Accepted from a request path only if it matches `^[A-Za-z0-9_-]{1,64}$`. |
++| `content` | `str` | caller (`content`) | Required. Must be a JSON string. ≤ 65,536 bytes when UTF-8 encoded. Empty string is valid. Stored and returned byte-for-byte unchanged. |
++| `created_at` | `str` | generated | `now(UTC)` truncated to whole seconds, formatted `%Y-%m-%dT%H:%M:%SZ`. Immutable. |
++| `expires_at` | `str \| None` | derived | `created_at + expires_in` seconds, same format, computed once at publication and never recomputed. `None` when no lifetime was requested. |
++| `delete_token` | `str` | generated | 43 URL-safe chars from `secrets.token_urlsafe(32)`, drawn independently of `id`. Returned only in the publication response; never in a read response. |
++
++### Caller-supplied input (publication)
++
++| Input field | Type accepted | Rule | Violation |
++|-------------|---------------|------|-----------|
++| `content` | JSON string | present and a string; ≤ 65,536 UTF-8 bytes | missing / non-string → 400; oversize → 413 |
++| `expires_in` | JSON integer or `null`, or absent | if present and not `null`: an integer (JSON `true`/`false` are rejected even though Python treats `bool` as `int`), `1 ≤ n ≤ 2_592_000` | 400 |
++| any other field | any | ignored (FR-015) | — |
++| body as a whole | JSON object | must decode as UTF-8 JSON and be an object, not a list/number/string/`null` | 400 |
++| declared `Content-Length` | integer | if > 394,240 → reject before reading; unparseable → 400 | 413 / 400 |
++
++Note on `expires_in` validation: the check is `type(v) is int` (not `isinstance`), because
++`isinstance(True, int)` is true in Python and `{"expires_in": true}` must be a 400. A numeric string
++such as `"3600"` is likewise a 400 — no coercion (Constitution Principle II).
++
++### Lifecycle
++
++```text
++                 POST /pastes (valid)
++   (nonexistent) ────────────────────────▶ LIVE
++                                            │
++                      now >= expires_at     │   DELETE with correct token
++                 ┌──────────────────────────┴───────────────────────┐
++                 ▼                                                  ▼
++             EXPIRED                                            DELETED
++   (file may remain on disk;                        (file unlinked; permanent,
++    indistinguishable from                           survives restart)
++    nonexistent to every caller)
++```
++
++- **LIVE** → readable (`GET`, `GET /raw`), deletable with the correct token (403 without it).
++- **EXPIRED** → every access path reports 404, including a delete presenting the correct token
++  (FR-027, US2 scenario 3). No transition out of this state; the stored file is not reclaimed
++  (spec Assumption: expiry is evaluated lazily).
++- **DELETED** → every access path reports 404, including a second delete with the same token.
++- **DAMAGED** is not a state of a snippet but a property of a stored file: a file that cannot be
++  read, decoded, or validated yields 500 for that identifier only, and does not affect any other
++  snippet (FR-038).
++
++Transitions are evaluated per request, never by a background process. There is no state field on
++disk — state is a function of (file exists?, `expires_at` vs now).
++
++## Storage location
++
++| Property | Value |
++|----------|-------|
++| Identity | The `--data DIR` path given at startup |
++| Created | `mkdir(parents=True, exist_ok=True)` at startup, before the ready line |
++| Validated | A probe file is created and removed inside it; failure → stderr + exit 1 (FR-005) |
++| Contents | One `<id>.json` per live-or-expired snippet, plus transient `.tmp-*` files during publication |
++| Scanned at startup | Never (FR-038, SC-007) |
++| Source of truth | Sole; no in-memory index, no cache |
++
++## Requirement to test map
++
++Every functional requirement maps to at least one `pytest` test that names its identifier in the
++test name or docstring (Constitution Principle III, SC-008). Test module layout is in
++[plan.md](./plan.md#source-code-repository-root).
++
++| FR | Test module | Test(s) |
++|----|-------------|---------|
++| FR-001 | `test_cli.py` | `test_fr001_serve_accepts_port_and_data` |
++| FR-002 | `test_cli.py` | `test_fr002_listens_on_loopback_only` |
++| FR-003 | `test_cli.py` | `test_fr003_creates_missing_data_dir_including_parents` |
++| FR-004 | `test_cli.py` | `test_fr004_ready_line_printed_once_after_socket_accepts` |
++| FR-005 | `test_cli.py` | `test_fr005_port_in_use_exits_nonzero_without_ready_line`, `test_fr005_unwritable_data_dir_exits_nonzero` |
++| FR-006 | `test_cli.py` | `test_fr006_rejects_missing_port`, `test_fr006_rejects_non_numeric_port`, `test_fr006_rejects_out_of_range_port`, `test_fr006_rejects_missing_data` |
++| FR-007 | `test_publish.py` | `test_fr007_publish_with_content_creates_paste` |
++| FR-008 | `test_publish.py` | `test_fr008_missing_content_is_400`, `test_fr008_non_string_content_is_400` (parametrised over number, bool, list, object, null) |
++| FR-009 | `test_publish.py` | `test_fr009_content_at_65536_bytes_accepted`, `test_fr009_content_at_65537_bytes_is_413`, `test_fr009_limit_measured_in_encoded_bytes` |
++| FR-010 | `test_publish.py` | `test_fr010_expires_in_accepts_1_and_2592000`, `test_fr010_rejects_zero_negative_over_max_fractional_string_and_bool` |
++| FR-011 | `test_publish.py` | `test_fr011_absent_expires_in_means_no_expiry`, `test_fr011_null_expires_in_means_no_expiry` |
++| FR-012 | `test_publish.py` | `test_fr012_response_is_201_with_id_delete_token_and_url` |
++| FR-013 | `test_publish.py` | `test_fr013_ids_are_unique_across_many_publications`, `test_fr013_id_entropy_and_alphabet` |
++| FR-014 | `test_publish.py`, `test_read.py` | `test_fr014_delete_token_not_derivable_from_id`, `test_fr014_delete_token_absent_from_read_response` |
++| FR-015 | `test_publish.py` | `test_fr015_unknown_fields_are_ignored` |
++| FR-016 | `test_publish.py` | `test_fr016_malformed_json_is_400`, `test_fr016_non_object_json_is_400` (parametrised over list, number, string, null) |
++| FR-017 | `test_read.py` | `test_fr017_get_returns_id_content_created_at_expires_at` |
++| FR-018 | `test_read.py` | `test_fr018_expires_at_is_null_when_no_lifetime` |
++| FR-019 | `test_read.py` | `test_fr019_timestamps_are_iso8601_utc_second_precision` |
++| FR-020 | `test_read.py` | `test_fr020_raw_returns_exact_content_as_utf8_plain_text` |
++| FR-021 | `test_read.py` | `test_fr021_roundtrip_fidelity` (parametrised: empty, newlines, non-ASCII, emoji, max-size) |
++| FR-022 | `test_delete.py` | `test_fr022_delete_with_token_removes_paste` |
++| FR-023 | `test_delete.py` | `test_fr023_delete_responds_204_and_paste_is_then_404` |
++| FR-024 | `test_delete.py` | `test_fr024_missing_token_is_403_and_paste_survives`, `test_fr024_wrong_token_is_403_and_paste_survives` |
++| FR-025 | `test_delete.py` | `test_fr025_token_compared_with_compare_digest` (monkeypatches `secrets.compare_digest` and asserts the comparison goes through it) |
++| FR-026 | `test_delete.py` | `test_fr026_unknown_id_is_404_regardless_of_token`, `test_fr026_expired_paste_delete_is_404_not_403`, `test_fr026_second_delete_is_404` |
++| FR-027 | `test_expiry.py` | `test_fr027_expired_paste_is_404_on_get_raw_and_delete` |
++| FR-028 | `test_expiry.py` | `test_fr028_expires_at_equals_created_at_plus_lifetime`, `test_fr028_expires_at_unchanged_by_later_reads` |
++| FR-029 | `test_persistence.py` | `test_fr029_paste_readable_from_new_instance_on_same_dir` |
++| FR-030 | `test_persistence.py` | `test_fr030_id_content_created_at_expires_at_token_survive_restart` |
++| FR-031 | `test_persistence.py` | `test_fr031_deleted_paste_not_resurrected_by_restart` |
++| FR-032 | `test_errors.py` | `test_fr032_every_error_status_carries_single_error_field` (parametrised over 400, 403, 404, 413, 500) |
++| FR-033 | `test_errors.py` | `test_fr033_invalid_input_is_400` |
++| FR-034 | `test_errors.py` | `test_fr034_oversize_content_is_413_not_400` |
++| FR-035 | `test_errors.py` | `test_fr035_refused_delete_is_403` |
++| FR-036 | `test_routing.py` | `test_fr036_undefined_paths_are_404` (root, `/pastes/<id>/extra`, `/pastes/<id>/text`), `test_fr036_unsupported_methods_are_404` (parametrised over PUT, PATCH, HEAD, OPTIONS, DELETE on `/pastes`, GET on `/pastes`) |
++| FR-037 | `test_errors.py` | `test_fr037_no_specified_input_produces_an_undefined_response` (sweeps every invalid input the spec enumerates and asserts the status is one of 400/403/404/413 and the body parses) |
++| FR-038 | `test_damaged_storage.py` | `test_fr038_damaged_record_is_500_not_404`, `test_fr038_diagnostic_names_the_paste_on_stderr`, `test_fr038_other_pastes_unaffected`, `test_fr038_startup_does_not_scan_storage` |
++| FR-039 | `test_damaged_storage.py` | `test_fr039_damaged_record_500_body_has_error_field` (parametrised: truncated, invalid JSON, wrong shape, bad timestamp) |
++| FR-040 | `test_publish.py` | `test_fr040_declared_length_over_bound_is_413_without_reading_body`, `test_fr040_understated_length_cannot_exceed_read_ceiling` |
++| FR-041 | `test_publish.py` | `test_fr041_content_type_is_ignored` (parametrised: absent, `application/json`, `text/plain`, nonsense) |
++| FR-042 | `test_concurrency.py` | `test_fr042_quiet_client_does_not_block_other_requests`, `test_fr042_overlapping_requests_are_served_concurrently` |
++| FR-043 | `test_concurrency.py` | `test_fr043_reader_never_sees_partially_written_paste`, `test_fr043_delete_during_read_yields_whole_or_404` |
++| FR-044 | `test_cli.py` | `test_fr044_stdout_contains_only_the_ready_line`, `test_fr044_stderr_silent_across_valid_and_invalid_traffic` |
++
++Coverage: 44 of 44 functional requirements. Success criteria SC-001…SC-010 are each covered by the
++tests above plus the scenarios in [quickstart.md](./quickstart.md); SC-008 is satisfied by this table.
+diff --git a/specs/001-pastebin-service/plan.md b/specs/001-pastebin-service/plan.md
+new file mode 100644
+index 0000000..ed07f0d
+--- /dev/null
++++ b/specs/001-pastebin-service/plan.md
+@@ -0,0 +1,133 @@
++# Implementation Plan: Pastebin Service
++
++**Branch**: `001-pastebin-service` | **Date**: 2026-11-09 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/001-pastebin-service/spec.md`
++
++## Summary
++
++A loopback-only HTTP service for publishing, reading, and withdrawing UTF-8 text snippets, with
++optional lifetimes and file-backed durability. Built on Python 3.11+ standard library only:
++`http.server.ThreadingHTTPServer` for concurrent request handling, one JSON file per snippet in the
++operator-nominated data directory, `os.link`/`os.replace` for all-or-nothing visibility,
++`secrets` for unguessable identifiers and delete tokens, and `argparse` for the
++`python -m pastebin serve --port PORT --data DIR` entry point. No startup scan of storage, no
++request logging, and no background reclamation — expiry is evaluated lazily on each access.
++
++## Technical Context
++
++**Language/Version**: Python 3.11+ (minimum stated once in `README.md`; no module may use a newer feature)
++
++**Primary Dependencies**: None at runtime — standard library only (`http.server`, `socketserver`,
++`json`, `pathlib`, `os`, `secrets`, `datetime`, `argparse`, `re`, `sys`). `pytest` is a
++development-only dependency, declared in `requirements-dev.txt` and never imported by runtime code.
++
++**Storage**: Local filesystem. One JSON file per snippet at `<DIR>/<id>.json`; the directory is the
++sole source of truth across restarts and is created on demand. See [data-model.md](./data-model.md).
++
++**Testing**: `pytest`. Every functional requirement is named by at least one test (Constitution
++Principle III); see the requirement→test map in [data-model.md](./data-model.md#requirement-to-test-map).
++
++**Target Platform**: Linux/POSIX host, loopback interface (`127.0.0.1`) only. Atomicity relies on
++POSIX `rename`/`link` semantics within a single directory (see [research.md](./research.md) R-03).
++
++**Project Type**: Single-package CLI-launched HTTP service (`src/pastebin`, runnable as
++`python -m pastebin` with `src/` on the module search path).
++
++**Performance Goals**: Ready and announcing within 2 s against storage holding up to 1,000 snippets
++(SC-007 — met trivially because startup performs no storage scan). 10 callers issuing overlapping
++publish/read/delete requests all served correctly and without head-of-line blocking (SC-010). No
++throughput target is set (spec Assumptions).
++
++**Constraints**:
++- Snippet text ≤ 65,536 UTF-8 bytes; lifetime an integer 1…2,592,000 s.
++- Request body never read beyond 394,240 bytes regardless of declared length (FR-040; bound derived
++  in [research.md](./research.md) R-05).
++- Standard output carries exactly one line (`listening on 127.0.0.1:PORT`); standard error carries
++  only startup failures and damaged-storage diagnostics (FR-044, SC-009).
++- Timestamps ISO 8601 UTC, second precision, trailing `Z`.
++- Endpoint paths, methods, `X-Delete-Token` header, JSON field names, and status codes are fixed by
++  the spec's Constraints section and reproduced verbatim in [contracts/http-api.md](./contracts/http-api.md).
++
++**Scale/Scope**: Single operator, single host. ~600 lines of runtime code across 4 modules;
++44 functional requirements; 4 user stories.
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++Constitution v1.0.0.
++
++| Gate | Status (pre-Phase 0) | Status (post-Phase 1) | Evidence |
++|------|----------------------|-----------------------|----------|
++| **I. Standard Library Only** — no third-party import reachable from an entry point | PASS | PASS | Every module in the Phase 1 design imports only stdlib modules (listed under Primary Dependencies). `pytest` appears solely in `tests/` and `requirements-dev.txt`, separate from runtime requirements. |
++| **II. Fail Loudly** — clear diagnostic + explicit failure signal; no sentinels, no bare `except`, no guessing | PASS | PASS | CLI misuse, unbindable port, and unusable storage write a named reason to stderr and exit non-zero (FR-005, FR-006). Every rejected request returns an explicit `{"error": ...}` body with a defined status (FR-032…FR-036). Damaged storage is translated to a 500 plus a stderr diagnostic naming the snippet — a deliberate translation at the point of handling, not a swallow (FR-038/039). Exception handling is enumerated per call site in [research.md](./research.md) R-08: only `FileNotFoundError`, `OSError`, `json.JSONDecodeError`, `UnicodeDecodeError`, and `TimeoutError` are caught, each at the site that handles it. No bare `except:`, no `except Exception: pass`, no coercion of unparseable input (FR-041 ignores declared content type but still requires the body to parse). |
++| **III. Every Requirement Is Testable** — each FR mapped to a named `pytest` test | PASS | PASS | All 44 FRs mapped in [data-model.md](./data-model.md#requirement-to-test-map); each test names its FR id in the test name or docstring. Failure modes from Principle II have dedicated tests asserting message and exit status (`tests/test_cli.py`) or status and error body (`tests/test_errors.py`). SC-008 is satisfied by construction of that map. |
++| **IV. Simplicity** — smallest design, functions and plain data, no speculative extension points | PASS | PASS | 4 runtime modules (`__init__`, `__main__`, `server`, `store`), no class hierarchy beyond the one `BaseHTTPRequestHandler` subclass the standard library requires, snippets represented as plain `dict`s, no configuration beyond the two required CLI options, no registry/plugin/abstraction layers, no background threads beyond those `ThreadingHTTPServer` creates. The one deviation considered — splitting storage from HTTP into two modules — is forced by a present requirement (Principle III: storage-corruption and atomicity behaviour must be testable without a live socket) and is recorded in [research.md](./research.md) R-09. |
++
++**Result**: No violations. Complexity Tracking is empty.
++
++**Technology constraints check**: `argparse` for the command line, `json` for serialization,
++`pathlib` for paths, plain `stderr` writes for diagnostics, `pytest` as the only development tool —
++all as the constitution's Technology and Dependency Constraints section prescribes. `logging` is
++deliberately not used: FR-044 forbids per-request output, and a logger configured to emit nothing
++would be a knob with no caller (Principle IV).
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/001-pastebin-service/
++├── plan.md              # This file (/speckit-plan command output)
++├── research.md          # Phase 0 output (/speckit-plan command)
++├── data-model.md        # Phase 1 output (/speckit-plan command)
++├── quickstart.md        # Phase 1 output (/speckit-plan command)
++├── contracts/           # Phase 1 output (/speckit-plan command)
++│   ├── http-api.md      #   HTTP surface: paths, methods, bodies, statuses
++│   ├── cli.md           #   Command line, stdout/stderr, exit statuses
++│   └── storage.md       #   On-disk record format (the restart contract)
++├── checklists/
++│   └── requirements.md  # Existing spec-quality checklist
++└── tasks.md             # Phase 2 output (/speckit-tasks command - NOT created by /speckit-plan)
++```
++
++### Source Code (repository root)
++
++```text
++README.md                  # States Python 3.11+ minimum and how to run (constitution requirement)
++pytest.ini                 # pythonpath = src, so tests import pastebin without installation
++requirements-dev.txt       # pytest only; no runtime requirements file exists because there are none
++
++src/
++└── pastebin/
++    ├── __init__.py        # Package marker; version constant only
++    ├── __main__.py        # argparse CLI, storage preparation, bind, ready line, serve_forever
++    ├── server.py          # make_server(); request handler: routing, body limits, JSON responses
++    └── store.py           # create/read/delete snippet records; atomic writes; expiry evaluation
++
++tests/
++├── conftest.py            # in-process server fixture, subprocess server fixture, HTTP client helper
++├── test_cli.py            # FR-001..FR-006, FR-044: argument validation, ready line, bind failures
++├── test_publish.py        # FR-007..FR-016, FR-040, FR-041: POST /pastes accept and reject paths
++├── test_read.py           # FR-017..FR-021: GET /pastes/<id> and /raw, round-trip fidelity
++├── test_delete.py         # FR-022..FR-026: DELETE, token checks, not-found precedence
++├── test_expiry.py         # FR-027, FR-028: lazy expiry across all three access paths
++├── test_persistence.py    # FR-029..FR-031: restart durability, permanent deletion
++├── test_routing.py        # FR-036: undefined paths and unsupported methods
++├── test_errors.py         # FR-032..FR-035, FR-037, FR-039: error body shape and status mapping
++├── test_damaged_storage.py# FR-038, FR-039: unreadable records → 500 + stderr, others unaffected
++└── test_concurrency.py    # FR-042, FR-043: overlapping requests, slow client, partial-read safety
++```
++
++**Structure Decision**: Single Python package under `src/` as the spec's Constraints section
++requires (`python -m pastebin` with `src/` on the module search path), with a flat `tests/`
++directory beside it. The `models/services/cli/lib` subdivision from the template is rejected: each
++of those directories would hold one short module, which Principle IV ("prefer one obvious module
++over several indirect ones") forbids. Tests are organised by user story and requirement group rather
++than by the template's `contract/integration/unit` split, because nearly every test here drives the
++real HTTP surface — the split would put almost everything in one directory and mislabel the rest.
++
++## Complexity Tracking
++
++> No Constitution Check violations. This table is intentionally empty.
+diff --git a/specs/001-pastebin-service/quickstart.md b/specs/001-pastebin-service/quickstart.md
+new file mode 100644
+index 0000000..832faab
+--- /dev/null
++++ b/specs/001-pastebin-service/quickstart.md
+@@ -0,0 +1,172 @@
++# Quickstart & Validation Guide: Pastebin Service
++
++**Feature**: `001-pastebin-service` | **Plan**: [plan.md](./plan.md)
++
++How to run the service and prove the feature works end to end. Interface details live in
++[contracts/http-api.md](./contracts/http-api.md), [contracts/cli.md](./contracts/cli.md), and
++[contracts/storage.md](./contracts/storage.md); field semantics in
++[data-model.md](./data-model.md).
++
++## Prerequisites
++
++- Python 3.11 or newer (`python3 --version`)
++- `curl` for the manual scenarios
++- `pytest` for the automated suite: `python3 -m pip install -r requirements-dev.txt`
++
++No runtime dependencies. Nothing to build or install for the service itself.
++
++## Run it
++
++```bash
++PYTHONPATH=src python3 -m pastebin serve --port 8765 --data ./pastes
++```
++
++Expected: the line `listening on 127.0.0.1:8765` on standard output, a `./pastes` directory created
++if absent, and nothing further printed no matter how much traffic follows.
++
++## Automated suite
++
++```bash
++python3 -m pytest            # pytest.ini puts src/ on the path; no PYTHONPATH needed
++python3 -m pytest -q         # terse
++python3 -m pytest -k fr040   # one requirement
++```
++
++Expected: all tests pass. Every functional requirement FR-001…FR-044 is named by at least one test —
++see the [requirement to test map](./data-model.md#requirement-to-test-map). `pytest -k fr0NN`
++is the quickest way to check a single requirement's coverage.
++
++## Manual validation scenarios
++
++Each scenario below maps to a user story's Independent Test in [spec.md](./spec.md). Start the
++service as above first; `$ID` and `$TOKEN` refer to values from the publish response.
++
++### 1. Publish, read, read raw — User Story 1 (SC-001, SC-002)
++
++```bash
++curl -s -X POST 127.0.0.1:8765/pastes -d '{"content": "hello"}'
++curl -s 127.0.0.1:8765/pastes/$ID
++curl -si 127.0.0.1:8765/pastes/$ID/raw
++curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8765/pastes/does-not-exist
++```
++
++Expected: `201` with `id`, `delete_token`, and `url: /pastes/<id>`; then a JSON body carrying the
++same `id`, `"content": "hello"`, a `created_at` timestamp ending in `Z`, and `"expires_at": null`;
++then a response whose body is exactly `hello` with no trailing newline and header
++`Content-Type: text/plain; charset=utf-8`; then `404`.
++
++Fidelity check across the supported range:
++
++```bash
++printf '{"content": "a\\nb ☃ 🎉"}' | curl -s -X POST 127.0.0.1:8765/pastes -d @-
++curl -s -X POST 127.0.0.1:8765/pastes -d '{"content": ""}'
++curl -s 127.0.0.1:8765/pastes/$ID/raw | cmp - expected.txt
++```
++
++Expected: both publish; the raw body of the first is byte-for-byte what was submitted (newline,
++non-ASCII, and emoji intact); the empty snippet's raw body is empty with `Content-Length: 0`.
++
++### 2. Lifetimes — User Story 2 (SC-005)
++
++```bash
++curl -s -X POST 127.0.0.1:8765/pastes -d '{"content": "temp", "expires_in": 3600}'
++curl -s -X POST 127.0.0.1:8765/pastes -d '{"content": "brief", "expires_in": 1}'
++sleep 2
++curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8765/pastes/$BRIEF_ID
++curl -s -X POST 127.0.0.1:8765/pastes -d '{"content": "x", "expires_in": 0}'
++curl -s -X POST 127.0.0.1:8765/pastes -d '{"content": "x", "expires_in": "3600"}'
++curl -s -X POST 127.0.0.1:8765/pastes -d '{"content": "x", "expires_in": 2592001}'
++```
++
++Expected: the first publishes with `expires_at` exactly one hour after its `created_at`; the
++short-lived one reads back normally and then `404`s on `GET`, `GET /raw`, **and** `DELETE` with the
++correct token; each of the last three is `400` with an `error` message and creates nothing.
++
++### 3. Withdrawal — User Story 3 (SC-006)
++
++```bash
++curl -si -X DELETE 127.0.0.1:8765/pastes/$ID -H "X-Delete-Token: $TOKEN"
++curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8765/pastes/$ID
++curl -s -o /dev/null -w '%{http_code}\n' -X DELETE 127.0.0.1:8765/pastes/$OTHER_ID
++curl -s -o /dev/null -w '%{http_code}\n' -X DELETE 127.0.0.1:8765/pastes/$OTHER_ID -H "X-Delete-Token: wrong"
++curl -s -o /dev/null -w '%{http_code}\n' -X DELETE 127.0.0.1:8765/pastes/nope -H "X-Delete-Token: wrong"
++```
++
++Expected: `204` with an empty body, then `404`; `403` twice with `$OTHER_ID` still readable
++afterwards; `404` (not `403`) for the unknown id — a deletion attempt reveals nothing a read would
++not have.
++
++### 4. Survives a restart — User Story 4 (SC-004)
++
++```bash
++# publish two snippets, one with expires_in, then stop the service with Ctrl-C and restart it
++PYTHONPATH=src python3 -m pastebin serve --port 8765 --data ./pastes
++curl -s 127.0.0.1:8765/pastes/$ID
++curl -si -X DELETE 127.0.0.1:8765/pastes/$ID -H "X-Delete-Token: $TOKEN"
++```
++
++Expected: both snippets read back with unchanged `id`, `content`, `created_at`, and `expires_at` —
++the restart neither extends nor shortens the expiry — and the original delete token still works. A
++snippet whose expiry passed while the service was stopped `404`s.
++
++### 5. Error surface (SC-003, SC-009)
++
++```bash
++curl -s -X POST 127.0.0.1:8765/pastes -d 'not json'
++curl -s -X POST 127.0.0.1:8765/pastes -d '[1,2,3]'
++curl -s -X POST 127.0.0.1:8765/pastes -d '{"expires_in": 60}'
++curl -s -X POST 127.0.0.1:8765/pastes -d '{"content": 42}'
++curl -s -X POST 127.0.0.1:8765/pastes -H 'Content-Type: text/plain' -d '{"content": "ok"}'
++curl -s -X POST 127.0.0.1:8765/pastes -d "{\"content\": \"$(python3 -c 'print("x"*65537)')\"}"
++curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8765/
++curl -s -o /dev/null -w '%{http_code}\n' -X PUT 127.0.0.1:8765/pastes/$ID
++```
++
++Expected: `400`, `400`, `400`, `400` each with an explanatory `error` field; `201` for the
++mislabelled content type (the declared type is ignored); `413` for the oversize content; `404` for
++the root path and for the unsupported method. Throughout all of this the service's terminal shows no
++additional output — the ready line remains the only line on standard output and standard error stays
++empty.
++
++Oversize declared body (FR-040), which `curl` cannot express — send a header claiming a huge body:
++
++```bash
++printf 'POST /pastes HTTP/1.0\r\nContent-Length: 999999999\r\n\r\n' | nc 127.0.0.1 8765
++```
++
++Expected: an immediate `413` with an `error` body, without the service waiting for or reading a
++gigabyte.
++
++### 6. Startup failures (FR-005, FR-006)
++
++```bash
++PYTHONPATH=src python3 -m pastebin serve --data ./pastes            ; echo "exit=$?"
++PYTHONPATH=src python3 -m pastebin serve --port abc --data ./pastes ; echo "exit=$?"
++PYTHONPATH=src python3 -m pastebin serve --port 8765 --data ./pastes ; echo "exit=$?"   # while one is already running
++PYTHONPATH=src python3 -m pastebin serve --port 8766 --data /proc/nope ; echo "exit=$?"
++```
++
++Expected: exit `2` for the two argument errors with an `argparse` message naming the argument; exit
++`1` for the port conflict and for the unusable storage directory, each with one explanatory line on
++standard error; in all four cases no `listening on …` line is printed.
++
++### 7. Concurrency and partial-read safety (SC-010, FR-042, FR-043)
++
++```bash
++# ten overlapping publishes, reads, and deletes
++seq 1 10 | xargs -P 10 -I{} curl -s -X POST 127.0.0.1:8765/pastes -d '{"content": "{}"}'
++# a caller that connects and goes quiet must not block anyone
++(exec 3<>/dev/tcp/127.0.0.1/8765; printf 'POST /pastes HTTP/1.0\r\nContent-Length: 50\r\n\r\n' >&3; sleep 30) &
++curl -s -o /dev/null -w 'served in %{time_total}s\n' 127.0.0.1:8765/pastes/$ID
++```
++
++Expected: ten distinct ids, each reading back its own content; the read served in well under a
++second while the quiet connection is still open; no response is ever truncated or corrupt. The
++automated equivalents are in `tests/test_concurrency.py`.
++
++## Done when
++
++- `python3 -m pytest` passes with every FR-001…FR-044 test green.
++- Scenarios 1–7 behave as described above.
++- Across a whole session, standard output holds exactly one line and standard error only the
++  failures named in [contracts/cli.md](./contracts/cli.md).
+diff --git a/specs/001-pastebin-service/research.md b/specs/001-pastebin-service/research.md
+new file mode 100644
+index 0000000..98cbae7
+--- /dev/null
++++ b/specs/001-pastebin-service/research.md
+@@ -0,0 +1,324 @@
++# Phase 0 Research: Pastebin Service
++
++**Feature**: `001-pastebin-service` | **Date**: 2026-11-09 | **Plan**: [plan.md](./plan.md)
++
++## Unknowns extracted from Technical Context
++
++The spec's Constraints section fixes the language (Python 3.11+), the dependency policy (standard
++library only), the package layout (`pastebin` under `src/`), the command form, and the entire HTTP
++surface. The user input for this phase fixes the test runner (`pytest`). No field of Technical
++Context is therefore marked NEEDS CLARIFICATION. What remained open were *how* questions — which
++standard-library mechanism satisfies each requirement — resolved below.
++
++| # | Question | Driving requirements |
++|---|----------|----------------------|
++| R-01 | Which `http.server` server class and HTTP version give concurrent service without head-of-line blocking? | FR-042, SC-010 |
++| R-02 | How are identifiers and delete tokens generated so they are unique and unguessable? | FR-013, FR-014 |
++| R-03 | How is a snippet made visible all-or-nothing, and deleted without yielding a partial read? | FR-043, FR-031 |
++| R-04 | How is the storage directory laid out and how are path-derived identifiers made safe? | FR-003, FR-029, FR-036 |
++| R-05 | What is "what the largest valid submission could occupy", and how is reading bounded? | FR-040 |
++| R-06 | How are timestamps produced, stored, and compared at second precision? | FR-019, FR-027, FR-028 |
++| R-07 | How is every undefined path *and* every unsupported method turned into a 404 rather than `http.server`'s 501? | FR-036, FR-037 |
++| R-08 | Which exceptions are caught where, so that Principle II is honoured while FR-038/039 still produce a 500? | FR-037, FR-038, FR-039 |
++| R-09 | How is the output contract (one stdout line, no request logs) enforced against `http.server`'s defaults? | FR-004, FR-044, SC-009 |
++| R-10 | How do tests exercise expiry and restart without a fake clock library? | FR-027, FR-028, FR-030, Principle III |
++
++---
++
++## R-01 — Concurrency model
++
++**Decision**: `http.server.ThreadingHTTPServer` with `daemon_threads = True`, handler
++`protocol_version = "HTTP/1.0"`, and a per-connection socket timeout of 10 seconds set via the
++handler's `timeout` class attribute.
++
++**Rationale**: `ThreadingHTTPServer` is the standard library's own thread-per-connection HTTP server,
++so FR-042 is satisfied without writing a scheduler. `daemon_threads = True` means a caller that has
++gone quiet cannot hold up process exit. The 10-second timeout is what makes the "connects and goes
++quiet" edge case bounded rather than merely parallel: `socketserver.StreamRequestHandler.setup()`
++applies the `timeout` attribute to the connection socket, so a stalled request-line or body read
++raises `TimeoutError` instead of pinning a thread forever. Keeping `protocol_version` at the default
++`HTTP/1.0` means each connection serves one request and closes, which removes keep-alive framing
++from the problem space entirely — notably, it makes the FR-040 "reject before reading the body" case
++safe, since we never have to drain an unread body to reuse the connection.
++
++**Alternatives considered**:
++- *Single-threaded `HTTPServer`*: rejected — directly violates FR-042, and one quiet caller would
++  stall the service.
++- *`ForkingHTTPServer`*: rejected — heavier per request, POSIX-only, and buys nothing here since
++  there is no shared mutable in-process state to isolate.
++- *`asyncio` with a hand-written HTTP parser*: rejected under Principle IV; it would mean owning
++  request parsing that `http.server` already provides, for a service with no throughput target.
++- *`protocol_version = "HTTP/1.1"` with keep-alive*: rejected — it obliges us to drain or close
++  precisely on every error path, adding failure modes no requirement asks for.
++
++## R-02 — Identifiers and delete tokens
++
++**Decision**: identifier = `secrets.token_urlsafe(16)` (22 URL-safe characters, 128 bits of
++entropy); delete token = `secrets.token_urlsafe(32)` (43 characters, 256 bits), drawn independently.
++On publication the record is linked into place with `os.link`, which fails with `FileExistsError` if
++that identifier is already in use; the service then regenerates and retries (bounded at 5 attempts,
++after which it raises rather than returning a duplicate).
++
++**Rationale**: `secrets` is the standard library's CSPRNG interface, so both values are unguessable
++(FR-013) and the token is not derivable from the identifier (FR-014) because they are separate
++draws. 128 bits makes collision with *any* previously issued identifier — including ones whose files
++have since been deleted, which the directory can no longer attest to — negligible rather than merely
++unlikely. The `os.link` guard additionally makes collision with a *live* snippet impossible rather
++than improbable, and costs one line. `token_urlsafe` output is already URL-safe, matching the spec
++Assumption about identifier shape and the `/pastes/<id>` location.
++
++**Alternatives considered**:
++- *UUID4 hex*: equivalent entropy but 32 characters and a dashed/undashed ambiguity in paths; no
++  advantage.
++- *Monotonic counter plus random suffix*: rejected — requires shared state and a lock for a property
++  randomness already provides.
++- *A persisted set of all issued identifiers*: rejected — a second source of truth to keep durable
++  and atomic, for a collision probability of roughly 2⁻¹²⁸ per publication (Principle IV).
++- *Deriving the token as `hmac(secret, id)`*: rejected — introduces a server secret that must itself
++  survive restarts, and FR-014 explicitly wants non-derivability.
++
++## R-03 — Atomic publication, read, and deletion
++
++**Decision**: publication writes the complete JSON record to `<DIR>/.tmp-<random>` in the *same*
++directory, `flush`es and `os.fsync`s it, closes it, then `os.link`s it to `<DIR>/<id>.json` and
++unlinks the temporary name. Reading is a single `Path.read_bytes()` on the final name. Deletion is a
++single `os.unlink` of the final name.
++
++**Rationale**: POSIX `link` within one filesystem is atomic and fails if the destination exists, so
++a concurrent reader either does not see the name at all or sees a fully written file — never a
++partial one (FR-043, first half). Because readers read the whole file in one call and never re-stat
++it, a deletion that lands mid-request either happens before the open (reader gets
++`FileNotFoundError` → 404) or after it (the unlinked inode stays readable through the open handle →
++the whole snippet) — never a truncated body (FR-043, second half). `os.unlink` removing the only
++link makes deletion permanent across restarts (FR-031). `fsync` before linking is what makes the
++durability claim honest after a host crash rather than only after a clean stop.
++
++**Alternatives considered**:
++- *`os.replace` onto the final name*: equally atomic for visibility, but it silently overwrites,
++  which would turn an identifier collision into data loss instead of the retry in R-02. `os.replace`
++  is still the right tool when there is no uniqueness requirement; `link` is right here.
++- *Write directly to the final path*: rejected — a reader could observe a half-written file,
++  violating FR-043.
++- *A lock file or `fcntl` advisory locking around reads and writes*: rejected — the rename/link
++  discipline already gives the required guarantees, and locking would serialise readers against
++  FR-042's spirit while adding a deadlock surface.
++- *An in-process `threading.Lock` plus an in-memory index*: rejected — the index would be a second
++  source of truth, contradicting the spec's "storage location is the sole source of truth", and it
++  would still need the atomic write for restart safety.
++
++## R-04 — Storage layout and identifier safety
++
++**Decision**: one file per snippet, flat, named `<id>.json`, directly under the nominated directory.
++The directory is created with `Path(dir).mkdir(parents=True, exist_ok=True)` and then probed for
++writability by creating and deleting a temporary file inside it. An identifier taken from a request
++path is matched against `^[A-Za-z0-9_-]{1,64}$` *before* it is ever joined to a path; anything else
++is a 404 without touching the filesystem.
++
++**Rationale**: a flat directory needs no sharding logic for a single-operator service with no stated
++snippet-count limit, and `<id>.json` makes the file hand-inspectable, which the spec's
++"hand-edited" edge case implicitly assumes. `mkdir(parents=True)` covers FR-003 including missing
++parents. The probe write is the only way to distinguish "directory exists" from "directory is
++usable" — `os.access` consults permission bits and lies on read-only mounts and under some
++containers, and FR-005 demands we refuse to start rather than discover the problem on first
++publication. The identifier pattern is the single defence against `../` traversal and against
++absolute-path identifiers; validating before path construction (rather than resolving and checking
++containment afterwards) keeps that defence to one `re.fullmatch`. The pattern is a superset of what
++`token_urlsafe` emits, so an identifier the service issued always matches, and a 64-character cap
++keeps a long path from reaching the filesystem's own limits.
++
++**Alternatives considered**:
++- *A single JSON or SQLite file holding all snippets*: SQLite is stdlib and would give atomicity for
++  free, but every publication would then contend on one database and a corrupt database would take
++  down every snippet, where FR-038 explicitly wants damage confined to the affected snippet.
++- *Two-level sharding (`ab/abcdef.json`)*: rejected — speculative scaling with no requirement.
++- *Checking containment with `Path.resolve()` after joining*: rejected — symlink-dependent and
++  subtler than refusing the bad identifier outright.
++
++## R-05 — Bounding the request body
++
++**Decision**: `MAX_CONTENT_BYTES = 65_536`; `MAX_BODY_BYTES = 6 * MAX_CONTENT_BYTES + 1_024 =
++394_240`. If `Content-Length` parses to a value greater than `MAX_BODY_BYTES`, respond 413
++immediately without reading the body. Otherwise read at most `MAX_BODY_BYTES + 1` bytes from the
++connection (whether or not a length was declared); if the read yields more than `MAX_BODY_BYTES`,
++respond 413. A `Content-Length` that is not a non-negative integer is a 400.
++
++**Rationale**: FR-040 defines the ceiling as "what the largest valid submission could occupy", so the
++bound has to be derived from the content limit rather than guessed. JSON's worst-case expansion for
++a string is 6 bytes of output per byte of UTF-8 input: a C0 control character is one UTF-8 byte and
++serialises as `\u0001`. Characters that cost more per *character* cost less per *byte* — an
++astral-plane character is 4 UTF-8 bytes and at most 12 JSON bytes (a surrogate pair), a ratio of 3 —
++so 6× is the true maximum. The `+1_024` slack covers `{"content": ..., "expires_in": 2592000}`,
++whitespace, and the unknown extra fields FR-015 requires us to tolerate. Reading one byte past the
++ceiling is what distinguishes "exactly at the limit" from "over it" in a single read, and applying
++the ceiling even when no length is declared is exactly the second sentence of FR-040 — a caller who
++omits or understates `Content-Length` hits the same wall.
++
++**Consequences worth noting**: `Transfer-Encoding: chunked` bodies are not decoded (`http.server`
++does not decode them); such a body will not parse as JSON and so becomes a 400 under FR-016. No
++requirement covers chunked submissions, and 400 is a defined, explained rejection, so FR-037 holds.
++A caller that declares a length and then stops sending trips the R-01 socket timeout; the handler
++answers 400 ("request body incomplete") on a best-effort basis and closes.
++
++**Alternatives considered**:
++- *A round number such as 1 MiB*: rejected — larger than any valid submission, so it would accept
++  bodies FR-040 says to reject, and the number would not be traceable to a requirement.
++- *`6 * MAX_CONTENT_BYTES` with no slack*: rejected — a valid maximum-size submission with a long
++  unknown extra field could exceed it, turning FR-015 compliance into a 413.
++- *Trusting `Content-Length` alone*: rejected — the second sentence of FR-040 exists precisely to
++  forbid this.
++
++## R-06 — Timestamps
++
++**Decision**: `created_at = datetime.now(timezone.utc).replace(microsecond=0)`, formatted with
++`strftime("%Y-%m-%dT%H:%M:%SZ")`. When a lifetime is given,
++`expires_at = created_at + timedelta(seconds=expires_in)`, computed once at publication and stored
++in the same format; otherwise `null`. Expiry is evaluated on each access by parsing the stored string
++with `datetime.strptime(..., "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)` and treating the
++snippet as absent when `now >= expires_at`.
++
++**Rationale**: truncating microseconds at creation — rather than only at formatting time — makes the
++stored value and the served value identical, so FR-028's "computed once and never changed" is true of
++the bytes on disk, and the expiry moment is exactly `created_at + lifetime` with no sub-second drift.
++`%Y-%m-%dT%H:%M:%SZ` emits precisely the FR-019 shape. `datetime.fromisoformat` would also parse the
++stored form on 3.11+, but `strptime` with the explicit format rejects anything that is not our own
++canonical shape, which is what turns a hand-edited timestamp into the FR-038 internal error instead
++of a silently different expiry. Comparing with `>=` is what makes "at or after" unreadable (FR-027,
++SC-005). Lazy evaluation means an expired file may linger on disk; the spec's Assumptions explicitly
++leave reclamation unspecified, so nothing removes it, and no background thread exists (Principle IV).
++
++**Alternatives considered**:
++- *Storing epoch seconds*: simpler to compare, but the file would no longer be the hand-readable
++  record the FR-038 edge case assumes, and we would still need the ISO form for responses.
++- *Deleting expired files on access*: rejected — an unrequested write on the read path, and it would
++  make a read request fail on a read-only directory.
++- *A sweeper thread*: rejected — "no background reclamation process is required, and none is
++  specified".
++
++## R-07 — Routing every undefined path and method to 404
++
++**Decision**: route on `urllib.parse.urlsplit(self.path).path` against exactly four patterns
++(`POST /pastes`, `GET /pastes/<id>`, `GET /pastes/<id>/raw`, `DELETE /pastes/<id>`); everything else
++is a 404 JSON error. To stop `http.server` from answering unsupported verbs with its own 501 HTML,
++the handler defines `__getattr__` to return the 404 responder for any attribute whose name starts
++with `do_`, and to raise `AttributeError` for every other name.
++
++**Rationale**: `BaseHTTPRequestHandler.handle_one_request` dispatches on `hasattr(self, "do_" +
++command)` and sends a 501 when the attribute is missing. FR-036 requires 404 for "any defined path
++used with a method it does not support", and FR-032 requires a JSON error body on *every*
++unsuccessful response, so the 501-HTML path must become unreachable. A `do_`-scoped `__getattr__` is
++four lines and covers every verb — including ones nobody thought to enumerate — where a hand-written
++list of `do_PUT`/`do_PATCH`/`do_HEAD`/`do_OPTIONS` would silently miss the next one. Restricting it
++to the `do_` prefix keeps it from masking genuine typos elsewhere in the handler, which is the usual
++objection to `__getattr__`. Splitting the query string off before matching means `/pastes/<id>?x=1`
++reads the snippet instead of 404-ing on a path the caller never meant to change.
++
++**Residual gap, accepted**: `http.server` still answers malformed HTTP itself — an unparseable
++request line, a request line over 65,536 bytes (414), or an unsupported HTTP version (505) — with its
++own HTML error. These are not caller *inputs* in the sense of FR-037 (which enumerates bodies,
++fields, paths, and methods); reaching them requires sending something that is not an HTTP request.
++Intercepting them would mean reimplementing `handle_one_request`, which Principle IV rejects.
++
++**Alternatives considered**:
++- *Overriding `handle_one_request`*: rejected — a ~25-line copy of standard-library code to own and
++  keep in step with it.
++- *Overriding `send_error` to emit JSON*: keeps the body shape but not the status (501 ≠ 404), so it
++  does not satisfy FR-036 on its own.
++- *Explicit `do_PUT = do_PATCH = ... = _not_found`*: works for listed verbs only; the open-ended
++  wording of FR-036 argues for the general mechanism.
++
++## R-08 — Exception handling discipline (Principle II)
++
++**Decision**: no bare `except:` and no `except Exception` anywhere. Each `try` names the exceptions
++it handles, at the site that handles them:
++
++| Site | Caught | Translation |
++|------|--------|-------------|
++| Read a snippet file | `FileNotFoundError` | 404 (unknown, deleted, or never issued) |
++| Read a snippet file | `OSError`, `UnicodeDecodeError`, `json.JSONDecodeError` | 500 + stderr diagnostic naming the id (FR-038/039) |
++| Validate a decoded record (shape, types, timestamp format) | — (explicit check, raises `StoreCorrupt`) | 500 + stderr diagnostic (FR-038/039) |
++| Delete a snippet file | `FileNotFoundError` | 404 (lost a race with another deletion) |
++| Parse the request body | `json.JSONDecodeError`, `UnicodeDecodeError` | 400 (FR-016) |
++| Parse `Content-Length` | `ValueError` | 400 |
++| Read the request body | `TimeoutError` | best-effort 400, then close (R-01) |
++| `mkdir` / writability probe at startup | `OSError` | stderr + exit 1 (FR-005) |
++| Bind the listening socket | `OSError` | stderr + exit 1 (FR-005) |
++| Link a new record into place | `FileExistsError` | regenerate the identifier and retry (R-02) |
++
++**Rationale**: a module-defined `StoreCorrupt` exception (rather than a `None` return) is what keeps
++the storage layer from handing back a sentinel the handler could mistake for a snippet, which
++Principle II names explicitly. Catching `FileNotFoundError` *before* the broader `OSError` is what
++keeps "absent" from being reported as "damaged", and catching `OSError` at all is what keeps
++"damaged" from being reported as "absent" — the distinction FR-038 is entirely about. Every caught
++exception above is either answered with a defined status or turned into a non-zero exit, so no code
++path produces a plausible-but-wrong result.
++
++**Deliberate non-decision**: there is no catch-all around the request handler. If an unanticipated
++exception escapes, `socketserver` closes the connection and the caller sees a failed request — loud,
++not silent. Adding a blanket `except Exception` returning 500 would be the exact "plausible but
++wrong" path Principle II forbids, and FR-039 reserves 500 for damaged storage specifically.
++
++## R-09 — Enforcing the output contract
++
++**Decision**: override `log_message` and `log_error` on the handler to do nothing; never call
++`send_error`. Print the ready line with `print(f"listening on 127.0.0.1:{port}", flush=True)` after
++`ThreadingHTTPServer` construction (which binds and listens) and before `serve_forever()`. Write all
++diagnostics with explicit `print(..., file=sys.stderr, flush=True)`.
++
++**Rationale**: `BaseHTTPRequestHandler.log_message` writes an Apache-style line to stderr for every
++request, which FR-044 and SC-009 forbid; silencing it is a two-line override and is the single most
++easily missed requirement in the feature. `log_error` is silenced for the same reason — it fires on
++client errors. Printing after the server object exists is what makes FR-004's "once — and not
++before — it is ready" true: `HTTPServer.__init__` performs both `bind` and `listen`, so the socket is
++already accepting connections when the line appears, and a port conflict raises before anything is
++printed (FR-005). `flush=True` matters because stdout is a pipe under test and the ready line is the
++fixture's start signal.
++
++**Alternatives considered**:
++- *Configuring `logging` with a null handler*: rejected — a logging setup that is required to emit
++  nothing is a knob with one caller and no requirement (Principle IV).
++- *Printing before constructing the server*: rejected — would announce readiness before the socket
++  exists, and would print even when the bind then fails.
++
++## R-10 — Testing expiry, restart, and the output contract
++
++**Decision**: two fixtures in `conftest.py`.
++1. An **in-process** fixture that calls `server.make_server(...)` on port 0 and runs
++   `serve_forever()` in a thread, exposing the actual bound port. Used by most tests; lets a test
++   substitute the store's clock function via `monkeypatch` to reach expiry instantly.
++2. A **subprocess** fixture that launches `python -m pastebin serve --port <free> --data <tmp>` with
++   `src/` on `PYTHONPATH` and pipes captured, waiting for the ready line. Used by the CLI, output
++   contract, bind-failure, and restart tests, where the real process boundary is the thing under test.
++
++Expiry is additionally covered without any clock substitution by (a) publishing with
++`expires_in: 1` and sleeping just past the second boundary, and (b) hand-writing a record whose
++`expires_at` is in the past — legitimate because the on-disk format is a published contract
++([contracts/storage.md](./contracts/storage.md)) and FR-030 obliges a new instance to honour it.
++The HTTP client is `http.client`/`urllib.request` from the standard library, with raw `socket` used
++only for the malformed-framing cases (declared-but-unsent body, understated `Content-Length`).
++
++**Rationale**: patching a clock inside a subprocess is not possible without adding a test-only hook
++to runtime code, which Principle IV forbids; running in-process removes the need for one. But the
++ready line, the exit statuses, and the restart story are properties of the *process*, so they need
++the subprocess fixture — the two fixtures exist because two requirements groups genuinely differ,
++not for convenience. Port 0 plus reading back `server_address[1]` avoids the flaky
++"pick a port and hope" pattern across a suite that starts many servers.
++
++**Alternatives considered**:
++- *`freezegun` or `time-machine`*: third-party; forbidden by Principle I even for tests, which the
++  constitution exempts only for `pytest` itself.
++- *Subprocess-only testing*: would force a `--now` or `PASTEBIN_FAKE_TIME` hook into runtime code
++  purely for tests — a knob with no production caller.
++- *In-process-only testing*: cannot assert the ready line, stderr silence, or exit statuses, leaving
++  FR-004, FR-005, FR-006, and FR-044 untested, which Principle III forbids.
++
++---
++
++## Summary of resolved context
++
++No NEEDS CLARIFICATION markers remain. The design uses `http.server.ThreadingHTTPServer`
++(HTTP/1.0, 10 s socket timeout), one `fsync`ed JSON file per snippet linked atomically into a flat
++directory, `secrets.token_urlsafe` identifiers and tokens, a 394,240-byte read ceiling derived from
++the content limit, second-precision UTC ISO 8601 timestamps evaluated lazily, `do_`-scoped
++`__getattr__` routing so every unsupported verb is a 404, narrowly scoped exception handling with a
++`StoreCorrupt` exception for damaged records, silenced `http.server` logging, and a two-fixture
++pytest harness.

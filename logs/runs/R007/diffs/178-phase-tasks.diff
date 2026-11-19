@@ -1,0 +1,323 @@
+diff --git a/specs/001-pastebin-service/tasks.md b/specs/001-pastebin-service/tasks.md
+new file mode 100644
+index 0000000..7252029
+--- /dev/null
++++ b/specs/001-pastebin-service/tasks.md
+@@ -0,0 +1,317 @@
++---
++
++description: "Task list for Pastebin Service implementation"
++---
++
++# Tasks: Pastebin Service
++
++**Input**: Design documents from `/specs/001-pastebin-service/`
++
++**Prerequisites**: [plan.md](./plan.md), [spec.md](./spec.md), [research.md](./research.md),
++[data-model.md](./data-model.md), [contracts/](./contracts/), [quickstart.md](./quickstart.md)
++
++**Tests**: Test tasks ARE included and are mandatory for this feature. Constitution Principle III
++("Every Requirement Is Testable") and SC-008 require every functional requirement FR-001…FR-044 to
++be named by at least one `pytest` test; the requirement→test map in
++[data-model.md](./data-model.md#requirement-to-test-map) fixes the module and test names, and the
++Development Workflow gate requires tests to be written before the implementation that satisfies
++them. Each test task below lists the exact test names from that map.
++
++**Organization**: Tasks are grouped by user story so each story can be implemented, tested, and
++demonstrated independently.
++
++## Format: `[ID] [P?] [Story] Description`
++
++- **[P]**: Can run in parallel (different files, no dependencies on incomplete tasks)
++- **[Story]**: Which user story the task belongs to (US1, US2, US3, US4)
++- Exact file paths are given in every description
++
++## Path Conventions
++
++Single Python package under `src/`, flat `tests/` beside it (plan.md → Structure Decision). All
++paths below are relative to the repository root.
++
++- Runtime: `src/pastebin/__init__.py`, `src/pastebin/__main__.py`, `src/pastebin/server.py`,
++  `src/pastebin/store.py`
++- Tests: `tests/conftest.py`, `tests/test_*.py`
++- Root files: `README.md`, `pytest.ini`, `requirements-dev.txt`
++
++---
++
++## Phase 1: Setup (Shared Infrastructure)
++
++**Purpose**: Repository skeleton so that `python -m pastebin` is importable and `pytest` collects
++
++- [ ] T001 Create the directory layout `src/pastebin/` and `tests/` per plan.md → Source Code
++- [ ] T002 Create `pytest.ini` at the repository root containing `[pytest]` with `pythonpath = src`, so tests import `pastebin` without installation (quickstart.md: `python3 -m pytest` needs no `PYTHONPATH`)
++- [ ] T003 [P] Create `requirements-dev.txt` at the repository root listing only `pytest` — no runtime requirements file is created, because there are none (Constitution Principle I; plan.md → Primary Dependencies)
++- [ ] T004 [P] Create `README.md` at the repository root stating the minimum version "Python 3.11 or newer" exactly once and the invocation `PYTHONPATH=src python3 -m pastebin serve --port PORT --data DIR` (Constitution → Technology Constraints requires the minimum version be stated once in project documentation)
++- [ ] T005 [P] Create `src/pastebin/__init__.py` holding a version constant only (no imports, no logic) per plan.md → Source Code
++
++**Checkpoint**: `python -c "import pastebin"` succeeds with `src/` on the path; `pytest` collects zero tests without error
++
++---
++
++## Phase 2: Foundational (Blocking Prerequisites)
++
++**Purpose**: The CLI entry point, the HTTP shell (concurrency model, routing, error-body shape,
++output silencing), and the storage-location preparation that every user story depends on
++
++**⚠️ CRITICAL**: No user story work can begin until this phase is complete
++
++- [ ] T006 Define module constants and the corruption exception in `src/pastebin/store.py`: `MAX_CONTENT_BYTES = 65_536`, `MAX_BODY_BYTES = 6 * MAX_CONTENT_BYTES + 1_024` (= `394_240`), `MIN_EXPIRES_IN = 1`, `MAX_EXPIRES_IN = 2_592_000`, `TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"`, `ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")`, and `class StoreCorrupt(Exception)` — a module-defined exception, never a sentinel return (Constitution Principle II; research.md R-05, R-08)
++- [ ] T007 [P] Implement the timestamp helpers in `src/pastebin/store.py`: `now_utc()` returning `datetime.now(timezone.utc).replace(microsecond=0)`, `format_timestamp(dt)` using `TIMESTAMP_FORMAT`, and `parse_timestamp(s)` using `datetime.strptime(s, TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)` — `strptime` with the explicit format, not `fromisoformat`, so a hand-edited timestamp is rejected rather than silently accepted (FR-019; research.md R-06)
++- [ ] T008 Implement `prepare_storage(data_dir)` in `src/pastebin/store.py`: `Path(data_dir).mkdir(parents=True, exist_ok=True)`, then probe writability by creating and unlinking a temporary file inside the directory; let `OSError` propagate to the caller (FR-003; data-model.md → Storage location; research.md R-04)
++- [ ] T009 Create the request-handler skeleton in `src/pastebin/server.py`: a single `BaseHTTPRequestHandler` subclass with `protocol_version = "HTTP/1.0"`, `timeout = 10` (per-connection socket timeout), and `log_message`/`log_error` overridden to do nothing, so `http.server` writes no per-request lines (FR-044, SC-009; research.md R-01, R-09)
++- [ ] T010 Implement the response helpers in `src/pastebin/server.py`: `_send_json(status, obj)` and `_send_error(status, message)` emitting exactly `{"error": "<message>"}` as UTF-8 JSON with an accurate `Content-Length`; never call `send_error` (FR-032; contracts/http-api.md → Error body)
++- [ ] T011 Implement routing in `src/pastebin/server.py`: match `urllib.parse.urlsplit(self.path).path` against exactly `POST /pastes`, `GET /pastes/<id>`, `GET /pastes/<id>/raw`, `DELETE /pastes/<id>`; reject any `<id>` not matching `^[A-Za-z0-9_-]{1,64}$` with 404 before any path is constructed; everything else — including `/`, `/pastes/<id>/extra`, `/pastes/<id>/text` — is 404 with the standard error body `{"error": "not found"}`. Add `__getattr__` returning the 404 responder for any attribute whose name starts with `do_` and raising `AttributeError` otherwise, so no unsupported verb reaches `http.server`'s 501 HTML page (FR-036, FR-032; research.md R-04, R-07)
++- [ ] T012 Implement `make_server(port, data_dir)` in `src/pastebin/server.py` returning a `ThreadingHTTPServer` bound to `("127.0.0.1", port)` with `daemon_threads = True`, with the handler closed over `data_dir`; support `port=0` and expose the actually bound port via `server_address[1]` for tests (FR-002, FR-042; research.md R-01, R-10)
++- [ ] T013 Implement the command line in `src/pastebin/__main__.py` with `argparse`: a single `serve` subcommand, required `--port` validated as an integer in `1`…`65535`, required `--data` as a filesystem path; no other options and no environment variables; a missing, non-numeric, or out-of-range port, a missing `--data`, or a missing/unknown subcommand exits `2` with the `argparse` usage message naming the offending argument on stderr (FR-001, FR-006; contracts/cli.md → Invocation, Exit statuses)
++- [ ] T014 Implement the startup sequence in `src/pastebin/__main__.py`: call `store.prepare_storage(args.data)`, then `server.make_server(args.port, args.data)`, then `print(f"listening on 127.0.0.1:{port}", flush=True)` exactly once — after the socket is bound and listening and before `serve_forever()`; catch `OSError` from either step, write one line naming the directory or port and the OS reason to stderr with `flush=True`, and exit `1` without printing the ready line; exit `0` on `KeyboardInterrupt` writing nothing (FR-004, FR-005, FR-044; contracts/cli.md → Standard output, Standard error, Exit statuses, Shutdown)
++- [ ] T015 Implement the damaged-storage translation in `src/pastebin/server.py`: catch `store.StoreCorrupt` at each read/delete call site and respond `500` with `{"error": "stored paste could not be read"}` — disclosing no filesystem path or exception text to the caller — while writing one diagnostic line naming the affected paste id and the reason to `sys.stderr` with `flush=True`; the service keeps running (FR-038, FR-039; research.md R-08; contracts/http-api.md → Error body)
++- [ ] T016 Create `tests/conftest.py` with the two fixtures from research.md R-10: (1) an in-process fixture calling `server.make_server(0, tmp_path)` and running `serve_forever()` in a thread, exposing the bound port so a test can `monkeypatch` the store's clock to reach expiry instantly; (2) a subprocess fixture launching `python -m pastebin serve --port <free> --data <tmp_path>` with `src/` on `PYTHONPATH`, capturing stdout/stderr and waiting for the ready line; plus an `http.client`-based request helper
++- [ ] T017 [P] Write `tests/test_cli.py` covering FR-001…FR-006 and FR-044 with the names fixed in data-model.md: `test_fr001_serve_accepts_port_and_data`, `test_fr002_listens_on_loopback_only`, `test_fr003_creates_missing_data_dir_including_parents`, `test_fr004_ready_line_printed_once_after_socket_accepts`, `test_fr005_port_in_use_exits_nonzero_without_ready_line`, `test_fr005_unwritable_data_dir_exits_nonzero`, `test_fr006_rejects_missing_port`, `test_fr006_rejects_non_numeric_port`, `test_fr006_rejects_out_of_range_port`, `test_fr006_rejects_missing_data`, `test_fr044_stdout_contains_only_the_ready_line`, `test_fr044_stderr_silent_across_valid_and_invalid_traffic` — asserting both message and exit status (`2` for argument errors, `1` for startup failures) per Constitution Principle III
++- [ ] T018 [P] Write `tests/test_routing.py` covering FR-036: `test_fr036_undefined_paths_are_404` (parametrised over `/`, `/pastes/<id>/extra`, `/pastes/<id>/text`) and `test_fr036_unsupported_methods_are_404` (parametrised over PUT, PATCH, HEAD, OPTIONS, DELETE on `/pastes` and GET on `/pastes`), asserting status `404` and an `error` field in every body
++
++**Checkpoint**: The service starts, prints its one ready line, answers 404 with a JSON error body on every route, and is silent otherwise — user story implementation can now begin
++
++---
++
++## Phase 3: User Story 1 - Publish a snippet and share a link to it (Priority: P1) 🎯 MVP
++
++**Goal**: A caller can publish UTF-8 text and read it back, as structured data with its metadata and
++as the raw bytes, with unguessable identifiers and a one-time delete token in the create response.
++Snippets published in this phase never expire (lifetimes arrive in US2).
++
++**Independent Test**: Start against an empty storage directory, `POST /pastes` with
++`{"content": "hello"}`, confirm `201` with `id`, `delete_token`, and `url: /pastes/<id>`; `GET` that
++url and confirm `id`, the exact text, a `created_at` ending in `Z`, and `"expires_at": null`; `GET`
++`/pastes/<id>/raw` and confirm the body is byte-for-byte the submitted text with
++`Content-Type: text/plain; charset=utf-8`; `GET` an id never issued and confirm `404`.
++
++### Tests for User Story 1 ⚠️
++
++> **Write these first and confirm they FAIL before implementing T021–T028** (Constitution →
++> Development Workflow gate 2)
++
++- [ ] T019 [P] [US1] Write `tests/test_publish.py` covering FR-007…FR-009, FR-012…FR-016, FR-040, FR-041 with the names from data-model.md: `test_fr007_publish_with_content_creates_paste`, `test_fr008_missing_content_is_400`, `test_fr008_non_string_content_is_400` (parametrised over number, bool, list, object, null), `test_fr009_content_at_65536_bytes_accepted`, `test_fr009_content_at_65537_bytes_is_413`, `test_fr009_limit_measured_in_encoded_bytes`, `test_fr012_response_is_201_with_id_delete_token_and_url`, `test_fr013_ids_are_unique_across_many_publications`, `test_fr013_id_entropy_and_alphabet`, `test_fr014_delete_token_not_derivable_from_id`, `test_fr015_unknown_fields_are_ignored`, `test_fr016_malformed_json_is_400`, `test_fr016_non_object_json_is_400` (parametrised over list, number, string, null), `test_fr040_declared_length_over_bound_is_413_without_reading_body`, `test_fr040_understated_length_cannot_exceed_read_ceiling` (raw `socket`, per research.md R-10), `test_fr041_content_type_is_ignored` (parametrised: absent, `application/json`, `text/plain`, nonsense)
++- [ ] T020 [P] [US1] Write `tests/test_read.py` covering FR-017…FR-021 and FR-014 with the names from data-model.md: `test_fr017_get_returns_id_content_created_at_expires_at`, `test_fr018_expires_at_is_null_when_no_lifetime`, `test_fr019_timestamps_are_iso8601_utc_second_precision`, `test_fr020_raw_returns_exact_content_as_utf8_plain_text`, `test_fr021_roundtrip_fidelity` (parametrised: empty string, embedded newlines, non-ASCII, emoji, maximum size), `test_fr014_delete_token_absent_from_read_response`
++
++### Implementation for User Story 1
++
++- [ ] T021 [US1] Implement `create_paste(data_dir, content, expires_at=None)` in `src/pastebin/store.py` following contracts/storage.md → Write protocol: generate `id = secrets.token_urlsafe(16)` ("22 URL-safe chars … unique among all ever issued") and `delete_token = secrets.token_urlsafe(32)` ("43 URL-safe chars … drawn independently of `id`"); serialise the record; create `<DIR>/.tmp-<random>` exclusively, write, `flush`, `os.fsync`, close; `os.link(tmp, "<DIR>/<id>.json")`; `os.unlink(tmp)`; on `FileExistsError` regenerate the identifier and retry, "up to 5 times", then raise rather than return a duplicate. Return the record `dict` (FR-012, FR-013, FR-014, FR-043; research.md R-02, R-03)
++- [ ] T022 [US1] Implement `read_paste(data_dir, paste_id)` and `_validate_record(raw, paste_id)` in `src/pastebin/store.py` following contracts/storage.md → Read protocol and Record: one `Path.read_bytes()` of `<DIR>/<id>.json`, let `FileNotFoundError` propagate, and raise `StoreCorrupt` on `OSError`, `UnicodeDecodeError`, or `json.JSONDecodeError`. A record is valid only if it "decodes as UTF-8 JSON, is an object, has all five keys with the types above, `id` equals the file-name stem, and both timestamps parse under that exact format" — exactly the five keys `id`, `content`, `created_at`, `expires_at`, `delete_token`, where `content` and `delete_token` are strings (`delete_token` "Non-empty"), `created_at` is a string parsing under `TIMESTAMP_FORMAT`, and `expires_at` is "string or `null`"; "Extra keys are not expected and make the record damaged". Anything else raises `StoreCorrupt` — never a 404 (FR-038, FR-039; research.md R-08)
++- [ ] T023 [US1] Implement bounded body reading in `src/pastebin/server.py` for `POST /pastes`: if `Content-Length` is present and parses to a value greater than `MAX_BODY_BYTES` (394,240), respond `413` with `{"error": "request body exceeds the maximum of 394240 bytes"}` *without reading the body*; if it does not parse as a non-negative integer respond `400` with `{"error": "invalid Content-Length header"}`; otherwise read at most `MAX_BODY_BYTES + 1` bytes from `self.rfile` whether or not a length was declared, and respond `413` if more than `MAX_BODY_BYTES` arrived; catch `TimeoutError` and respond `400` `{"error": "request body incomplete"}` on a best-effort basis, then close (FR-040; research.md R-05, R-01)
++- [ ] T024 [US1] Implement body decoding in `src/pastebin/server.py`: decode the bytes as UTF-8 and `json.loads` them, catching `UnicodeDecodeError` and `json.JSONDecodeError` → `400` `{"error": "request body is not valid JSON"}`; require the result to be a `dict` → otherwise `400` `{"error": "request body must be a JSON object"}` for a bare list, number, string, or `null`. Never inspect or require `Content-Type` (FR-016, FR-041; contracts/http-api.md)
++- [ ] T025 [US1] Implement `content` validation in `src/pastebin/server.py`: the field is "Required. Must be a JSON string"; missing or non-string → `400` `{"error": "'content' is required and must be a string"}`; "≤ 65,536 bytes when UTF-8 encoded" measured on `content.encode("utf-8")`, longer → `413` `{"error": "content exceeds the maximum of 65536 bytes"}`; "Empty string is valid" (FR-008, FR-009, FR-033, FR-034; data-model.md → Snippet)
++- [ ] T026 [US1] Implement the `POST /pastes` handler in `src/pastebin/server.py`: call `store.create_paste`, then respond `201` with exactly `{"id": ..., "delete_token": ..., "url": "/pastes/<id>"}` where "`url` is always exactly `/pastes/<id>`"; ignore every field the service does not define rather than rejecting the submission (FR-007, FR-012, FR-015; contracts/http-api.md → `POST /pastes`)
++- [ ] T027 [US1] Implement the `GET /pastes/<id>` handler in `src/pastebin/server.py`: respond `200` with exactly `{"id", "content", "created_at", "expires_at"}` and never `delete_token`; `expires_at` is `null` for a snippet with no lifetime; timestamps are served verbatim from the record in `%Y-%m-%dT%H:%M:%SZ` form; `FileNotFoundError` from `store.read_paste` → `404` `{"error": "not found"}` (FR-014, FR-017, FR-018, FR-019)
++- [ ] T028 [US1] Implement the `GET /pastes/<id>/raw` handler in `src/pastebin/server.py`: respond `200` with the snippet's text UTF-8 encoded as the entire body — "no wrapper, no added newline" — and `Content-Type: text/plain; charset=utf-8`; an empty snippet yields an empty body with `Content-Length: 0`; `FileNotFoundError` → `404` (FR-020, FR-021; contracts/http-api.md)
++
++**Checkpoint**: MVP — publish and read work end to end for the full range of valid text; T019 and T020 pass; a damaged record already yields `500` via T015/T022
++
++---
++
++## Phase 4: User Story 2 - Give a snippet a limited lifetime (Priority: P2)
++
++**Goal**: A caller may state a lifetime at publication; the snippet reads back with a computed
++`expires_at` and becomes indistinguishable from one that never existed once that moment arrives.
++
++**Independent Test**: Publish with `expires_in: 3600` and confirm `expires_at` is exactly one hour
++after `created_at`; publish with `expires_in: 1`, read it successfully, sleep past the second
++boundary, and confirm `GET`, `GET /raw` all report `404`; publish with `0`, `-1`, `2592001`, `1.5`,
++`"3600"`, and `true` and confirm each is `400` creating nothing; publish with `1` and with
++`2592000` and confirm both succeed.
++
++### Tests for User Story 2 ⚠️
++
++> **Write these first and confirm they FAIL before implementing T032–T034**
++
++- [ ] T029 [P] [US2] Write `tests/test_expiry.py` covering FR-027 and FR-028 with the names from data-model.md: `test_fr027_expired_paste_is_404_on_get_raw_and_delete` (the delete arm is completed in US3), `test_fr028_expires_at_equals_created_at_plus_lifetime`, `test_fr028_expires_at_unchanged_by_later_reads` — reaching expiry both by `monkeypatch`ing the store clock through the in-process fixture and by hand-writing a record whose `expires_at` is in the past per contracts/storage.md (research.md R-10)
++- [ ] T030 [US2] Add the lifetime-validation tests to `tests/test_publish.py` (file created in T019): `test_fr010_expires_in_accepts_1_and_2592000`, `test_fr010_rejects_zero_negative_over_max_fractional_string_and_bool`, `test_fr011_absent_expires_in_means_no_expiry`, `test_fr011_null_expires_in_means_no_expiry`
++
++### Implementation for User Story 2
++
++- [ ] T031 [US2] Implement `expires_in` validation in `src/pastebin/server.py` per data-model.md → Caller-supplied input: the field is optional, accepting "JSON integer or `null`, or absent"; when present and not `null` it must satisfy `type(v) is int` — "not `isinstance`, because `isinstance(True, int)` is true in Python and `{"expires_in": true}` must be a 400" — and `1 ≤ n ≤ 2_592_000`; a numeric string such as `"3600"` is a `400` with no coercion; any violation → `400` `{"error": "'expires_in' must be an integer from 1 to 2592000, or null"}` and nothing is created (FR-010, FR-033)
++- [ ] T032 [US2] Compute the expiry moment once in `store.create_paste` in `src/pastebin/store.py`: when a lifetime was given, `expires_at = created_at + timedelta(seconds=expires_in)` formatted with `TIMESTAMP_FORMAT` and stored on the record; "Absent or `null` means never expires" → store `None`. The value is "computed once at publication and never recomputed" (FR-011, FR-028; data-model.md → Snippet; research.md R-06)
++- [ ] T033 [US2] Implement `is_expired(record, now=None)` in `src/pastebin/store.py`: `False` when `expires_at` is `None`, otherwise `now >= parse_timestamp(record["expires_at"])` using `now_utc()` — `>=` so that "at or after" is unreadable; never delete or rewrite the file on the read path, since expiry is evaluated lazily and no reclamation is specified (FR-027; research.md R-06)
++- [ ] T034 [US2] Apply the expiry check to the read paths in `src/pastebin/server.py`: `GET /pastes/<id>` and `GET /pastes/<id>/raw` respond `404` `{"error": "not found"}` for an expired record, identically to an id that was never issued — no observable difference (FR-027, FR-036, SC-005)
++
++**Checkpoint**: Publishing with and without a lifetime both work; expired snippets are unreachable by every implemented path; US1 behaviour is unchanged for snippets with no lifetime
++
++---
++
++## Phase 5: User Story 3 - Withdraw a snippet before it expires (Priority: P2)
++
++**Goal**: The holder of a snippet's delete token can withdraw it; nobody else can, and a failed
++attempt reveals nothing a read would not have revealed.
++
++**Independent Test**: Publish, `DELETE /pastes/<id>` with `X-Delete-Token: <token>`, confirm `204`
++with an empty body and that the snippet then `404`s; publish another, attempt deletion with no
++header and with a wrong token, confirm `403` both times and that the snippet is still readable;
++`DELETE` an id never issued with any token or none, confirm `404` rather than `403`; `DELETE` an
++already-deleted id with its original token, confirm `404`.
++
++### Tests for User Story 3 ⚠️
++
++> **Write this first and confirm it FAILS before implementing T036–T038**
++
++- [ ] T035 [P] [US3] Write `tests/test_delete.py` covering FR-022…FR-026 with the names from data-model.md: `test_fr022_delete_with_token_removes_paste`, `test_fr023_delete_responds_204_and_paste_is_then_404`, `test_fr024_missing_token_is_403_and_paste_survives`, `test_fr024_wrong_token_is_403_and_paste_survives`, `test_fr025_token_compared_with_compare_digest` (monkeypatches `secrets.compare_digest` and asserts the comparison goes through it), `test_fr026_unknown_id_is_404_regardless_of_token`, `test_fr026_expired_paste_delete_is_404_not_403`, `test_fr026_second_delete_is_404`
++
++### Implementation for User Story 3
++
++- [ ] T036 [US3] Implement `delete_paste(data_dir, paste_id)` in `src/pastebin/store.py` per contracts/storage.md → Delete protocol: a single `os.unlink` of `<DIR>/<id>.json`, letting `FileNotFoundError` propagate so a lost race with another deletion becomes a `404`; no tombstone, no index, nothing else written (FR-031; research.md R-03)
++- [ ] T037 [US3] Implement the `DELETE /pastes/<id>` handler in `src/pastebin/server.py` in this exact order so that "not found" takes precedence over "refused": read and validate the record (`FileNotFoundError` → `404`, `StoreCorrupt` → `500` via T015), check expiry (`is_expired` → `404` "regardless of the token presented"), then compare the presented `X-Delete-Token` against the stored `delete_token` with `secrets.compare_digest` so timing reveals nothing about how much of the token was correct — a missing or non-matching token on an existing unexpired snippet → `403` `{"error": "missing or invalid X-Delete-Token"}` with the snippet left intact and readable — and only then call `store.delete_paste` (FR-024, FR-025, FR-026, FR-035; contracts/http-api.md → `DELETE /pastes/<id>`)
++- [ ] T038 [US3] Complete the success path of `DELETE /pastes/<id>` in `src/pastebin/server.py`: respond `204 No Content` with a genuinely empty body, after which every access path reports `404`; a second delete with the same token is `404`, not `204` (FR-022, FR-023)
++
++**Checkpoint**: All of US1, US2, and US3 work independently; the delete endpoint leaks no existence information; the delete arm of `test_fr027_expired_paste_is_404_on_get_raw_and_delete` (T029) now passes
++
++---
++
++## Phase 6: User Story 4 - Snippets outlive a restart of the service (Priority: P3)
++
++**Goal**: The nominated storage directory is the sole source of truth, so a new instance started
++against it serves, reads, and deletes every snippet an earlier instance published, with expiry
++moments unchanged and original delete tokens still valid.
++
++**Independent Test**: Start against a storage path that does not exist, confirm it is created and
++the service serves normally; publish several snippets with and without `expires_in`; stop the
++service; start a new instance against the same directory; confirm each snippet reads back with the
++same `id`, `content`, `created_at`, and `expires_at`, that a snippet whose expiry passed while the
++service was stopped `404`s, and that an original delete token still deletes.
++
++### Tests for User Story 4 ⚠️
++
++> **Write this first and confirm it FAILS (or passes only where the design already satisfies it)
++> before T040–T043**
++
++- [ ] T039 [P] [US4] Write `tests/test_persistence.py` covering FR-029…FR-031 with the names from data-model.md, using the subprocess fixture so the process boundary is real: `test_fr029_paste_readable_from_new_instance_on_same_dir`, `test_fr030_id_content_created_at_expires_at_token_survive_restart`, `test_fr031_deleted_paste_not_resurrected_by_restart` — plus coverage of a snippet whose expiry moment passed while the service was stopped (spec US4 scenario 5)
++
++### Implementation for User Story 4
++
++- [ ] T040 [US4] Align the serialised record in `src/pastebin/store.py` with contracts/storage.md → Record: "A single JSON object, UTF-8 encoded, with exactly these five keys" — `id` (matching the file-name stem), `content` (the text, unmodified), `created_at` and `expires_at` in `%Y-%m-%dT%H:%M:%SZ` form (`expires_at` `null` for never), and a non-empty `delete_token` — written to `<DIR>/<id>.json` with no extra keys, since the service's own writes must never produce a record its own reader calls damaged
++- [ ] T041 [US4] Confirm the durability sequence in `store.create_paste` in `src/pastebin/store.py`: the bytes are `flush`ed and `os.fsync`ed and the file closed *before* `os.link` puts the name in place, and the `201` is sent only after the link succeeds, so no acknowledged publication can be lost by an abrupt stop (FR-029, FR-043; contracts/cli.md → Shutdown)
++- [ ] T042 [US4] Confirm deletion permanence in `src/pastebin/store.py`: `delete_paste` removes the only link to the record so a restart cannot resurrect it, and nothing recreates `<DIR>/<id>.json` afterwards (FR-031)
++- [ ] T043 [US4] Audit `src/pastebin/__main__.py` and `src/pastebin/store.py` for the "no scan, no cache" requirement: startup must perform no directory enumeration and no record inspection, and no module may hold an in-memory index or cache of snippets — the directory is the sole source of truth, read fresh on every request (FR-038 "MUST NOT inspect stored snippets at startup", SC-007; data-model.md → Storage location)
++
++**Checkpoint**: All four user stories are independently functional; restarts preserve everything the spec requires
++
++---
++
++## Phase 7: Polish & Cross-Cutting Concerns
++
++**Purpose**: The requirements that span stories — the aggregate error surface, damaged storage, and
++concurrency — plus the constitution and specification gates
++
++- [ ] T044 [P] Write `tests/test_damaged_storage.py` covering FR-038 and FR-039 with the names from data-model.md: `test_fr038_damaged_record_is_500_not_404`, `test_fr038_diagnostic_names_the_paste_on_stderr`, `test_fr038_other_pastes_unaffected`, `test_fr038_startup_does_not_scan_storage`, `test_fr039_damaged_record_500_body_has_error_field` (parametrised: truncated, invalid JSON, wrong shape, bad timestamp) — constructing damaged records by hand against contracts/storage.md and using the subprocess fixture where stderr is asserted
++- [ ] T045 [P] Write `tests/test_errors.py` covering FR-032…FR-035, FR-037, FR-039 with the names from data-model.md: `test_fr032_every_error_status_carries_single_error_field` (parametrised over 400, 403, 404, 413, 500), `test_fr033_invalid_input_is_400`, `test_fr034_oversize_content_is_413_not_400`, `test_fr035_refused_delete_is_403`, `test_fr037_no_specified_input_produces_an_undefined_response` — the last sweeping every invalid input the spec enumerates and asserting the status is one of 400/403/404/413 and that the body parses as JSON with a non-empty `error` string
++- [ ] T046 [P] Write `tests/test_concurrency.py` covering FR-042 and FR-043 with the names from data-model.md: `test_fr042_quiet_client_does_not_block_other_requests` (raw `socket` declaring a body and sending nothing, asserting another caller is still served promptly), `test_fr042_overlapping_requests_are_served_concurrently`, `test_fr043_reader_never_sees_partially_written_paste`, `test_fr043_delete_during_read_yields_whole_or_404` — ten overlapping publish/read/delete callers per SC-010
++- [ ] T047 Audit the requirement→test map in `specs/001-pastebin-service/data-model.md` against the suite in `tests/`: every FR-001…FR-044 has at least one test whose name or docstring names its identifier, `pytest -k fr0NN` selects a test for each, and no mapped test name is missing from the suite (SC-008, Constitution Principle III)
++- [ ] T048 Audit the constitution gate across `src/pastebin/*.py`: no runtime module imports a third-party package (Principle I), no bare `except:` and no `except Exception` anywhere, each `try` naming only the exceptions listed in research.md R-08 (Principle II), and no abstraction, option, or module without a present requirement forcing it (Principle IV)
++- [ ] T049 Verify the output contract end to end against `src/pastebin/server.py` and `src/pastebin/__main__.py`: across a session of valid and invalid requests, standard output holds exactly the one ready line and standard error holds only the diagnostics contracts/cli.md names — `log_message` and `log_error` silenced, `send_error` never called (FR-044, SC-009)
++- [ ] T050 Run the manual validation scenarios 1–7 in `specs/001-pastebin-service/quickstart.md` against a live service and confirm each observed result matches the stated expectation, including the `nc` oversize-declared-body case and the quiet-connection case
++- [ ] T051 Finalise `README.md`: the Python 3.11+ minimum, the `serve` invocation, the storage directory's role, and how to run the suite (`python3 -m pytest`), consistent with quickstart.md and contracts/cli.md
++- [ ] T052 Run the full suite in `tests/` from the repository root (`python3 -m pytest`, using the `pythonpath = src` setting in `pytest.ini`) and confirm every test passes — a feature is not complete while any requirement lacks a passing test (Constitution → Development Workflow gate 4)
++
++---
++
++## Dependencies & Execution Order
++
++### Phase Dependencies
++
++- **Setup (Phase 1)**: No dependencies — start immediately
++- **Foundational (Phase 2)**: Depends on Setup — **BLOCKS all user stories**
++- **User Story 1 (Phase 3)**: Depends on Foundational only
++- **User Story 2 (Phase 4)**: Depends on Foundational; builds on US1's publish/read handlers
++- **User Story 3 (Phase 5)**: Depends on Foundational; needs US1 to have published something to delete, and US2's `is_expired` for the FR-026 precedence rule
++- **User Story 4 (Phase 6)**: Depends on Foundational; exercises US1–US3 across a process boundary
++- **Polish (Phase 7)**: Depends on US1–US3 (FR-032's 500 arm needs read, its 403 arm needs delete; FR-043 needs publish and delete)
++
++### User Story Dependencies
++
++- **US1 (P1)**: Independent — the only story that can be delivered alone, and the MVP
++- **US2 (P2)**: Extends US1's `POST /pastes` with the `expires_in` field and US1's read paths with an expiry check. Independently testable: a lifetime that is accepted, computed, and then enforced is observable without deletion or restart
++- **US3 (P2)**: Independent of US2 except for reusing `is_expired` for FR-026; if US3 were built before US2, the expiry branch of the delete handler would be the one deferred piece. Independently testable against US1 alone plus `is_expired`
++- **US4 (P3)**: Verifies the storage contract the earlier stories already write; adds no endpoint. Independently testable by restarting the process
++
++### Within Each User Story
++
++- Tests are written first and must fail before the implementation lands (Constitution gate 2)
++- `store.py` before `server.py` — storage functions before the handlers that call them
++- Validation before the success path within a handler
++- Story complete and its checkpoint verified before moving to the next priority
++
++### Parallel Opportunities
++
++- Setup: T003, T004, T005 in parallel after T001
++- Foundational: T007 alongside T006's successors; T017 and T018 in parallel once T016 exists
++- US1: T019 and T020 in parallel (different test files)
++- Polish: T044, T045, T046 in parallel (three different test files)
++- Across stories: once Phase 2 is complete, US1 and the *test-writing* tasks of US2/US3/US4 can proceed in parallel, though those stories' implementations build on US1's handlers
++
++---
++
++## Parallel Example: User Story 1
++
++```bash
++# Write both US1 test modules together (they touch different files):
++Task: "Write tests/test_publish.py covering FR-007…FR-016, FR-040, FR-041"   # T019
++Task: "Write tests/test_read.py covering FR-017…FR-021, FR-014"              # T020
++
++# Then implement storage before handlers (T021 → T022 → T023 …), sequentially:
++# both store tasks edit src/pastebin/store.py and all handler tasks edit src/pastebin/server.py
++```
++
++## Parallel Example: Polish
++
++```bash
++Task: "Write tests/test_damaged_storage.py covering FR-038, FR-039"   # T044
++Task: "Write tests/test_errors.py covering FR-032…FR-035, FR-037"     # T045
++Task: "Write tests/test_concurrency.py covering FR-042, FR-043"       # T046
++```
++
++---
++
++## Implementation Strategy
++
++### MVP First (User Story 1 only)
++
++1. Phase 1: Setup (T001–T005)
++2. Phase 2: Foundational (T006–T018) — CRITICAL, blocks everything
++3. Phase 3: User Story 1 (T019–T028)
++4. **STOP and VALIDATE**: run quickstart.md scenario 1; publish, read, and read-raw a snippet; confirm `404` for an unknown id and one line on stdout
++5. A service that publishes and reads permanent snippets is already a working pastebin (spec US1 rationale)
++
++### Incremental Delivery
++
++1. Setup + Foundational → the shell starts, announces itself, and 404s everything
++2. + US1 → publish and read (**MVP**; quickstart scenario 1)
++3. + US2 → lifetimes and lazy expiry (quickstart scenario 2)
++4. + US3 → withdrawal with a delete token (quickstart scenario 3)
++5. + US4 → durability across restarts (quickstart scenario 4)
++6. + Polish → damaged storage, aggregate error surface, concurrency, and the constitution gate (quickstart scenarios 5–7)
++
++### Parallel Team Strategy
++
++With more than one developer, the stories here are less separable than the template assumes —
++US2 and US3 both extend handlers US1 creates in `src/pastebin/server.py`. The effective split is:
++
++1. Everyone on Setup + Foundational
++2. Then: Developer A takes US1 (`server.py` handlers), Developer B takes `store.py` for US2/US3
++   (`is_expired`, `delete_paste`) and `tests/test_persistence.py`, Developer C writes
++   `tests/test_errors.py`, `tests/test_damaged_storage.py`, and `tests/test_concurrency.py`
++3. US2 and US3 handler work lands after US1's handlers exist, to avoid two developers editing the
++   same handler functions
++
++---
++
++## Notes
++
++- 52 tasks: Setup 5, Foundational 13, US1 10, US2 6, US3 4, US4 5, Polish 9
++- Tests are mandatory here, not optional — Constitution Principle III and SC-008 require each of the
++  44 functional requirements to be named by a test, and data-model.md fixes the test names
++- `[P]` marks tasks on different files with no incomplete dependency; the many tasks on
++  `src/pastebin/server.py` and `src/pastebin/store.py` are deliberately sequential
++- No task introduces a runtime dependency, a configuration knob, or a module beyond the four in
++  plan.md — Principle IV, and plan.md's Complexity Tracking table is intentionally empty
++- Commit after each task or logical group; stop at any checkpoint to validate a story on its own

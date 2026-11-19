@@ -1,0 +1,252 @@
+diff --git a/specs/002-create-archive-command/checklists/requirements.md b/specs/002-create-archive-command/checklists/requirements.md
+new file mode 100644
+index 0000000..8683f31
+--- /dev/null
++++ b/specs/002-create-archive-command/checklists/requirements.md
+@@ -0,0 +1,60 @@
++# Specification Quality Checklist: Create Tar Archives (`create` command)
++
++**Purpose**: Validate specification completeness and quality before proceeding to planning
++**Created**: 2026-11-12
++**Feature**: [spec.md](../spec.md)
++
++## Content Quality
++
++- [x] No implementation details (languages, frameworks, APIs)
++- [x] Focused on user value and business needs
++- [x] Written for non-technical stakeholders
++- [x] All mandatory sections completed
++
++## Requirement Completeness
++
++- [x] No [NEEDS CLARIFICATION] markers remain
++- [x] Requirements are testable and unambiguous
++- [x] Success criteria are measurable
++- [x] Success criteria are technology-agnostic (no implementation details)
++- [x] All acceptance scenarios are defined
++- [x] Edge cases are identified
++- [x] Scope is clearly bounded
++- [x] Dependencies and assumptions identified
++
++## Feature Readiness
++
++- [x] All functional requirements have clear acceptance criteria
++- [x] User scenarios cover primary flows
++- [x] Feature meets measurable outcomes defined in Success Criteria
++- [x] No implementation details leak into specification
++
++## Notes
++
++Validation performed 2026-11-12 against the written spec. Findings:
++
++- **Implementation details**: the only technology named is in **MC-101**, a *Mandated Constraint*
++  recorded verbatim from the requester (`python -m tarx create ...`, standard library only, no
++  install step). This mirrors MC-001/MC-002 in `001-tarx-cli` and is the invocation the user
++  types, not a design choice made by this spec. FR-119 and FR-122 mention a temporary file only
++  to state an *observable* guarantee ("if used, it must not remain"); they do not mandate a
++  mechanism. No module, class, library, or algorithm is named anywhere.
++- **Identifier numbering**: requirements start at FR-101/SR-101 and success criteria at SC-101
++  deliberately. The repository's requirement-coverage gate scans every `specs/*/spec.md` for
++  `FR-xxx`/`SR-xxx`, so reusing `FR-001` would have been silently marked "covered" by an
++  existing, unrelated test from feature 001. Flagged in the spec header so it is not undone.
++- **Testability**: every FR and SR names an observable outcome (a stream, an exit status, a file
++  state, a member name) rather than an internal behaviour. The three exit statuses, the exact
++  success line, the fixed resource bounds, and the fixed member metadata are all literal values
++  that a test can assert on.
++- **Cross-feature safety**: FR-101, MC-102, and SC-109 pin the regression promise — the existing
++  `list` and `extract` suite must pass unmodified — so "must keep working exactly as they do now"
++  is a checked condition rather than an intention.
++- **Clarifications**: none were raised. The one genuinely open design question — what to do with a
++  symbolic link or special file inside a tree — is resolved by refusal, because constitution
++  Principle II forbids silent skipping and because `extract` rejects link members, so any other
++  choice would break FR-109's "readable by `list` and `extract`" requirement. The decision, its
++  two rejected alternatives, and its cost (a tree containing any symlink cannot be archived) are
++  recorded in Assumptions.
++
++- Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`
+diff --git a/specs/002-create-archive-command/spec.md b/specs/002-create-archive-command/spec.md
+new file mode 100644
+index 0000000..6c8a100
+--- /dev/null
++++ b/specs/002-create-archive-command/spec.md
+@@ -0,0 +1,180 @@
++# Feature Specification: Create Tar Archives (`create` command)
++
++**Feature Branch**: `002-create-archive-command`
++
++**Created**: 2026-11-12
++
++**Status**: Draft
++
++**Input**: User description: "This repository already contains `tarx`, a command-line tool for listing and extracting tar archives. Read the existing code and any documentation in the repository before changing it. Add a third command as described below; `list` and `extract` must keep working exactly as they do now. `python -m tarx create ARCHIVE PATH... [--overwrite]` creates a tar archive at ARCHIVE containing each PATH. A PATH is a file or a directory given relative to the current directory, such as `notes.txt` or `photos`; a directory is added together with everything inside it. Members are named by their relative path, so `python -m tarx create photos.tar.gz photos` produces members such as `photos/a.jpg`. If ARCHIVE ends in `.tar.gz` or `.tgz` the archive is gzip-compressed; otherwise it is a plain tar archive. When it finishes it prints `created ARCHIVE with N files` to standard output, where N is the number of regular files added. If ARCHIVE already exists, `create` fails with exit status 3 and an error message on standard error, unless `--overwrite` is given, in which case the archive is replaced. If a PATH does not exist, it prints an error message naming that PATH to standard error, exits with status 2, and creates no archive. Archives made by `create` must be readable by the existing `list` and `extract` commands. Successful commands exit with status 0."
++
++> **Identifier numbering**: this feature's requirements are numbered from **FR-101** and **SR-101**, and its success criteria from **SC-101**, so they cannot collide with the `FR-0xx`/`SR-0xx`/`SC-0xx` identifiers already defined by [`specs/001-tarx-cli/spec.md`](../001-tarx-cli/spec.md). The repository's requirement-coverage gate scans *all* specifications for `FR-xxx`/`SR-xxx`, so a reused identifier would be marked covered by an existing, unrelated test.
++
++## User Scenarios & Testing *(mandatory)*
++
++### User Story 1 - Package files and folders into one archive (Priority: P1)
++
++A user has a folder of work — say `photos`, plus a loose `notes.txt` — and wants a single file they can copy elsewhere or hand to someone. They run one command naming the archive and the things to put in it, and get back a single archive plus a one-line confirmation of how many files went in. Later, they (or anyone with `tarx`) can inspect that archive and unpack it to get the original tree back, with the same relative paths and the same bytes.
++
++**Why this priority**: this is the feature. Without it there is nothing to protect, nothing to fail on, and nothing to round-trip. It is also the whole of the user's value: the archive either faithfully holds the named tree or the command is useless.
++
++**Independent Test**: build a directory tree of known files, run `create` on it, and confirm the reported count, the exit status, and — by running the existing `list` and `extract` on the result — that the member names and file contents match the original tree exactly. Fully testable with no other story implemented.
++
++**Acceptance Scenarios**:
++
++1. **Given** a directory `photos` containing `a.jpg` and `b.jpg`, **When** the user runs `create photos.tar.gz photos`, **Then** `photos.tar.gz` exists, standard output is exactly `created photos.tar.gz with 2 files`, and the exit status is 0.
++2. **Given** that archive, **When** the user runs the existing `list` on it, **Then** the member names shown are the `photos` directory and `photos/a.jpg` and `photos/b.jpg`.
++3. **Given** that archive, **When** the user runs the existing `extract` on it into an empty directory, **Then** the extracted tree has the same relative paths and byte-identical file contents as the original `photos`.
++4. **Given** a file `notes.txt` and a directory `photos`, **When** the user runs `create backup.tar notes.txt photos`, **Then** the archive holds `notes.txt` and every file beneath `photos`, named by their relative paths, and the reported count is the number of regular files.
++5. **Given** an archive name ending in `.tar.gz` or `.tgz`, **When** the archive is created, **Then** it is gzip-compressed; **and given** any other name, **Then** it is a plain, uncompressed tar archive.
++6. **Given** a directory PATH containing an empty subdirectory, **When** the archive is created and then extracted, **Then** the empty subdirectory is present in the extracted tree.
++
++---
++
++### User Story 2 - Never clobber an existing archive by accident (Priority: P2)
++
++A user repeats a `create` command, or picks a name that is already in use. Their existing archive is not silently destroyed: the command refuses, says so, and leaves the file exactly as it was. When replacing it really is what they meant, they say so explicitly and the command replaces it.
++
++**Why this priority**: an archive is usually the *only* remaining copy of something. Silently overwriting it is the most expensive mistake this tool could make, and the refusal is cheap. It is second only to creating archives at all.
++
++**Independent Test**: create an archive, record its bytes, run `create` again at the same path, and confirm the exit status is 3, nothing was printed to standard output, and the file's bytes are unchanged; then repeat with the overwrite option and confirm the archive is replaced and the command succeeds.
++
++**Acceptance Scenarios**:
++
++1. **Given** `photos.tar.gz` already exists, **When** the user runs `create photos.tar.gz photos` without `--overwrite`, **Then** an error message naming the archive goes to standard error, nothing goes to standard output, the existing file is byte-for-byte unchanged, and the exit status is 3.
++2. **Given** `photos.tar.gz` already exists, **When** the user runs the same command **with** `--overwrite`, **Then** the archive is replaced with a new one describing the current tree, the success line is printed, and the exit status is 0.
++3. **Given** a *directory* at the archive path, **When** the user runs `create` at that path with or without `--overwrite`, **Then** an error message goes to standard error, the directory is untouched, and the exit status is 2 — not 3.
++
++---
++
++### User Story 3 - Fail clearly, and leave nothing half-made (Priority: P3)
++
++A user mistypes a folder name, or points `create` at a tree containing something a tar archive of this tool's kind cannot safely carry. The command names exactly what it rejected and why, writes no archive at all, and leaves any existing archive at that path untouched. There is never a truncated or half-written archive to clean up or to mistake for a good one.
++
++**Why this priority**: it turns the first two stories from "usually works" into "trustworthy". A partially written archive that still looks like a success is worse than no archive, because it is discovered at restore time.
++
++**Independent Test**: run `create` against a non-existent path, against a tree containing a symbolic link, and against a tree exceeding the resource bounds, confirming each time that the exit status is 2, the message names the offending path or member, and no file appears at the archive path.
++
++**Acceptance Scenarios**:
++
++1. **Given** no file or directory named `missing-folder`, **When** the user runs `create other.tar missing-folder`, **Then** an error message naming `missing-folder` goes to standard error, no file is created at `other.tar`, and the exit status is 2.
++2. **Given** several PATHs of which one does not exist, **When** the user runs `create`, **Then** the command fails before writing anything — the existing PATHs are *not* archived.
++3. **Given** a directory PATH containing a symbolic link, **When** the user runs `create`, **Then** the command names that member and its kind on standard error, writes no archive, and exits 2 — the link is not silently skipped and not followed.
++4. **Given** an existing archive and a failing `create --overwrite` at that path, **When** the command fails for any reason, **Then** the existing archive is byte-for-byte unchanged and no temporary file is left behind.
++5. **Given** the same PATH named twice, or one PATH nested inside another, **When** the user runs `create`, **Then** the command refuses, names the duplicated member, writes no archive, and exits 2.
++
++---
++
++### Edge Cases
++
++- **Archive inside the tree being archived** — `create photos/out.tar photos`: the archive being written must never become one of its own members, and must not cause the command to consume itself.
++- **A PATH of `.` or `..`** — naming the current directory itself, or anything above it, has no valid relative member name and is refused.
++- **An absolute PATH, or one containing `..`** — refused, because such a member name could not be safely extracted by the existing `extract`.
++- **Empty inputs** — a directory PATH that is empty, or that contains only empty subdirectories, produces an archive with directory members and `with 0 files`.
++- **Zero-byte files** — recorded as regular files and counted in N.
++- **Names with spaces, non-ASCII characters, or control characters** — archived faithfully; any name printed in a message or on standard output is escaped for display.
++- **Unreadable PATH** — a file or directory the user cannot read fails the command with status 2 and no archive, rather than producing an archive missing that member.
++- **Missing parent directory for ARCHIVE** — `create out/x.tar ...` where `out/` does not exist fails with status 2; `create` does not build directories for its own output.
++- **Archive path that is a symbolic link, FIFO, device, or socket** — refused with status 2, with or without `--overwrite`, and never followed.
++- **A file that changes size while it is being read** — detected, and the command fails rather than writing a corrupt member.
++- **A very large or very deep tree** — stopped by the resource bounds with an error, never by producing a truncated archive.
++- **Standard output closed before the success line is written** — the archive has already been created and is complete; the command reports failure with status 2 rather than crashing.
++
++## Requirements *(mandatory)*
++
++### Functional Requirements
++
++#### The command and its inputs
++
++- **FR-101**: The tool MUST provide a third command, `create`, alongside the existing `list` and `extract`. The behaviour of `list` and `extract` — their arguments, output, exit statuses, and all requirements of `specs/001-tarx-cli/spec.md` — MUST remain exactly as they are today; adding `create` MUST NOT change them in any observable way.
++- **FR-102**: `create ARCHIVE PATH... [--overwrite]` MUST accept one ARCHIVE and one or more PATHs. A missing ARCHIVE, a missing PATH, an unrecognised option, an empty-string ARCHIVE, or an empty-string PATH MUST produce a usage message on standard error and exit status 2. `--overwrite` MUST be accepted on `create` and, as today, on `extract`.
++- **FR-103**: Each PATH MUST be interpreted as a path relative to the current directory naming either a regular file or a directory. A directory PATH MUST be archived together with everything beneath it, recursively.
++
++#### What goes into the archive
++
++- **FR-104**: Each archived entry MUST be named by its path relative to the current directory: for a file PATH, the PATH as given; for anything beneath a directory PATH, the PATH followed by that entry's path beneath it, joined with `/`. Redundant `.` components and trailing separators in a PATH MUST be normalised away, so `./photos/` and `photos` name the same member.
++- **FR-105**: Every directory encountered — each directory PATH and every directory beneath it — MUST be recorded as a directory member, so that empty directories survive a create-then-extract round trip. Ancestor directories *above* a PATH MUST NOT be added as members.
++- **FR-106**: Members MUST appear in a deterministic order: PATHs in the order given on the command line; within a directory, the directory's own member first, then its entries in sorted name order, each directory's contents immediately following it. Running `create` twice over an unchanged tree MUST produce the same member names in the same order.
++- **FR-107**: The contents of each archived regular file MUST be byte-for-byte identical to the file on disk at the time it was read.
++- **FR-108**: If ARCHIVE ends in `.tar.gz` or `.tgz` the archive MUST be gzip-compressed; for any other name it MUST be a plain, uncompressed tar archive. The suffix comparison MUST ignore letter case.
++- **FR-109**: Archives produced by `create` MUST be readable by the existing `list` and `extract` commands: `list` MUST print every member name, and `extract` MUST reproduce the archived tree with the same relative paths and byte-identical file contents, with no member rejected by any requirement of `specs/001-tarx-cli/spec.md`.
++
++#### Reporting
++
++- **FR-110**: On success, `create` MUST write exactly `created ARCHIVE with N files`, followed by a newline, to standard output and nothing else, and MUST exit with status 0. ARCHIVE is the archive path as the user gave it, and N is the count of regular files added.
++- **FR-111**: N MUST count regular files only; directory members are excluded. There is no pluralisation: `created out.tar with 0 files` and `created out.tar with 1 files` are both correct.
++- **FR-112**: All error and diagnostic messages MUST go to standard error. Standard output MUST carry only the single success line. A failing `create` MUST NOT print a success line.
++- **FR-113**: Every error message MUST name what was rejected and why, in terms the operator can act on — the archive path, the PATH as given, or the member at issue.
++
++#### Refusing, and failing cleanly
++
++- **FR-114**: If a regular file already exists at ARCHIVE and `--overwrite` was not given, `create` MUST write no archive, report the archive path on standard error, print no success line, and exit with status 3.
++- **FR-115**: With `--overwrite`, `create` MUST replace an existing regular file at ARCHIVE and complete normally per FR-110.
++- **FR-116**: If something other than a regular file exists at ARCHIVE — a directory, a symbolic link, a FIFO, a device, or a socket — `create` MUST report it on standard error, leave it untouched, and exit with status 2, with or without `--overwrite`. `create` MUST NOT follow such a link. `create` MUST NOT create missing parent directories for ARCHIVE; a missing parent is an error with status 2.
++- **FR-117**: If any PATH does not exist, `create` MUST write an error message naming that PATH to standard error, create no archive, and exit with status 2 — including when other named PATHs do exist.
++- **FR-118**: `create` MUST validate every PATH and determine the complete set of members, including all checks required by FR-116, FR-117, SR-101, SR-102, SR-104, and SR-105, before any archive content is written.
++- **FR-119**: On any failure, no archive MUST be left at ARCHIVE: the path MUST be absent if it was absent before, and byte-for-byte unchanged if a regular file was there before. No partial, truncated, or corrupt archive, and no leftover temporary file, may remain anywhere after a failed `create`.
++- **FR-120**: If a file's contents change size while it is being read into the archive, `create` MUST fail with status 2 under FR-119 rather than record a member whose contents do not match its declared size.
++- **FR-121**: Exit statuses MUST be: `0` for a successful command; `3` when `create` was refused **solely** because a regular file already exists at ARCHIVE and `--overwrite` was not given; `2` for every other failure, including usage errors, missing or unreadable PATHs, refused members, an unusable archive path, and exceeded bounds. No other exit status may be produced by any command of this tool.
++- **FR-122**: `create` MUST NOT create, modify, or delete anything other than the archive at ARCHIVE and, if used, a temporary file that is renamed into place or removed before the command returns. Everything named by a PATH MUST be read only.
++
++### Security Requirements
++
++Derived from the OWASP Top 10 (A01 Broken Access Control — path traversal and link following; A03 Injection — argument handling; A04 Insecure Design — all-or-nothing writing; A05 Security Misconfiguration — file permissions) and OWASP ASVS V5 (Validation, Sanitization and Encoding) and V12 (File and Resources), as constitution Principle V requires.
++
++- **SR-101**: Every PATH MUST be validated as a relative location inside the current directory before use. An absolute path, a path containing a `..` component, a path of `.` or `..`, and platform-specific absolute forms such as a drive-letter or UNC prefix MUST each be refused, naming the PATH, with nothing created and exit status 2. This keeps every recorded member name within the set that `extract` will accept (`specs/001-tarx-cli/spec.md` SR-001).
++- **SR-102**: Any entry that is neither a regular file nor a directory — a symbolic link, a hard link, a device, a FIFO, or a socket — whether named directly as a PATH or found beneath a directory PATH, MUST be refused, naming the member and its kind, with nothing created and exit status 2. Such an entry MUST NOT be silently skipped, and a symbolic link MUST NOT be followed or have its target's contents archived. This is what makes FR-109's promise hold, since `extract` refuses links and special files.
++- **SR-103**: Directory traversal MUST be performed without following symbolic links, so that `create` can never read or archive a file outside the trees named by the PATHs, however the directories beneath a PATH are arranged.
++- **SR-104**: If two members would carry the same name — the same PATH given twice, two PATHs normalising to the same location, or one PATH nested inside a directory PATH — `create` MUST refuse, naming the duplicated member, with nothing created and exit status 2. An archive with duplicate members is rejected by `extract` (`specs/001-tarx-cli/spec.md` SR-009), and allowing one would let a later member overwrite an earlier one at extraction time.
++- **SR-105**: `create` MUST bound the archive it produces, and MUST treat an exceeded bound as an error (exit status 2 under FR-119), never as a truncated best-effort archive. The bounds MUST be the same as those the existing commands enforce: at most 10,000 members, at most 1 GiB total bytes across all members, and at most 1 GiB for any single member. This both limits the resources one command can consume and guarantees the result stays inside what `list` and `extract` will accept.
++- **SR-106**: No file's contents may be held whole in memory while it is archived; contents MUST be copied in bounded chunks, so a file of any size costs bounded memory.
++- **SR-107**: The archive file MUST be created with the narrowest workable permissions — owner read and write — set at creation rather than by a later change, and MUST never be given setuid, setgid, or sticky bits. Any temporary file used on the way to the final archive MUST be created with the same narrow permissions.
++- **SR-108**: Recorded member metadata MUST NOT disclose the local account: the user name, group name, user id, and group id recorded for every member MUST be fixed, empty-or-zero values rather than the owner of the file on disk. Recorded permission bits MUST be fixed normalised values, and setuid, setgid, and sticky bits MUST never be recorded.
++- **SR-109**: The archive being written MUST NOT be added to itself as a member, even when ARCHIVE lies inside a directory named by a PATH.
++- **SR-110**: Any archive path, PATH, or member name written to standard output or standard error MUST have control characters — including newline, carriage return, and escape — rendered in a visible escaped form, so that a crafted name cannot inject terminal control sequences or additional output lines. Names made only of printable characters MUST be printed unchanged.
++- **SR-111**: Error messages and diagnostics MUST NOT include file contents, environment variable values, or any data beyond the paths and reasons required by FR-113. No stack trace may reach standard error for any failure condition specified here.
++- **SR-112**: Command-line arguments MUST be validated before use: ARCHIVE and every PATH MUST be non-empty, and the only option accepted by `create` is `--overwrite`. Invalid arguments are a usage error under FR-102 (exit status 2). Argument values MUST be used as filesystem paths directly, never interpolated into a shell command or any other string-built interface.
++
++### Mandated Constraints *(explicitly specified by the requester; recorded here for the planning phase)*
++
++- **MC-101**: `create` is added to the existing `tarx` package and is invoked as `python -m tarx create ...`, using the Python standard library only and no installation step, exactly as the existing commands are (consistent with constitution Principle I and `specs/001-tarx-cli/spec.md` MC-001 and MC-002).
++- **MC-102**: The existing code is to be read before it is changed, and `list` and `extract` must keep working exactly as they do now; the existing automated test suite for `001-tarx-cli` MUST continue to pass unmodified.
++
++### Key Entities
++
++- **Source path (PATH)**: a relative location named on the command line, either a regular file or a directory, interpreted against the current directory. Only its name, kind, size, and contents matter; its recorded permissions and ownership are deliberately not carried into the archive.
++- **Source tree**: everything reachable beneath a directory PATH without following a symbolic link. Flattened into members during validation.
++- **Member**: one entry to be recorded in the archive. Has a name (the relative path), a kind (regular file or directory — nothing else is permitted), a size, and, for regular files, contents.
++- **Output archive (ARCHIVE)**: the file to be written. Its name selects the compression; its prior existence decides between replacement, refusal, and failure. Until the command succeeds, no archive exists at this path.
++- **Creation result**: the outcome reported to the caller — the count of regular files added plus exit status 0, or an error message plus a non-zero exit status and no archive.
++
++## Success Criteria *(mandatory)*
++
++### Measurable Outcomes
++
++- **SC-101**: For every tree in the acceptance corpus — a single file, nested directories, an empty directory, zero-byte files, names with spaces and non-ASCII characters, several PATHs at once, gzip-named and plain-named archives — `create` followed by `extract` into a fresh directory reproduces the original tree exactly, with identical relative paths and byte-identical contents, verified by automated comparison in 100% of cases.
++- **SC-102**: For every tree in the acceptance corpus, `list` on the created archive prints exactly the expected member names in the expected order, verified line-for-line in 100% of cases, and `extract` rejects none of them.
++- **SC-103**: For every archive in the acceptance corpus, the reported count N equals the number of regular files in the source tree, in 100% of cases.
++- **SC-104**: Each of the three documented exit statuses (0, 2, 3) is produced by its specified scenarios and by no other, verified by automated tests covering every failure condition named in the Functional and Security Requirements above.
++- **SC-105**: For every input in the adversarial corpus — a missing PATH, an absolute PATH, a PATH containing `..`, a symbolic link or special file within a tree, a symlinked directory used to point outside the tree, duplicate and nested PATHs, an oversized tree, an archive path that is a directory or a link, and a pre-existing archive without `--overwrite` — no archive is created, no existing archive is modified, no file anywhere outside ARCHIVE is created, modified, or deleted, and no temporary file remains. Zero violations permitted.
++- **SC-106**: A `create` that fails for any reason leaves the archive path exactly as it was — absent, or byte-for-byte identical to the pre-existing archive — verified by comparing before and after in 100% of such cases.
++- **SC-107**: No archive produced by `create` records the local account's user name, group name, user id, or group id for any member, and none records a setuid, setgid, or sticky bit, verified across 100% of the acceptance corpus.
++- **SC-108**: Archiving a 1,000-file, 50 MB tree completes in under 5 seconds on a typical developer machine, and memory use stays bounded regardless of individual file size (no file is held wholly in memory).
++- **SC-109**: The complete automated test suite for `001-tarx-cli` passes unmodified after this feature is added, demonstrating that `list` and `extract` behave exactly as before.
++- **SC-110**: Every requirement identifier in this specification (FR-1xx and SR-1xx) appears in the name or docstring of at least one automated test, giving 100% auditable requirement coverage as required by constitution Principle III.
++
++## Assumptions
++
++Defaults chosen where the feature description was silent. Each is a decision that can be revisited.
++
++- **Unsupported entries are refused, not skipped**: a symbolic link, hard link, device, FIFO, or socket inside a tree makes the whole `create` fail (SR-102). Two alternatives were rejected: silently skipping them, which constitution Principle II forbids and which would quietly produce an incomplete archive; and following symbolic links to archive their targets, which would let a link inside a PATH pull in files from anywhere on the filesystem. A consequence is that a directory containing any symbolic link cannot be archived by this tool at all — the same trade-off the existing `extract` already makes in the other direction.
++- **Compression is chosen by name, not content**: `create` has no content to sniff, so the `.tar.gz`/`.tgz` suffix is the only available signal, as the description specifies. This is the one place in the tool where a filename determines format; `list` and `extract` continue to decide from content, so a misnamed archive still reads correctly.
++- **Directory members are recorded**: the description mentions only files, but recording a directory member for every directory is what lets an empty directory survive a round trip, and it matches what the existing `list` already shows for such archives. Directory members are excluded from N, which is why the `photos` example reports 2 rather than 3.
++- **Exit status reuse**: the description names only statuses 0, 2, and 3, so status 3 is reserved *solely* for a pre-existing regular file at ARCHIVE without `--overwrite`, and every other failure is status 2 — matching the existing commands and inventing no new status.
++- **All-or-nothing creation**: "creates no archive" is read as a guarantee about every failure, not only a missing PATH, so a failure at any point leaves no archive and no temporary leftover (FR-119). This is why validation of all PATHs precedes any writing.
++- **Resource bounds are inherited, not re-chosen**: the same 10,000 members / 1 GiB total / 1 GiB per member bounds the existing commands enforce apply here, because an archive exceeding them could be created but then not listed or extracted by this very tool. They stay fixed constants rather than becoming options.
++- **Member metadata is normalised**: archive permission bits, ownership, and account names are not carried from disk (SR-108). Nothing is lost, because `extract` already ignores recorded permissions and ownership, and it keeps an archive from disclosing who built it. Modification times are not relied upon by any requirement here.
++- **Output format**: the success line is exactly `created ARCHIVE with N files` for every N, with no pluralisation and with ARCHIVE echoed as the user wrote it, matching the literal string in the description so scripts can parse it.
++- **`create` does not build directories for its output**: `extract` creates DEST because DEST is a destination tree; ARCHIVE is a single file, so a missing parent directory is reported as an error rather than silently created.
++- **Scope boundaries**: appending to or updating an existing archive, excluding or filtering entries, reading the list of paths from a file or standard input, changing the stored member names (a "rename" or "strip components" option), progress reporting, compression levels, compression formats other than gzip, preserving extended attributes or sparse-file layout, and any change to `list` or `extract` behaviour are all out of scope.
++- **Environment**: the tool runs on a POSIX-like filesystem as a non-privileged user, reads and writes local paths, and needs no network access. Platform-specific absolute path forms are still rejected defensively (SR-101).

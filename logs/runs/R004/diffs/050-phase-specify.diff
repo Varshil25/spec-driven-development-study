@@ -1,0 +1,559 @@
+diff --git a/specs/001-user-accounts-cli/checklists/requirements.md b/specs/001-user-accounts-cli/checklists/requirements.md
+new file mode 100644
+index 0000000..b819379
+--- /dev/null
++++ b/specs/001-user-accounts-cli/checklists/requirements.md
+@@ -0,0 +1,78 @@
++# Specification Quality Checklist: Local User Account Manager (CLI)
++
++**Purpose**: Validate specification completeness and quality before proceeding to planning
++**Created**: 2026-11-04
++**Feature**: [spec.md](../spec.md)
++
++## Content Quality
++
++- [x] No implementation details (languages, frameworks, APIs)
++- [x] Focused on user value and business needs
++- [x] Written for non-technical stakeholders
++- [x] All mandatory sections completed
++
++## Requirement Completeness
++
++- [x] No [NEEDS CLARIFICATION] markers remain
++- [x] Requirements are testable and unambiguous
++- [x] Success criteria are measurable
++- [x] Success criteria are technology-agnostic (no implementation details)
++- [x] All acceptance scenarios are defined
++- [x] Edge cases are identified
++- [x] Scope is clearly bounded
++- [x] Dependencies and assumptions identified
++
++## Feature Readiness
++
++- [x] All functional requirements have clear acceptance criteria
++- [x] User scenarios cover primary flows
++- [x] Feature meets measurable outcomes defined in Success Criteria
++- [x] No implementation details leak into specification
++
++## Notes
++
++- Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`.
++
++**Validation findings (iteration 1, resolved):**
++
++- *Dangling identifiers*: FR-012, SR-001 and SR-006 referenced a non-existent
++  `FR-023` for the resource limits. Resolved by adding **FR-014** (enforced
++  maxima for password length, input line length, store size and account count)
++  and renumbering the lockout requirements to FR-015–FR-019; all cross-references
++  were re-checked and every `FR-`/`SR-`/`SC-`/`A-` reference now resolves to a
++  defined item.
++
++**Scope notes on "no implementation details":**
++
++- The feature *is* a command-line program, so its externally observable contract
++  — the `--store PATH COMMAND USERNAME` invocation shape, the five command
++  names, the literal strings `registered USERNAME`, `ok`, `invalid credentials`
++  and `account locked`, and the exit-status table — is user-facing behaviour
++  specified by the request, not an implementation choice. It is stated as
++  requirements deliberately.
++- The only genuinely technical constraints (Python 3.11+, standard library only,
++  an `accounts` package under `src/` runnable as `python -m accounts`) are
++  quarantined in **A-013** as given constraints handed down by the requester,
++  and are not used to justify any requirement. No framework, library, storage
++  format, hashing algorithm or module layout is chosen here; those are planning
++  decisions.
++
++**Constitution alignment:**
++
++- Principle III (every requirement testable): SC-001 states the
++  requirement-to-test mapping obligation explicitly; each FR and SR is phrased as
++  an observable check.
++- Principle V and the Security Requirements section (specification stage must
++  walk all nine baseline rules): SR-001–SR-009 map one-to-one onto rules 1–9.
++  SR-003 is the only rule declared partly not applicable, with its reason stated
++  (the operator names the store path deliberately; that is the tool's purpose),
++  and it still carries the obligations that do apply to the temporary file.
++- Untrusted inputs are enumerated by name with validation rules and limits
++  (FR-011, FR-012, FR-014, SR-001, A-011).
++
++**Open items deliberately left to `/speckit-plan`:**
++
++- Store file format, password-hashing algorithm and its parameters, and the
++  mechanism used to serialise concurrent read-modify-write (SR-007).
++- The concrete limit values in A-011 are adjustable without changing any other
++  requirement; the plan may revise them with a reason.
+diff --git a/specs/001-user-accounts-cli/spec.md b/specs/001-user-accounts-cli/spec.md
+new file mode 100644
+index 0000000..81749d2
+--- /dev/null
++++ b/specs/001-user-accounts-cli/spec.md
+@@ -0,0 +1,469 @@
++# Feature Specification: Local User Account Manager (CLI)
++
++**Feature Branch**: `001-user-accounts-cli`
++
++**Created**: 2026-11-04
++
++**Status**: Draft
++
++**Input**: User description: "Build a command-line tool that manages local user accounts with passwords, kept in a single store file. Run it as `python -m accounts --store PATH COMMAND USERNAME`. The store is the file at PATH; it is created on first use and persists between runs. Passwords are never passed as command-line arguments: each command reads the passwords it needs from standard input, one per line. Commands: `register`, `login`, `unlock`, `passwd`, `delete`, with lockout after 5 failed logins and a documented exit-status contract."
++
++## Overview
++
++An operator of a single machine needs to keep a small set of named accounts with
++passwords in one file, and to check a supplied password against an account from
++a script or a terminal. The tool is the whole interface: every operation is one
++invocation, every outcome is a documented exit status, and passwords travel only
++through standard input so they never land in a shell history, a process list, or
++a log.
++
++## User Scenarios & Testing *(mandatory)*
++
++### User Story 1 - Register an account and prove a password (Priority: P1)
++
++An operator creates a named account with a password, then later checks a
++supplied password against that account and gets a clear yes/no answer that a
++script can branch on. The account survives between invocations because it lives
++in the store file.
++
++**Why this priority**: Without registration and verification the tool has no
++purpose. This story alone is a usable product: accounts can be created and
++passwords can be checked.
++
++**Independent Test**: Register an account into a fresh store path, then run a
++check with the right password and with a wrong password in two further
++invocations, and confirm the printed output and exit status of each. Nothing
++from the other stories is needed.
++
++**Acceptance Scenarios**:
++
++1. **Given** a store path that does not yet exist, **When** the operator
++   registers username `alice` supplying a 21-character password, **Then** the
++   output is `registered alice`, the exit status is 0, and the store file now
++   exists.
++2. **Given** `alice` is registered, **When** the operator checks her correct
++   password in a later invocation, **Then** the output is `ok` and the exit
++   status is 0.
++3. **Given** `alice` is registered, **When** the operator supplies a different
++   password, **Then** `invalid credentials` is written to the error stream and
++   the exit status is 1.
++4. **Given** an empty or non-existent store, **When** the operator checks a
++   password for a username nobody registered, **Then** `invalid credentials` is
++   written to the error stream and the exit status is 1 — the same response as
++   a wrong password, so the attempt reveals nothing about which usernames
++   exist.
++5. **Given** a fresh store, **When** the operator registers a username that is
++   2 characters long, 33 characters long, or contains a character outside
++   letters, digits and underscore, **Then** an explanatory message is written to
++   the error stream, the exit status is 2, and no account is created.
++6. **Given** a fresh store, **When** the operator registers with an
++   11-character password, **Then** an explanatory message is written to the
++   error stream, the exit status is 2, and no account is created.
++7. **Given** `alice` is registered, **When** the operator registers `alice`
++   again, **Then** an explanatory message is written to the error stream, the
++   exit status is 3, and the existing account is left untouched (her original
++   password still verifies).
++
++---
++
++### User Story 2 - Stop password guessing, and recover from it (Priority: P2)
++
++Repeated wrong guesses against one account stop working: after five failures the
++account is locked and refuses every further attempt, correct password included.
++The operator can put the account back into service without knowing the
++password.
++
++**Why this priority**: Verification without a guessing limit is the main
++weakness of story 1, and the unlock path is what makes the limit safe to
++operate.
++
++**Independent Test**: Register an account, make five wrong attempts, confirm the
++sixth attempt with the *correct* password is refused as locked, then unlock and
++confirm the correct password works again.
++
++**Acceptance Scenarios**:
++
++1. **Given** a registered account with no failures recorded, **When** four
++   wrong passwords are supplied in four invocations, **Then** each prints
++   `invalid credentials` to the error stream with exit status 1, and the correct
++   password still succeeds afterwards with `ok` and exit status 0.
++2. **Given** a registered account, **When** the fifth consecutive wrong password
++   is supplied, **Then** that attempt prints `invalid credentials` with exit
++   status 1, and the account is from then on locked.
++3. **Given** a locked account, **When** the *correct* password is supplied,
++   **Then** `account locked` is written to the error stream and the exit status
++   is 4.
++4. **Given** a locked account, **When** a wrong password is supplied, **Then**
++   `account locked` is written to the error stream and the exit status is 4 —
++   the lock is reported before the password is considered.
++5. **Given** a locked account, **When** the operator unlocks it, **Then** the
++   exit status is 0, the recorded failure count is back to zero, and the correct
++   password now succeeds.
++6. **Given** a registered account with three recorded failures, **When** the
++   correct password is supplied successfully, **Then** the failure count is back
++   to zero, so five *more* wrong attempts are needed to lock it.
++7. **Given** a store in which no such username exists, **When** the operator
++   unlocks that username, **Then** an explanatory message is written to the
++   error stream and the exit status is 3.
++
++---
++
++### User Story 3 - Change a password (Priority: P3)
++
++The holder of an account replaces its password by proving the current one in the
++same invocation.
++
++**Why this priority**: Rotation is expected of any credential store, but the
++tool is already useful without it.
++
++**Independent Test**: Register an account, change its password supplying the
++current one, then confirm the new password verifies and the old one does not.
++
++**Acceptance Scenarios**:
++
++1. **Given** a registered account, **When** the operator supplies the correct
++   current password followed by a 12-character new password, **Then** the exit
++   status is 0, the new password verifies, and the old password no longer
++   verifies.
++2. **Given** a registered account, **When** the operator supplies a wrong
++   current password (with any new password), **Then** `invalid credentials` is
++   written to the error stream, the exit status is 1, and the stored password is
++   unchanged.
++3. **Given** a registered account, **When** the operator supplies the correct
++   current password and an 11-character new password, **Then** an explanatory
++   message is written to the error stream, the exit status is 2, and the stored
++   password is unchanged.
++4. **Given** a store in which no such username exists, **When** the operator
++   changes that username's password, **Then** an explanatory message is written
++   to the error stream and the exit status is 3.
++
++---
++
++### User Story 4 - Remove an account (Priority: P3)
++
++The holder of an account removes it from the store by proving its password.
++
++**Why this priority**: Completes the lifecycle; the store would otherwise grow
++without a way to shrink.
++
++**Independent Test**: Register an account, delete it supplying its password, and
++confirm a later check for that username is refused and a re-registration of the
++same username succeeds.
++
++**Acceptance Scenarios**:
++
++1. **Given** a registered account, **When** the operator deletes it supplying
++   the correct password, **Then** the exit status is 0, a later password check
++   for that username is refused with exit status 1, and the username can be
++   registered again.
++2. **Given** a registered account, **When** the operator deletes it supplying a
++   wrong password, **Then** `invalid credentials` is written to the error
++   stream, the exit status is 1, and the account still exists.
++3. **Given** a store in which no such username exists, **When** the operator
++   deletes that username, **Then** an explanatory message is written to the
++   error stream and the exit status is 3.
++4. **Given** a store holding several accounts, **When** one is deleted, **Then**
++   the others are unaffected and still verify.
++
++---
++
++### Edge Cases
++
++- **No password on the input stream.** A command that needs one or two password
++  lines receives fewer (the stream is empty, or closed after the first line of a
++  password change): the command reports the missing input on the error stream
++  and exits 2, changing nothing.
++- **Empty password line.** A line that is present but empty is a password of
++  length 0: it fails the minimum-length rule on `register` and `passwd` (exit
++  2), and is simply a wrong password on `login` and `delete` (exit 1).
++- **Over-long password.** A supplied password longer than the accepted maximum is
++  rejected on `register` and `passwd` with exit 2 rather than being silently
++  truncated, and is treated as a failed verification on `login` and `delete`.
++- **Extra input lines.** Input beyond the lines a command needs is ignored; it
++  is not an error.
++- **Passwords with unusual content.** Spaces, punctuation and non-ASCII
++  characters are all accepted inside a password, and a password containing them
++  verifies later byte-for-byte. A trailing line terminator is not part of the
++  password.
++- **First use of a store.** Every command is valid against a store path that
++  does not exist: `register` creates the store, and the other four commands
++  report "no such account" (exit 3, or exit 1 for a password check).
++- **Unreadable, malformed or truncated store.** The store cannot be parsed, or
++  cannot be read or written at all: the tool reports the problem on the error
++  stream and exits 5 without creating, deleting or altering any account. It
++  never silently starts from an empty store, and never partially overwrites the
++  existing one.
++- **Interrupted write.** The process dies while a change is being saved: the
++  store is afterwards either fully in its old state or fully in its new state,
++  never a mixture or an empty file.
++- **Unknown command, missing username, missing store option, extra
++  arguments.** Usage is reported on the error stream with exit status 2.
++- **Username that differs only in case.** `Alice` and `alice` are two distinct
++  accounts; registering one does not conflict with the other.
++- **Simultaneous invocations against one store.** Two commands run at the same
++  moment against the same store: neither loses the other's change, and in
++  particular concurrent wrong guesses cannot discard a failure count increment
++  to dodge the lockout.
++
++## Requirements *(mandatory)*
++
++### Invocation and exit-status contract
++
++- **FR-001**: The tool MUST be invoked as a single command line naming the store
++  file, the operation and the account, in the form
++  `--store PATH COMMAND USERNAME`, and MUST support exactly the operations
++  `register`, `login`, `unlock`, `passwd` and `delete`.
++- **FR-002**: The tool MUST NOT accept a password as a command-line argument.
++  Each operation MUST read the passwords it needs from the standard input
++  stream, one password per line, in the order the operation documents.
++- **FR-003**: Every invocation MUST exit with exactly one of the statuses below,
++  and no other status, for the stated condition:
++
++  | Status | Meaning |
++  |--------|---------|
++  | 0 | The operation completed |
++  | 1 | Credentials rejected (wrong password, or an unknown account on `login`) |
++  | 2 | Invalid request: bad usage, invalid username, password too short or too long, or missing password input |
++  | 3 | Account conflict: `register` on an existing username, or `unlock`/`passwd`/`delete` on an unknown username |
++  | 4 | The account is locked |
++  | 5 | The store could not be read, parsed or written |
++
++- **FR-004**: On success, an operation MUST write only its documented success
++  output to the standard output stream and nothing to the error stream;
++  `register` MUST print `registered USERNAME`, `login` MUST print `ok`, and
++  `unlock`, `passwd` and `delete` MUST print nothing.
++- **FR-005**: On failure, an operation MUST write a message naming what was
++  expected and what was received to the error stream and nothing to the standard
++  output stream. A rejected password MUST produce exactly `invalid credentials`
++  and a locked account exactly `account locked`.
++- **FR-006**: Every failing operation MUST leave the store exactly as it was,
++  except for the failure count recorded by FR-015.
++
++### Store
++
++- **FR-007**: The store MUST be the single file at the given path. It MUST be
++  created on first use by `register` and MUST NOT be created by any other
++  operation.
++- **FR-008**: Accounts written by one invocation MUST be readable by every later
++  invocation naming the same path, with no further setup.
++- **FR-009**: A change to the store MUST become visible all at once: after any
++  interruption the file MUST hold either the complete previous content or the
++  complete new content.
++- **FR-010**: The store MUST hold at least 1,000 accounts without any operation
++  taking longer than a second.
++
++### Accounts and credentials
++
++- **FR-011**: A username MUST be accepted only when it is 3 to 32 characters
++  long and consists solely of letters, digits and underscores; anything else
++  MUST be rejected under status 2. Usernames MUST be compared exactly,
++  distinguishing upper from lower case.
++- **FR-012**: A password MUST be accepted only when it is at least 12 characters
++  long and no longer than the maximum of FR-014; anything else MUST be rejected
++  under status 2 when it is being set (`register`, the new password of
++  `passwd`).
++- **FR-013**: `login`, `passwd` and `delete` MUST each verify the supplied
++  current password against the stored account before doing anything else that
++  the operation implies, and MUST reject a mismatch under status 1.
++- **FR-014**: The tool MUST enforce a maximum accepted password length, a
++  maximum accepted input line length, a maximum store file size and a maximum
++  number of accounts in a store, and MUST refuse input that exceeds any of them
++  rather than truncating or partially processing it. The concrete values are
++  recorded in A-011.
++
++### Lockout
++
++- **FR-015**: Each account MUST carry a count of consecutive failed `login`
++  attempts. A failed `login` MUST increase it by one; a successful `login` MUST
++  reset it to zero.
++- **FR-016**: An account MUST become locked as soon as its count of consecutive
++  failed `login` attempts reaches 5. The fifth failure itself MUST still be
++  reported as a rejected credential (status 1); the lock applies to attempts
++  after it.
++- **FR-017**: While an account is locked, `login` MUST report the lock under
++  status 4 without regard to the supplied password, and MUST NOT report a
++  correct password as a success.
++- **FR-018**: `unlock` MUST clear the lock and reset the failure count to zero,
++  and MUST succeed on an account that is not locked (leaving it usable and its
++  count at zero). `unlock` MUST NOT require a password.
++- **FR-019**: `passwd` and `delete` MUST continue to work on a locked account
++  when the correct current password is supplied; the lock restricts `login`
++  only. A successful `passwd` MUST reset the account's failure count to zero and
++  clear its lock, so a password change is also a recovery path.
++
++### Security requirements
++
++Derived from the nine baseline rules of the project constitution's Principle V.
++Each is a functional requirement and carries the same obligation to be tested,
++including with the rejected input.
++
++- **SR-001** *(rule 1 — all input untrusted)*: Every input MUST be validated
++  against an allow-list before use: the command name against the five accepted
++  operations; the username against FR-011; each password line against FR-012 and
++  FR-014; and every record read back from the store against its expected
++  structure, field set and field format. A store record that fails validation
++  MUST be reported under status 5, never repaired, guessed at or skipped.
++- **SR-002** *(rule 2 — no injection by concatenation)*: Store records MUST be
++  produced and consumed through a structured encoding, so that no username or
++  stored credential material containing a delimiter, line terminator or control
++  character can create, merge or truncate a record. No input may be used to
++  build a shell command, a query or markup; the feature issues none. Messages
++  written to the error stream MUST NOT embed unescaped control characters taken
++  from input.
++- **SR-003** *(rule 3 — path containment)*: Confinement of the store path to a
++  base directory does NOT apply: naming the store file is the operator's
++  explicit purpose in invoking the tool, and the path is a deliberate local
++  argument, not untrusted remote input. What does apply: the temporary file used
++  to satisfy FR-009 MUST be created in the store's own directory, with an
++  unpredictable name, owner-only permissions and no overwriting of an existing
++  file, and MUST be removed on failure.
++- **SR-004** *(rule 4 — credential storage)*: A password MUST be stored only as
++  a salted digest produced by a deliberately slow password-hashing algorithm at
++  current parameters, with a fresh per-account salt, and the algorithm and its
++  parameters MUST be recorded alongside each account. No password MUST ever be
++  written to the store, to any output stream, to a temporary file or to the
++  repository, including in tests and fixtures, which MUST use synthetic values.
++- **SR-005** *(rule 5 — randomness and comparison)*: Salts and any other
++  generated unguessable values MUST come from a cryptographically secure source.
++  Comparison of a derived digest against a stored digest MUST be constant-time.
++- **SR-006** *(rule 6 — resource limits)*: Every input MUST have an enforced
++  maximum: a password line, the store file as a whole, and the number of
++  accounts (FR-014). Reading a store larger than the limit, or a line longer
++  than the limit, MUST be refused rather than loaded. Parsing MUST be bounded —
++  no unbounded recursion, no nesting depth without a limit, and no pattern
++  matching whose cost can grow faster than linearly with input length.
++- **SR-007** *(rule 7 — authorisation at the point of operation)*: The right to
++  change or remove an account MUST be established by verifying the current
++  password within the same invocation that performs the change (FR-013); no
++  earlier result, cached state or input-supplied field may stand in for it. Lock
++  state MUST be read from the store at the moment of the attempt. Read,
++  modify and write of the store MUST be serialised against other invocations so
++  that no interleaving permits an outcome a sequential run would deny — in
++  particular, concurrent failed `login` attempts MUST NOT lose a failure-count
++  increment and so exceed the five-attempt limit.
++- **SR-008** *(rule 8 — least-privilege files)*: The store file and the
++  temporary file of SR-003 MUST be created readable and writable by their owner
++  only, with those permissions set at creation rather than applied afterwards.
++- **SR-009** *(rule 9 — no sensitive data in output)*: No password, salt, digest,
++  hashing parameter, store content, internal path other than the operator's own
++  argument, or stack trace MUST appear in either output stream. A rejected
++  `login` MUST produce the identical message and status whether the username
++  exists or not, so output cannot be used to enumerate accounts. Redaction MUST
++  happen before anything is written.
++
++### Key Entities
++
++- **Account**: one named local identity. Its username is its identifier
++  (3–32 characters of letters, digits and underscores, compared exactly); it
++  carries verification material derived from its password (never the password),
++  a count of consecutive failed login attempts, and whether it is locked.
++- **Store**: the single file at the operator-supplied path holding the whole set
++  of accounts, at most one per username, created on first registration and read
++  and rewritten as a whole by each operation that changes it.
++- **Credential attempt**: one password supplied on the input stream for one
++  invocation, used to verify an account and then discarded; it is never
++  persisted or echoed.
++
++## Success Criteria *(mandatory)*
++
++### Measurable Outcomes
++
++- **SC-001**: Every one of the documented outcomes in the exit-status table of
++  FR-003 is reachable, and for each one an automated check confirms the exit
++  status, the standard output and the error output match this specification —
++  100% of the functional and security requirements map to at least one passing
++  automated check.
++- **SC-002**: An account registered in one invocation verifies in a later,
++  separate invocation 100% of the time, with no setup step between them.
++- **SC-003**: After five wrong guesses, no further guess against that account
++  ever succeeds — including the correct password — until an unlock, in 100% of
++  attempts. A sixth guess can therefore never reveal whether it was right.
++- **SC-004**: A wrong-password attempt and an attempt on an account that was
++  never created are indistinguishable from the outside: identical message,
++  identical exit status, in 100% of cases.
++- **SC-005**: No password supplied to the tool appears anywhere in the store
++  file, in either output stream, or in any temporary file left behind —
++  confirmed by searching for the supplied password after every operation, zero
++  occurrences.
++- **SC-006**: Two different accounts given the same password produce different
++  stored verification material, so the store never reveals that two accounts
++  share a password.
++- **SC-007**: Each operation finishes in under one second on a store holding
++  1,000 accounts, and the time taken to reject a password does not depend on
++  which part of the password was wrong.
++- **SC-008**: Every failed operation leaves the stored set of accounts and their
++  passwords exactly as they were, apart from the failure count the lockout rule
++  requires — verified by comparing the store's account set and verification
++  behaviour before and after each failure case.
++- **SC-009**: Killing the tool at any point during a change leaves a store that
++  still parses and still verifies every account it held before, in 100% of
++  trials.
++- **SC-010**: A newly created store is accessible to its owner only, and to no
++  other user on the machine.
++- **SC-011**: Running the documented example sequence from the feature request
++  reproduces its output and exit statuses exactly, line for line.
++
++## Assumptions
++
++Reasonable defaults chosen where the feature request did not say. Each is
++testable as written and can be revisited in clarification.
++
++- **A-001 — Unknown account on `login` is a credential failure, not a conflict.**
++  The request assigns status 3 to an unknown username for `unlock`, `passwd` and
++  `delete` only, and pointedly not for `login`. `login` on an unknown username
++  therefore answers `invalid credentials` with status 1, which is also what
++  avoids leaking which usernames exist (SR-009).
++- **A-002 — A successful login clears the failure count.** The request says five
++  failed attempts lock an account but not whether success resets the tally; the
++  standard behaviour of resetting on success is assumed (FR-015), so the limit
++  counts *consecutive* failures.
++- **A-003 — The fifth failure reports status 1, the sixth reports status 4.**
++  "After 5 failed login attempts an account is locked" is read as the lock
++  taking effect once the fifth failure has been recorded, so the fifth attempt
++  is still reported as a rejected credential.
++- **A-004 — The lock restricts `login` only.** `passwd` and `delete` still work
++  on a locked account with the correct current password (FR-019), since the
++  request describes the lock purely in terms of logging in and provides `unlock`
++  as the operator's remedy.
++- **A-005 — Only `login` failures count toward the lock.** A wrong current
++  password given to `passwd` or `delete` is reported (status 1) but does not
++  increment the failed-login count, which is defined as a count of login
++  attempts.
++- **A-006 — `unlock` needs no password.** It is the operator's recovery action
++  for an account whose password may be unknown; the request lists no password
++  input for it. Anyone able to read and write the store file can therefore
++  unlock accounts in it, which the file's owner-only permissions (SR-008) are
++  what limit.
++- **A-007 — `unlock` on an unlocked account succeeds.** It resets the failure
++  count to zero and exits 0 rather than treating "not locked" as an error, so
++  the operation is safe to repeat.
++- **A-008 — Store problems get their own status, 5.** The request does not cover
++  an unreadable or malformed store. Statuses 1–4 are each already defined for a
++  specific account-level outcome, so a store-level failure uses the next free
++  status rather than overloading one of them. Failing loudly and changing
++  nothing is required either way.
++- **A-009 — A password is one line of UTF-8 text, excluding its terminator.**
++  Any characters other than a line terminator are allowed inside it, length is
++  counted in characters, and a trailing newline (with or without a preceding
++  carriage return) is stripped and is not part of the password.
++- **A-010 — Missing password input is a status 2 request error.** If the input
++  stream ends before the lines an operation needs, the operation reports the
++  missing input and changes nothing, rather than treating absence as an empty
++  password.
++- **A-011 — Concrete resource limits.** Taken as: a password of at most 1,024
++  characters; an input line of at most 4,096 bytes before it is refused; a store
++  file of at most 8 MiB; at most 10,000 accounts in a store. These satisfy
++  SR-006 with room for the 1,000-account target of FR-010 and SC-007, and are
++  adjustable without changing any other requirement.
++- **A-012 — Single-machine, single-operator scope.** There is no networking, no
++  session, no password-expiry or history policy, no password-strength rule
++  beyond the minimum length, no audit log, and no administrative role beyond
++  "can read and write the store file". Concurrency support extends only to
++  keeping simultaneous invocations against one store correct (SR-007), not to
++  high-throughput access.
++- **A-013 — Environment constraints are a given, not a choice to be made here.**
++  The implementation targets Python 3.11 or newer using the standard library
++  only, as a package named `accounts` under `src/`, runnable as
++  `python -m accounts` with `src/` on `PYTHONPATH`. These are recorded as stated
++  constraints for the planning stage; they also align with the constitution's
++  standard-library-only principle.

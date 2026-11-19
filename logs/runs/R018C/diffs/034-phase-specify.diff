@@ -1,0 +1,468 @@
+diff --git a/specs/002-import-html-export/checklists/requirements.md b/specs/002-import-html-export/checklists/requirements.md
+new file mode 100644
+index 0000000..a52c389
+--- /dev/null
++++ b/specs/002-import-html-export/checklists/requirements.md
+@@ -0,0 +1,64 @@
++# Specification Quality Checklist: Import and HTML Export
++
++**Purpose**: Validate specification completeness and quality before proceeding to planning
++**Created**: 2026-11-16
++**Feature**: [spec.md](../spec.md)
++
++## Content Quality
++
++- [x] No implementation details (languages, frameworks, APIs)
++- [x] Focused on user value and business needs
++- [x] Written for non-technical stakeholders
++- [x] All mandatory sections completed
++
++## Requirement Completeness
++
++- [x] No [NEEDS CLARIFICATION] markers remain
++- [x] Requirements are testable and unambiguous
++- [x] Success criteria are measurable
++- [x] Success criteria are technology-agnostic (no implementation details)
++- [x] All acceptance scenarios are defined
++- [x] Edge cases are identified
++- [x] Scope is clearly bounded
++- [x] Dependencies and assumptions identified
++
++## Feature Readiness
++
++- [x] All functional requirements have clear acceptance criteria
++- [x] User scenarios cover primary flows
++- [x] Feature meets measurable outcomes defined in Success Criteria
++- [x] No implementation details leak into specification
++
++## Notes
++
++Validation performed 2026-11-16 against `spec.md` as written. All items pass. Two deliberate
++decisions are recorded here so a reviewer does not mistake them for oversights:
++
++1. **Platform constraints are restated on purpose** (FR-019 names Python 3.11+, the standard
++   library, the existing `src/bookmarks` package; FR-020 names pytest). These are not design
++   choices made by this specification — they are pre-existing constraints imposed by the project
++   constitution (Principles I and III) and by feature `001-bookmark-manager-cli` (`001:FR-025`,
++   `001:FR-026`, `001:FR-027`), restated so every constitutional gate has a requirement to trace
++   to. No module layout, function design, library or algorithm is specified anywhere in the spec.
++
++2. **File shapes and the page layout are contract, not implementation.** The CSV header line, the
++   JSON record keys and the exact HTML page in FR-012 are the feature's externally visible
++   interface — the user supplies and reads those exact bytes — and are specified to the byte for
++   the same reason the earlier feature's export formats were. The spec says what the bytes must be,
++   never how they are produced or parsed.
++
++Judgment calls that the feature description left open were resolved as reasonable defaults and
++recorded in the spec's **Assumptions** section rather than as `[NEEDS CLARIFICATION]` markers.
++The three worth a second look during planning or review are:
++
++- A record whose address fails the `http://`/`https://` rule aborts the whole import with status 2
++  (FR-010, FR-011), rather than being skipped — driven by "imports nothing" in the description and
++  by constitution Principle II, which forbids skipping a bad record to keep running.
++- Problems with the import **file** are status 2, never status 1, which stays reserved for the
++  collection's own storage file (FR-017).
++- Values drawn from the collection are HTML-escaped in the web-page export (FR-014), so a title
++  containing `&` or `<` yields a well-formed page. The description's example output is unchanged
++  by this.
++
++Items marked incomplete would require spec updates before `/speckit-clarify` or `/speckit-plan`;
++none are.
+diff --git a/specs/002-import-html-export/spec.md b/specs/002-import-html-export/spec.md
+new file mode 100644
+index 0000000..44a34f0
+--- /dev/null
++++ b/specs/002-import-html-export/spec.md
+@@ -0,0 +1,392 @@
++# Feature Specification: Import and HTML Export
++
++**Feature Branch**: `002-import-html-export`
++
++**Created**: 2026-11-16
++
++**Status**: Draft
++
++**Input**: User description: "This repository already contains `bookmarks`, a command-line bookmark manager that stores bookmarks in SQLite. Add two features; every existing command must keep working exactly as it does now. (1) Import: `python -m bookmarks [--db PATH] import FILE --format csv|json` reads bookmarks from FILE in the same formats that `export` writes — CSV with the header row `id,url,title,tags`, or a JSON array of objects with the keys `url`, `title` and `tags` (a list of strings). Each bookmark is added exactly as `add` would add it, with the same rules for URLs, titles and tags. The `id` in the file is ignored and new ids are assigned as usual. On completion it prints `imported N`. If FILE cannot be read, or is not valid CSV or JSON of that shape, it prints an error message to standard error, imports nothing, and exits with status 2. (2) HTML export: `export --format html` prints all bookmarks, ordered by id, as an HTML page with one `<li><a href=\"URL\">TITLE</a> <small>TAGS</small></li>` line per bookmark, where TAGS are the bookmark's tags joined with commas in alphabetical order."
++
++## Context
++
++This feature extends the existing bookmark manager (feature `001-bookmark-manager-cli`). The
++collection, the identifier rules, the URL scheme rule and the tag rules already exist and are
++unchanged here; this specification adds one new command and one new export format on top of them.
++
++Requirement identifiers below (`FR-001`, `SC-001`, …) are local to this feature. Requirements of
++the earlier feature are referenced with its number, as in `001:FR-007` (the URL scheme rule) or
++`001:FR-010` (tag normalisation).
++
++## User Scenarios & Testing *(mandatory)*
++
++### User Story 1 - Bring an existing collection in (Priority: P1)
++
++Someone already has bookmarks outside the tool — a file a colleague exported, or their own export
++from another machine. Instead of re-typing each one with the save command, they point the tool at
++the file, say which of the two file shapes it is, and the tool adds every bookmark in it and
++reports how many it added. The bookmarks are then indistinguishable from ones saved one at a
++time: same identifier sequence, same title and label handling.
++
++If the file is unusable — not there, unreadable, truncated, or not the shape it was declared to
++be — the tool says what was wrong and adds nothing at all. The user is never left guessing
++whether half the file went in.
++
++**Why this priority**: Bulk entry is the whole point of the feature; without it the only way into
++the collection is one bookmark per command. It is also the half that writes to the collection, so
++it carries all the risk.
++
++**Independent Test**: Write a small file in each shape, run the import command against a fresh
++store, then list the collection in a separate invocation. Then repeat with a series of damaged
++files and check the collection afterwards. Fully testable without the HTML export existing.
++
++**Acceptance Scenarios**:
++
++1. **Given** an empty store and a structured (JSON) file holding two bookmarks — one with a title
++   and the labels `python`, `docs`, one with a title and no labels — **When** the user imports it
++   as structured, **Then** the tool prints exactly `imported 2` on the result stream and finishes
++   successfully, and a later listing shows both bookmarks with identifiers 1 and 2, in file
++   order, with labels shown lower-cased, comma-joined and in alphabetical order.
++2. **Given** an empty store and a table (CSV) file whose first line is exactly `id,url,title,tags`
++   followed by two rows, **When** the user imports it as a table, **Then** the tool prints
++   `imported 2`, and a later listing shows the two bookmarks with identifiers 1 and 2.
++3. **Given** a file whose identifier column or key holds values like `57` or `1`, **When** the
++   user imports it, **Then** those values are disregarded and the bookmarks receive the
++   identifiers the store would have issued anyway.
++4. **Given** a store that already holds two bookmarks, **When** the user imports a file of three
++   more, **Then** the tool prints `imported 3`, the earlier two are still present and unchanged,
++   and the new ones carry identifiers above every identifier previously issued.
++5. **Given** a file holding a bookmark with no labels and an empty title, **When** the user
++   imports it, **Then** that bookmark is stored with an empty title and no labels — exactly as
++   the save command would store it when both options are omitted.
++6. **Given** a file holding labels that are duplicated, differently capitalised, empty, or
++   padded with spaces, **When** the user imports it, **Then** each bookmark carries the same
++   label set the save command would have given it: trimmed, lower-cased, de-duplicated, with
++   empty entries dropped.
++7. **Given** a table or structured file holding no bookmarks (a header line alone, or an empty
++   list), **When** the user imports it, **Then** the tool prints `imported 0` and finishes
++   successfully, and the collection is unchanged.
++8. **Given** a path at which no file exists, **When** the user imports it, **Then** the tool
++   prints a diagnostic naming the path and the reason on the diagnostic stream, prints nothing on
++   the result stream, adds nothing, and reports failure code 2.
++9. **Given** a file that is not well-formed in the shape it was declared to be — malformed
++   structured text, a table whose header line is not exactly `id,url,title,tags`, a row with the
++   wrong number of fields, a structured document that is not a list, a record missing a required
++   key, labels given as one string instead of a list — **When** the user imports it, **Then** the
++   tool prints a diagnostic naming the file and what was wrong, adds nothing, and reports failure
++   code 2.
++10. **Given** a file in which one bookmark's address does not begin with `http://` or `https://`,
++    **When** the user imports it, **Then** no bookmark from that file is added — not even the
++    valid ones that precede the bad one — the tool prints a diagnostic naming the rejected
++    address and the accepted forms, and reports failure code 2.
++11. **Given** a failed import against a store that did not exist beforehand, **When** the user
++    afterwards saves a bookmark one at a time, **Then** it receives identifier 1 — the failed
++    import issued no identifiers and left no store file behind.
++12. **Given** a structured file declared as a table, or a table file declared as structured,
++    **When** the user imports it, **Then** the tool reports failure code 2 with a diagnostic —
++    the shape is taken from what the user declared, never guessed from the file's name or
++    contents.
++
++---
++
++### User Story 2 - Publish the collection as a web page (Priority: P2)
++
++The user wants to look at their collection in a browser, or hand it to someone who does not use
++the tool. They ask for the collection as a web page and get a complete page on the result stream:
++one list item per bookmark in identifier order, each a clickable link whose text is the
++bookmark's title, followed by the bookmark's labels.
++
++**Why this priority**: Read-only and self-contained — nothing in the collection depends on it,
++and it cannot damage anything. Valuable, but strictly less so than getting bookmarks in.
++
++**Independent Test**: Seed a store, request the web-page form, and compare the produced text with
++the required page layout line by line. Fully testable without the import command existing.
++
++**Acceptance Scenarios**:
++
++1. **Given** a store holding two bookmarks, **When** the user exports the collection as a web
++   page, **Then** the output is exactly the page layout given in FR-012: the fixed opening lines,
++   one list-item line per bookmark in ascending identifier order, then the fixed closing lines,
++   and the command finishes successfully.
++2. **Given** a bookmark carrying the labels `python` and `docs`, **When** the user exports as a
++   web page, **Then** its list-item line shows the labels as `docs,python` — comma-joined,
++   alphabetical, with no spaces after the commas.
++3. **Given** a bookmark carrying no labels, **When** the user exports as a web page, **Then** its
++   list-item line still has the labels element, holding nothing.
++4. **Given** an empty store, **When** the user exports as a web page, **Then** the complete page
++   is still printed with no list-item lines between the list's opening and closing tags, and the
++   command finishes successfully.
++5. **Given** a bookmark whose title or address contains a character with special meaning in a web
++   page — an ampersand, an angle bracket, a quotation mark — **When** the user exports as a web
++   page, **Then** the page remains well-formed and a standard page reader recovers the link
++   target and the link text exactly as stored.
++6. **Given** a bookmark whose title contains non-English characters, **When** the user exports as
++   a web page, **Then** those characters appear literally in the output, which the page declares
++   as UTF-8.
++7. **Given** any collection, **When** the user requests the table or structured export forms,
++   **Then** their output is byte-for-byte what it was before this feature existed.
++8. **Given** a request for an export form that is none of the three supported ones, **When** the
++   user runs it, **Then** the tool prints a diagnostic on the diagnostic stream and reports
++   failure code 2.
++
++---
++
++### User Story 3 - Move a collection between machines (Priority: P3)
++
++The user exports a collection on one machine and imports it on another, in either file shape, and
++expects every address, title and label to survive the trip — including the awkward values:
++commas, quotation marks, line breaks inside a title, and non-English characters.
++
++**Why this priority**: It is the combination of the two halves rather than a third capability, and
++only becomes testable once both exist. It is nevertheless the scenario that proves the file shapes
++really are the ones the export writes.
++
++**Independent Test**: Seed a store with awkward values, export it, import the result into a second
++empty store, and compare the two collections field by field.
++
++**Acceptance Scenarios**:
++
++1. **Given** a collection containing a title with a comma, a title with a quotation mark, a title
++   with a line break, a title with non-English characters, a bookmark with several labels and a
++   bookmark with none, **When** the user exports it as a table and imports that output into an
++   empty store, **Then** the second collection lists the same addresses, titles and labels in the
++   same order, with identifiers renumbered from 1.
++2. **Given** the same collection, **When** the user exports it in structured form and imports
++   that output into an empty store, **Then** the second collection again matches field for field.
++3. **Given** a collection in which two bookmarks hold the same address, **When** the user exports
++   and imports it, **Then** both bookmarks are present afterwards — addresses are not de-duplicated
++   on the way in.
++
++---
++
++### Edge Cases
++
++- **Import file absent, a directory, or unreadable**: diagnostic naming the path and the reason,
++  nothing added, failure code 2 — not code 1, which stays reserved for the collection's own
++  storage file.
++- **Import file is empty (zero bytes)**: a table needs its header line, so this is a malformed
++  table and fails with code 2; structured form needs a list, so an empty document fails with code
++  2 as well.
++- **Table file with only the header line**, or **structured file holding an empty list**:
++  `imported 0`, success, collection unchanged.
++- **Table header line that is not exactly `id,url,title,tags`** — reordered, renamed, missing, or
++  with extra columns: failure code 2.
++- **Table row with too few or too many fields**: failure code 2; no row from the file is added.
++- **Table row whose labels field holds `python,docs`**: that is one field holding two labels (the
++  export quotes it for exactly this reason), and it must produce two labels, not a parse error.
++- **Structured document that is a single record rather than a list of records**: failure code 2.
++- **Structured record missing `url`, `title` or `tags`**: failure code 2.
++- **Structured record whose `tags` is a string, a number, or a list containing a non-string**:
++  failure code 2.
++- **Structured record carrying an `id` key** (as every export does): accepted, and the value
++  disregarded.
++- **Any address in the file failing the scheme rule**: the whole import fails with code 2 and
++  nothing is added — a bad record is never skipped to keep going.
++- **Import file holding a bookmark already in the collection**: added again with a new identifier;
++  the import performs no merging, matching the existing rule that addresses need not be unique.
++- **Import that fails against a non-existent store path**: no store file is created.
++- **Import against an unusable store** (parent directory missing, path is not a bookmark
++  database): failure code 1, the existing file untouched, exactly as every other command behaves.
++- **Import file with carriage-return line endings**: accepted; the table shape tolerates both
++  line-ending conventions, and a line break inside a quoted field remains part of that field.
++- **Web page export of a title containing a tab or a line break**: emitted inside the link text as
++  stored; the page layout puts one bookmark per line, so such a title makes the output span more
++  lines than there are bookmarks — accepted, as it already is in the tab-separated listing.
++- **Web page export with a title that is empty**: the link has empty text, and the line is
++  otherwise unchanged — no placeholder is substituted.
++
++## Requirements *(mandatory)*
++
++### Functional Requirements
++
++**The import command**
++
++- **FR-001**: The tool MUST accept a sixth command in the form
++  `python -m bookmarks [--db PATH] import FILE --format csv|json`, where `FILE` is the path of the
++  file to read. `--format` MUST be required and MUST accept only the values `csv` and `json`; a
++  missing `FILE`, a missing `--format` or any other `--format` value MUST produce a diagnostic on
++  standard error and exit with status 2.
++- **FR-002**: A successful import MUST print exactly `imported N` followed by a newline on
++  standard output, and nothing else, where N is the number of bookmarks added, and MUST exit with
++  status 0 — including when N is 0.
++- **FR-003**: Each bookmark in the file MUST be added exactly as the `add` command would add it:
++  the address MUST satisfy the scheme rule (`001:FR-007`), the title MUST be stored as given
++  (`001:FR-008`), and the labels MUST be trimmed, emptied of blank entries, lower-cased and
++  de-duplicated (`001:FR-010`).
++- **FR-004**: Any identifier present in the file MUST be disregarded. New identifiers MUST be
++  issued by the store's existing rule — starting at 1 in a fresh store, increasing, never reissued
++  (`001:FR-006`) — so that importing into a store that already holds bookmarks appends to it and
++  never replaces, renumbers or removes what is there.
++- **FR-005**: Bookmarks MUST be added in the order they appear in the file, so that their
++  identifiers ascend in file order.
++
++**File shapes the import accepts**
++
++- **FR-006**: With `--format csv`, the file MUST be read as the CSV form that
++  `export --format csv` writes (`001:FR-018`, `001:FR-019`): the first line exactly
++  `id,url,title,tags`, then one row per bookmark with exactly four fields in that order, the
++  fourth field holding that bookmark's labels joined by commas. Standard CSV quoting MUST be
++  honoured, so a quoted field may itself contain commas, doubled quotation marks and line breaks;
++  both `\n` and `\r\n` line endings MUST be accepted. The fourth field MUST be interpreted by the
++  same rules as the `--tags` option of `add` (`001:FR-009`, `001:FR-010`). A file consisting of
++  the header line alone MUST import 0 bookmarks and succeed.
++- **FR-007**: With `--format json`, the file MUST be read as the JSON form that
++  `export --format json` writes (`001:FR-020`): a single array whose elements are objects, each
++  carrying the keys `url` (a string), `title` (a string) and `tags` (an array of strings). An `id`
++  key MUST be accepted and its value disregarded. An empty array MUST import 0 bookmarks and
++  succeed.
++- **FR-008**: The declared `--format` MUST determine how the file is read. The tool MUST NOT infer
++  the shape from the file's name, extension or contents, and MUST NOT fall back to the other shape
++  when the declared one does not parse.
++- **FR-009**: Files MUST be read as UTF-8, so that addresses, titles and labels containing
++  non-ASCII characters are imported unchanged irrespective of the machine's locale settings.
++
++**Import failures**
++
++- **FR-010**: An import MUST fail when any of the following holds: the file cannot be read (it
++  does not exist, is a directory, or access is denied); the file is not well-formed in the
++  declared shape; the file is well-formed but does not match the shape required by FR-006 or
++  FR-007 (wrong header line, wrong field count, top level that is not an array, a record missing
++  a required key, a `tags` value that is not an array of strings, an unrecognised key); or any
++  bookmark in the file has an address failing the scheme rule. In every such case the tool MUST
++  write a diagnostic to standard error naming the file and what was invalid and what was expected,
++  MUST write nothing to standard output, and MUST exit with status 2.
++- **FR-011**: A failed import MUST be all-or-nothing: no bookmark from the file is added, not even
++  the records preceding the first fault; the collection MUST hold exactly what it held before; the
++  next bookmark saved afterwards MUST receive the identifier it would have received had the import
++  not been attempted; and if the store file did not exist beforehand it MUST NOT be created.
++
++**The web-page export form**
++
++- **FR-012**: `export --format html` MUST print every bookmark in ascending identifier order as
++  one page of exactly this form, where each `<li>` line stands for one bookmark:
++
++  ```html
++  <!DOCTYPE html>
++  <html>
++  <head><meta charset="utf-8"><title>Bookmarks</title></head>
++  <body>
++  <ul>
++  <li><a href="URL">TITLE</a> <small>TAGS</small></li>
++  </ul>
++  </body>
++  </html>
++  ```
++
++  `URL` is the bookmark's address, `TITLE` its title, and `TAGS` its labels joined by commas in
++  alphabetical order with no spaces around the commas. A bookmark with no labels MUST still have
++  the `<small>` element, holding nothing. An empty collection MUST print the same page with no
++  `<li>` line between `<ul>` and `</ul>`, exiting with status 0.
++- **FR-013**: Every line of the page, including the last, MUST be terminated by a single line feed
++  (`\n`), and the page MUST end with exactly one trailing newline. Characters outside ASCII MUST
++  be written literally as UTF-8 rather than escaped (`001:FR-023a`).
++- **FR-014**: Characters that carry special meaning in a web page MUST be escaped in the values
++  taken from the collection — at minimum `&`, `<` and `>` in the address, the title and the
++  labels, and additionally the double quotation mark inside the address attribute — so that the
++  page is well-formed and a standard page reader recovers the stored address and title exactly.
++  The fixed lines of the page MUST be emitted verbatim as shown in FR-012.
++
++**Preserved behaviour**
++
++- **FR-015**: Every command the tool already offers — `add`, `list`, `search`, `delete` and
++  `export --format csv|json` — MUST keep its present behaviour unchanged: the same arguments and
++  defaults, the same bytes on standard output, the same diagnostics and the same exit statuses.
++  Adding `html` to the accepted export forms MUST NOT alter the CSV or JSON output.
++- **FR-016**: The stored collection's structure MUST NOT change, so a store written by the
++  previous version is used as-is, with no migration step and no new storage rules.
++- **FR-017**: The exit-status map MUST be extended without being redefined (`001:FR-024`): 0
++  success, 1 the store could not be used, 2 any mistake in what the user supplied — now including
++  every import-file failure of FR-010 — and 3 reserved exclusively for deleting an identifier that
++  does not exist. The import command MUST never exit 3, and a file problem MUST never be reported
++  as 1.
++- **FR-018**: All command results MUST continue to go to standard output and all diagnostics to
++  standard error, with no partial results on standard output from a failing command
++  (`001:FR-023`).
++- **FR-019**: The feature MUST run on Python 3.11 or newer using only the Python standard library,
++  with no third-party runtime dependency, inside the existing `bookmarks` package under `src/`
++  (`001:FR-025`, `001:FR-026`).
++- **FR-020**: Every functional requirement above MUST be covered by at least one automated pytest
++  test that identifies the requirement it covers, and the pre-existing tests MUST continue to pass
++  unmodified, per the project constitution.
++
++### Key Entities
++
++- **Bookmark** and **Tag**: unchanged from `001-bookmark-manager-cli`. A bookmark carries an
++  identifier unique within the store and never reused, an address, a possibly empty title and a
++  possibly empty set of lower-cased labels; labels are presented in alphabetical order.
++- **Import file**: an external document, outside the collection, describing a sequence of
++  bookmarks in one of the two shapes the export writes. It is read, never written. It carries no
++  authority over identifiers, and no record in it is partially honoured: either the whole file is
++  imported or none of it is.
++- **Web page export**: a derived, read-only rendering of the whole collection in identifier order.
++  It holds the address, title and labels of each bookmark but not its identifier, and is therefore
++  a presentation form rather than a round-trip form.
++
++## Success Criteria *(mandatory)*
++
++### Measurable Outcomes
++
++- **SC-001**: A user can move a collection of 1,000 bookmarks from one store to another with one
++  export command and one import command, and all 1,000 arrive with addresses, titles and labels
++  identical to the originals, in the same order — verified for both file shapes.
++- **SC-002**: The number the import prints equals the number of bookmarks the collection gains, in
++  100% of successful imports.
++- **SC-003**: Every unusable import file leaves the collection exactly as it was and signals
++  failure with status 2 and an explanatory message on the diagnostic stream, with nothing on the
++  result stream, in 100% of attempts — verified across at least eight distinct kinds of damage
++  (absent file, directory, empty file, wrong header line, wrong field count, malformed structured
++  text, top level not a list, record missing a key, labels not a list of strings, rejected
++  address).
++- **SC-004**: For a collection whose titles and addresses include ampersands, angle brackets,
++  quotation marks and non-English characters, a standard page reader applied to the web-page
++  export finds exactly one link per bookmark, in identifier order, each link's target equal to the
++  stored address and each link's text equal to the stored title, for 100% of bookmarks.
++- **SC-005**: Importing a 1,000-bookmark file completes in under five seconds, and the web-page
++  export of a 1,000-bookmark collection returns in under one second, on ordinary hardware.
++- **SC-006**: All pre-existing commands behave identically to the previous version: the whole
++  earlier test suite passes with no test modified, and the table and structured exports of a given
++  collection are byte-for-byte what they were before.
++- **SC-007**: Every functional requirement of this feature is demonstrated by at least one
++  automated test, and the full suite passes.
++
++## Assumptions
++
++- **A failed import is atomic, not partial.** The description says a bad file "imports nothing",
++  and the constitution forbids skipping a bad record to keep running, so a single faulty record —
++  including one whose address fails the scheme rule — aborts the whole import rather than being
++  skipped or reported as a count of successes and failures. There is no `--continue-on-error`
++  mode, and no partial-success exit status.
++- **An address failing the scheme rule is an import failure.** "Added exactly as the `add` command
++  would add it" makes the scheme rule apply to imported addresses, and `add` rejects such an
++  address with status 2; combined with the atomicity assumption above, the whole import then fails
++  with status 2.
++- **The declared shape is strict.** A table's header line must be exactly `id,url,title,tags`, its
++  rows must hold exactly four fields, and a structured record must carry `url`, `title` and `tags`
++  with `tags` an array of strings. An `id` key or column is accepted and ignored because every
++  export writes one; any other unrecognised key is a shape error rather than silently dropped
++  data. A missing `title` or `tags` key is an error too, rather than defaulting to empty — the
++  file's shape is specified, so a gap in it is a mistake worth reporting.
++- **File problems are status 2, not status 1.** Status 1 is defined as "the store could not be
++  used"; the import file is user-supplied input, so every problem with it is a usage mistake. The
++  collection's own storage file keeps its status 1 behaviour, and the import file is read and
++  validated before the store is opened, which is what makes "creates no store file on failure"
++  achievable.
++- **The shape is never guessed.** `--format` is required and authoritative; neither the file
++  extension nor a sniff of the contents may override it.
++- **Import does not merge or de-duplicate.** Importing a bookmark whose address is already stored
++  adds a second bookmark with its own identifier, consistent with the existing rule that addresses
++  need not be unique. There is no "update if present" behaviour and no dry-run option.
++- **Import reads a named file only.** Reading from standard input, from several files at once, or
++  from a URL is out of scope; `FILE` is a single path on the local file system.
++- **The web page is escaped.** Values drawn from the collection have their HTML-special characters
++  escaped so the page stays well-formed and the stored text is recoverable; the page's fixed lines
++  are emitted exactly as shown. The example output is unaffected, since ordinary titles and
++  addresses contain no such characters.
++- **The web page is not an import shape.** It omits identifiers and is meant for reading, so
++  `import --format html` does not exist; the round-trip shapes remain the table and the structured
++  forms.
++- **The web page layout is fixed.** No styling, no grouping by label, no page title other than
++  `Bookmarks`, no "generated on" line, and no options to vary any of it.
++- **Everything else is unchanged.** One person on one machine, no concurrent use of one store, no
++  update command, no archiving of page content, and pytest remains the only development dependency
++  and is never imported by shipped code.

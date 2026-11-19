@@ -1,0 +1,1898 @@
+diff --git a/specs/002-password-reset/contracts/cli-contract.md b/specs/002-password-reset/contracts/cli-contract.md
+new file mode 100644
+index 0000000..d40cae8
+--- /dev/null
++++ b/specs/002-password-reset/contracts/cli-contract.md
+@@ -0,0 +1,238 @@
++# Contract: Command-Line Interface — feature 002 delta
++
++**Feature**: `002-password-reset` | **Date**: 2026-11-05
++
++This file is a **delta** on
++[feature 001's CLI contract](../../001-user-accounts-cli/contracts/cli-contract.md),
++which remains the contract for the five existing operations and is unchanged
++except for the two diagnostic strings in
++[§Changes to existing text](#changes-to-existing-text) below (A-025, FR-040).
++
++Like its predecessor it is asserted directly, by running the real executable in
++a subprocess with piped streams.
++
++## Invocation
++
++```text
++python -m accounts --store PATH reset-token USERNAME [--ttl SECONDS]
++python -m accounts --store PATH reset USERNAME
++```
++
++- `COMMAND` is now exactly one of `register`, `login`, `unlock`, `passwd`,
++  `delete`, `reset-token`, `reset` — seven names, nothing else (FR-020).
++- `--ttl SECONDS` is accepted **only** with `reset-token`, **not** abbreviated
++  (`--tt` is an error), and **not** more than once. Any of those three is a
++  usage error, status 2 (FR-021). `--ttl=SECONDS` is accepted as argparse's
++  standard equivalent form.
++- `SECONDS` must match `[0-9]{1,5}` and then fall in `1 … 86400`. Absent, it is
++  `900` (FR-021, FR-022, A-016).
++- `USERNAME` rules are unchanged: 3–32 characters of `[A-Za-z0-9_]`,
++  case-sensitive (FR-011).
++- There is still no `-h`/`--help` and no option abbreviation.
++- Neither a token nor a password may appear as an argument (FR-002, FR-023).
++
++## Standard input protocol
++
++| Command | Lines read | Order |
++|---|---|---|
++| `reset-token` | **0** | — must work with stdin closed (FR-023, scenario 1.6) |
++| `reset` | 2 | **token**, then **new password** (FR-023) |
++
++Both lines follow the existing line rules exactly (A-022, A-009, FR-014,
++SR-015): terminated by `\n` optionally preceded by `\r`, the terminator is not
++part of the value, a final line without a terminator is valid, at most 4 096
++bytes before the terminator, and valid UTF-8. A longer line is **refused, not
++truncated**.
++
++The token is compared **exactly as supplied** — no whitespace trimming, no case
++folding — so a line that does not match byte for byte is a wrong token (A-022).
++
++Lines beyond the second are never read and are not an error (FR-023).
++
++## Success output
++
++| Command | stdout | stderr | Exit |
++|---|---|---|---|
++| `reset-token` | the token, 22 characters, followed by one `\n` — **and nothing else** | *(empty)* | 0 |
++| `reset` | `password reset` followed by one `\n` | *(empty)* | 0 |
++
++The issued token is the single deliberate exception to "no sensitive data in
++output" (SR-018): it is written only by `reset-token`, only on success, and only
++to stdout.
++
++## Exit statuses
++
++Still exactly the six of FR-003, with these additional conditions (FR-024).
++No status is redefined and no condition is removed.
++
++| Status | Additional condition for `reset-token` / `reset` |
++|---|---|
++| 0 | the token was issued, or the password was reset |
++| 1 | the supplied token is wrong, already used, replaced or expired — **or none was ever issued** (A-017) |
++| 2 | bad usage, invalid username, invalid `--ttl`, missing or over-long or non-UTF-8 input line, or a new password too short or too long |
++| 3 | the named account does not exist (A-021) |
++| 4 | **unreachable** from both new operations — a lockout does not restrict them (FR-024, FR-031, FR-039, A-018) |
++| 5 | the store could not be read, parsed or written |
++
++## Failure output
++
++One line to stderr, nothing to stdout (FR-026). New rows only; every row of
++001's table still holds for the five existing operations.
++
++| Status | Message to stderr |
++|---|---|
++| 1 | `invalid token` |
++| 2 | `usage: python -m accounts --store PATH {register\|login\|unlock\|passwd\|delete\|reset-token\|reset} USERNAME [--ttl SECONDS]` |
++| 2 | `error: unknown command 'COMMAND': expected one of register, login, unlock, passwd, delete, reset-token, reset` |
++| 2 | `error: invalid ttl: expected a whole number of seconds from 1 to 86400, received 'VALUE'` |
++| 2 | `error: missing reset input: expected a token line then a new password line on stdin, received N line(s)` |
++| 2 | `error: token line too long: expected at most 4096 bytes before the line terminator` |
++| 2 | `error: token line is not valid UTF-8 text` |
++| 3 | `error: no such account 'USERNAME'` *(existing string, reused)* |
++
++Reused unchanged from 001 where the condition is the same: the invalid-username
++pair, `error: new password too short: …` / `too long: …`, the
++`password line too long` / `is not valid UTF-8 text` pair (for the **second**
++line), and every status-5 store message.
++
++`VALUE` and `USERNAME` are echoed through the existing sanitiser — any character
++outside printable ASCII becomes `\xNN` and the text is truncated at 64
++characters (SR-011, SR-018). `N` is a count of lines, never content.
++
++### `invalid token` is detail-free by requirement
++
++`invalid token` is an exact, fixed string with no further detail, like
++`invalid credentials` and `account locked` before it (FR-026). It is
++**byte-identical**, with an identical status, identical empty stdout, and
++comparable wall-clock time, across all five of:
++
++1. a value that was never issued;
++2. a token already redeemed;
++3. a token replaced by a later issuance;
++4. a token whose validity has elapsed;
++5. an account for which no token was **ever** issued.
++
++Timing parity is deliberate: every refused-token path spends exactly one scrypt
++derivation before answering, so the paths cannot be told apart by stopwatch
++either (SR-018, SC-018,
++[research R17](../research.md#r17--making-every-refusal-indistinguishable-including-by-stopwatch)).
++Nothing from the supplied token line is echoed to either stream.
++
++## Order of checks
++
++Fixed by FR-033 for `reset` and asserted as a precedence test. Full tables in
++[research R14](../research.md#r14--ordering-of-checks-for-the-two-new-operations).
++
++`reset`: username (2) → two input lines (2) → store loads (5) → account exists
++(3) → token current, unused and unexpired (1) → new password rules (2) → apply.
++
++`reset-token`: argument shape (2) → username (2) → `--ttl` value (2) → store
++loads (5) → account exists (3) → issue.
++
++Two consequences worth stating as contract, not implementation:
++
++- An **expired token with an 11-character new password** answers `invalid token`
++  with status 1, not a password error (scenario 3.4). The password line is read
++  before the store is loaded but judged after the token.
++- An **over-long token line** is status 2, decided before the store is opened,
++  so it is never compared against a record (spec edge case "Over-long token
++  line").
++
++## Store side effects
++
++| Command | Creates the store? | Writes the store? |
++|---|---|---|
++| `reset-token` | **never** (FR-032) | on success only |
++| `reset` | **never** (FR-038) | on success only |
++
++- Against a store path that does not exist, both return **3** and leave **no**
++  file behind — not the store, not a temporary file, not a lock file (FR-032,
++  FR-038).
++- Every failing invocation of either operation leaves the store **byte-identical**
++  (FR-027, SC-021). Unlike `login`, neither ever writes a failure count: a
++  refused token does not increment it and cannot lock the account (FR-039,
++  A-020).
++- A successful `reset` leaves every account other than the one being reset
++  byte-identical (FR-034, SC-021).
++- Both changes become visible all at once, under the existing atomic-replace and
++  directory-lock discipline (SR-016, SR-017). Two simultaneous redemptions of
++  one valid token yield exactly one success and one `invalid token` (FR-035,
++  SC-023).
++
++## Effect on the five existing operations
++
++Nothing changes except the two strings below (FR-040). In particular, with an
++outstanding token present:
++
++| Command | Effect on the token |
++|---|---|
++| `login` (success or failure) | **untouched** (FR-042, scenario 5.4) |
++| `unlock` | **untouched** (FR-042, scenario 5.4) |
++| `passwd` (success) | **invalidated** — refused afterwards with `invalid token` (FR-042, A-019, scenario 2.6) |
++| `passwd` (failure) | untouched; nothing is written |
++| `delete` (success) | removed with the account, so re-registering the username does not inherit it (FR-042, scenario 5.5) |
++
++### Changes to existing text
++
++Exactly two strings change, both of which enumerate the accepted operation
++names and would otherwise misreport the interface (A-025). These are the only
++permitted changes to any existing message, and both are emitted only on an
++argument-shape failure:
++
++| | Before | After |
++|---|---|---|
++| usage line | `usage: python -m accounts --store PATH {register\|login\|unlock\|passwd\|delete} USERNAME` | `usage: python -m accounts --store PATH {register\|login\|unlock\|passwd\|delete\|reset-token\|reset} USERNAME [--ttl SECONDS]` |
++| unknown command | `error: unknown command 'X': expected one of register, login, unlock, passwd, delete` | `error: unknown command 'X': expected one of register, login, unlock, passwd, delete, reset-token, reset` |
++
++The second is generated from the command tuple and so follows it automatically.
++`tests/test_cli_contract.py` holds the two assertions that pin these strings and
++is updated to the new text; **no other assertion of feature 001 changes**
++(SC-019).
++
++## Worked example sequence
++
++Asserted line for line, status for status (SC-025). `$T` stands for the token
++captured from the `reset-token` invocation above it — it is read at runtime and
++never a literal in the repository (SC-015, secrets hygiene).
++
++```console
++$ printf 'correct-horse-battery\n' | python -m accounts --store ./s register alice
++registered alice                                      # stdout, exit 0
++$ python -m accounts --store ./s reset-token nobody < /dev/null
++error: no such account 'nobody'                       # stderr, exit 3
++$ python -m accounts --store ./s reset-token alice < /dev/null
++kZ8qf2mXr4TcN1pLbW9vdA                                # stdout, exit 0 — illustrative shape only
++$ printf '%s\nnew-password-here-21\n' "$T" | python -m accounts --store ./s reset alice
++password reset                                        # stdout, exit 0
++$ printf 'new-password-here-21\n' | python -m accounts --store ./s login alice
++ok                                                    # stdout, exit 0
++$ printf 'correct-horse-battery\n' | python -m accounts --store ./s login alice
++invalid credentials                                   # old password dead, stderr, exit 1
++$ printf '%s\nanother-password-21x\n' "$T" | python -m accounts --store ./s reset alice
++invalid token                                         # single use, stderr, exit 1
++$ python -m accounts --store ./s reset-token alice --ttl 1 < /dev/null
++pQ7wT3nZx8KcM2rBvY5sdF                                # stdout, exit 0
++$ sleep 2
++$ printf '%s\nyet-another-pass-21x\n' "$T2" | python -m accounts --store ./s reset alice
++invalid token                                         # expired, stderr, exit 1
++$ python -m accounts --store ./s reset-token alice < /dev/null
++hJ4yR9tVz6NdQ0mCxU8pwE                                # stdout, exit 0
++$ printf '%s\nelevenchars\n' "$T3" | python -m accounts --store ./s reset alice
++error: new password too short: expected at least 12 characters, received 11
++                                                      # stderr, exit 2
++$ printf '%s\ntwelvecharss\n' "$T3" | python -m accounts --store ./s reset alice
++password reset                                        # the token survived the refusal, exit 0
++$ python -m accounts --store ./s reset-token alice --ttl 0 < /dev/null
++error: invalid ttl: expected a whole number of seconds from 1 to 86400, received '0'
++                                                      # stderr, exit 2
++$ python -m accounts --store ./s reset-token alice --ttl 60 --ttl 60 < /dev/null
++usage: python -m accounts --store PATH {register|login|unlock|passwd|delete|reset-token|reset} USERNAME [--ttl SECONDS]
++                                                      # stderr, exit 2
++$ printf '%s\nnew-password-here-21\n' "$T" | python -m accounts --store ./missing reset alice
++error: no such account 'alice'                        # stderr, exit 3
++$ ls ./missing
++ls: cannot access './missing': No such file or directory   # created nothing
++```
++
++The three token values shown are illustrative strings of the right shape, not
++issued tokens. The passwords are the suite's synthetic literals.
+diff --git a/specs/002-password-reset/contracts/store-format.md b/specs/002-password-reset/contracts/store-format.md
+new file mode 100644
+index 0000000..b2475e8
+--- /dev/null
++++ b/specs/002-password-reset/contracts/store-format.md
+@@ -0,0 +1,239 @@
++# Contract: Store File Format — feature 002 delta
++
++**Feature**: `002-password-reset` | **Date**: 2026-11-05
++
++A **delta** on
++[feature 001's store format](../../001-user-accounts-cli/contracts/store-format.md).
++Everything there still holds — encoding, write discipline, concurrency,
++permissions, size and count caps — except where restated below.
++
++The store remains a cross-invocation contract, and this feature makes it one in
++a second sense: `reset-token` writes the material that a *later* `reset`
++invocation verifies against, so the field rules below are what make the two
++operations compose at all (FR-028, FR-035, SR-016).
++
++## Encoding
++
++Unchanged:
++
++```python
++json.dumps(doc, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
++```
++
++plus one trailing `\n`. Reset material is written and read **only** through this
++structured encoding, so no token value can create, merge or truncate a record
++(SR-011). No token value is ever written at all (SR-013).
++
++## Version
++
++**`version` stays exactly `1`.** It is deliberately not bumped. The change is
++additive and the new field is optional, so a store written before this feature
++and a store written by it are both version 1 and both load here. Bumping to `2`
++would make every pre-existing store unloadable and so would violate FR-041
++directly — the reasoning is in
++[research R18](../research.md#r18--store-compatibility-in-both-directions).
++
++Consequence, accepted by A-026: the **previous** build validates records against
++a closed eight-key set, so it reports a store carrying an outstanding token as
++`malformed` with status 5 rather than misreading it. Loud, not silent.
++Downgrading is not a supported operation.
++
++## Shape
++
++```json
++{
++  "accounts": {
++    "alice": {
++      "dklen": 32,
++      "failed_logins": 0,
++      "hash": "RUhBTVBMRS1ESUdFU1QtMzItQllURVMtQkFTRTY0LQ==",
++      "kdf": "scrypt",
++      "n": 131072,
++      "p": 1,
++      "r": 8,
++      "reset": {
++        "dklen": 32,
++        "expires_ms": 1762300000000,
++        "hash": "RVhBTVBMRS1UT0tFTi1ESUdFU1QtMzItQllURVMt",
++        "kdf": "scrypt",
++        "n": 131072,
++        "p": 1,
++        "r": 8,
++        "salt": "U1lOVEhFVElDLVRPS0VOLVNMVA=="
++      },
++      "salt": "U1lOVEhFVElDLVNBTFQtMTZC"
++    },
++    "bob": {
++      "dklen": 32,
++      "failed_logins": 0,
++      "hash": "RUhBTVBMRS1ESUdFU1QtMzItQllURVMtQkFTRTY0LQ==",
++      "kdf": "scrypt",
++      "n": 131072,
++      "p": 1,
++      "r": 8,
++      "salt": "U1lOVEhFVElDLVNBTFQtMTZC"
++    }
++  },
++  "version": 1
++}
++```
++
++`alice` has an outstanding token; `bob` has none and is byte-identical to a
++record written before this feature. Every digest and salt above is synthetic
++illustration material, not a real derivation (secrets hygiene).
++
++**Maximum nesting depth of a valid store becomes 4** (`document` → `accounts` →
++`record` → `reset`), up from 3. There is still no recursive structure, so parse
++cost remains linear in file size and no regular expression participates in
++parsing (SR-015).
++
++## Field rules
++
++### Document
++
++Unchanged: exactly `version` (integer, exactly `1`) and `accounts` (object,
++0–10 000 members, each key a valid username). Any additional key, missing key
++or wrong type → malformed, status 5.
++
++### Record
++
++Exactly the **eight** keys of feature 001, **plus** an optional `reset`. The
++field set is still an allow-list, not a minimum (SR-010):
++
++| Key | Required | Type | Accepted values |
++|---|---|---|---|
++| `kdf` | yes | string | exactly `"scrypt"` |
++| `n` | yes | integer | power of two, `2 … 1048576` |
++| `r` | yes | integer | `1 … 32` |
++| `p` | yes | integer | `1 … 16` |
++| `dklen` | yes | integer | `16 … 64` |
++| `salt` | yes | string | padded standard-alphabet base64 decoding to exactly 16 bytes |
++| `hash` | yes | string | padded standard-alphabet base64 decoding to exactly `dklen` bytes |
++| `failed_logins` | yes | integer | `0 … 5` |
++| `reset` | **no** | object | the Reset table below |
++
++Accepted field sets are therefore exactly two: the eight required keys, or
++those eight plus `reset`. Any other key, a missing required key, or `reset`
++present with a non-object value → malformed, status 5.
++
++A record **without** `reset` means "no outstanding token" and is what every
++store written before this feature contains (FR-041).
++
++### Reset
++
++Exactly these eight keys, no more and no fewer:
++
++| Key | Type | Accepted values |
++|---|---|---|
++| `kdf` | string | exactly `"scrypt"` |
++| `n` | integer | power of two, `2 … 1048576` |
++| `r` | integer | `1 … 32` |
++| `p` | integer | `1 … 16` |
++| `dklen` | integer | `16 … 64` |
++| `salt` | string | padded standard-alphabet base64 decoding to exactly 16 bytes — **fresh per issued token**, never the record's password salt (SR-013) |
++| `hash` | string | padded standard-alphabet base64 decoding to exactly `dklen` bytes: `scrypt(token, salt, n, r, p, dklen)` |
++| `expires_ms` | integer | `1 … 253402300799000` — milliseconds since the Unix epoch |
++
++The first seven are the same names, types and ranges as the record's own
++password fields, which is why the verification routine is reused unchanged
++([research R12](../research.md#r12--what-is-recorded-against-the-account)).
++
++The `n * r` cross-field memory rule applies to the `reset` object exactly as it
++does to the record: parameters demanding more working memory than the tool's
++own `maxmem` (192 MiB) make the store malformed rather than an unbounded
++allocation (SR-015).
++
++`true`/`false` are **not** accepted where an integer is required — the check is
++explicitly `type(v) is int`, since Python's `bool` subclasses `int`.
++
++### Why `expires_ms` must be an integer
++
++SR-010 says a malformed expiry must not be treated as "not expired". `json`
++accepts and emits `NaN`, and every comparison with `NaN` is false, so a
++floating-point expiry field would make a hand-edited `NaN` read as *never
++expiring*. An integer with `type(v) is int` plus a range check has no such
++value. The millisecond unit is in the field name so no reader can compare it
++against `time.time()` by mistake; see
++[research R13](../research.md#r13--representing-the-expiry-instant).
++
++### Fixed size
++
++The serialised `reset` object is **174 bytes**, independent of the token, the
++username, and how many times a token has been issued (FR-043, SR-015). No
++account record can grow without limit, so the existing caps still bound the
++file. Measured worst case — 10 000 accounts each carrying reset material —
++serialises to 3 440 027 bytes against the 8 388 608-byte cap.
++
++## Validation discipline
++
++Unchanged in principle and extended in reach: every field of every `reset`
++object is validated against the table above on **load**, before any of it is
++used (SR-010). One invalid `reset` object fails the **whole** load with status
++5. It is never repaired, never partially loaded, never defaulted, never
++skipped, and the record it belongs to is never loaded without it.
++
++Specifically malformed (status 5), and each tested as such:
++
++- `reset` present but not a JSON object;
++- `reset` missing any of its eight keys, or carrying a ninth;
++- `expires_ms` absent, a string, a float, `true`, `NaN`, negative, zero, or
++  above `253402300799000`;
++- `reset.salt` or `reset.hash` of the wrong decoded length or outside the
++  base64 alphabet;
++- `reset.kdf` anything but `"scrypt"`; any scrypt parameter out of range or
++  failing the memory rule.
++
++Order of checks on load is unchanged (1 `open`, 2 `fstat` size cap before
++reading, 3 UTF-8 decode, 4 `json.loads` with `RecursionError` caught, 5 document
++shape → account count → every record). Step 5 now validates each record's
++`reset` object as part of validating that record.
++
++## Write discipline
++
++Unchanged, in full: `realpath` the store to find its own directory, create an
++unpredictably named `0o600` temporary file there with
++`O_WRONLY|O_CREAT|O_EXCL`, write, `fsync`, `close`, `os.replace` over the
++target, `fsync` the directory, and unlink the temporary on any failure
++(SR-012, SR-017).
++
++Additional guarantees for this feature:
++
++- **No token value reaches the temporary file.** It holds the same digests the
++  store does and nothing more (SR-013, SC-015).
++- **No other file is written.** No spool, no audit log, no sidecar, no
++  notification queue (SR-017, A-027).
++- **Neither new operation creates the store.** A missing file loads as an empty
++  in-memory store, both operations then fail with status 3, and nothing is
++  written (FR-032, FR-038).
++- **Only on success.** Both operations write exactly once, on success, and never
++  on any failure path — including a refused token, which unlike a failed `login`
++  records nothing at all (FR-027, FR-039).
++
++## Concurrency
++
++Unchanged: an exclusive `fcntl.flock(LOCK_EX)` on a descriptor for the store's
++**directory**, held for the entire read–modify–write (SR-016). For this feature
++that single mechanism delivers three requirements with no new machinery:
++
++- the token is verified, the password replaced and the token consumed inside one
++  critical section, so **one token can never set two passwords** — two
++  simultaneous redemptions yield one success and one `invalid token` (FR-035,
++  SC-023);
++- two simultaneous issuances for one account serialise, and assignment to the
++  single `reset` key overwrites, so **two tokens are never outstanding** for one
++  account (FR-029, A-015);
++- the whole document is replaced atomically after an `fsync`, so a kill at any
++  point during issuance or redemption leaves the complete old or the complete
++  new store (SC-024).
++
++Rationale for locking the directory rather than the file is 001's
++[research R4](../../001-user-accounts-cli/research.md#r4--serialising-concurrent-invocations-sr-007-edge-case-simultaneous-invocations).
++
++## Compatibility summary
++
++| Direction | Behaviour | Requirement |
++|---|---|---|
++| store written before this feature → this build | loads; every account simply has no `reset`; every password still verifies | FR-041, SC-020 |
++| store written by this build, no token outstanding | byte-identical to what the previous build would have written | FR-040, scenario 5.3 |
++| store written by this build, token outstanding → previous build | reported malformed, status 5 — loud, never misread | A-026 |
++| future version field | unchanged: reported malformed, status 5, never read best-effort | 001 contract |
+diff --git a/specs/002-password-reset/data-model.md b/specs/002-password-reset/data-model.md
+new file mode 100644
+index 0000000..a189931
+--- /dev/null
++++ b/specs/002-password-reset/data-model.md
+@@ -0,0 +1,231 @@
++# Phase 1 Data Model: Password Reset by One-Time Token
++
++**Feature**: `002-password-reset` | **Date**: 2026-11-05
++
++Derived from [spec.md](./spec.md) "Key Entities" and FR-020 … FR-043 /
++SR-010 … SR-018. Extends
++[feature 001's data model](../001-user-accounts-cli/data-model.md), which
++remains in force for everything not restated here. The on-disk encoding is the
++cross-invocation contract and is specified in
++[contracts/store-format.md](./contracts/store-format.md).
++
++This feature adds **one** optional field to one existing entity and introduces
++**one** new entity that lives inside it. Nothing else in the model changes.
++
++---
++
++## Entity: Reset token (new)
++
++A one-time, short-lived authorisation to replace one account's password without
++knowing the current one. The spec's Key Entities section is precise about its
++split existence, and the model follows it:
++
++| Where | What | Lifetime |
++|---|---|---|
++| Standard output of one `reset-token` invocation | the token **value** (22 characters) | printed once; the tool never holds or sees it again |
++| The account's `reset` field in the store | **verification material** + an expiry instant — never the value | until redeemed, expired, replaced, the password changes, or the account is deleted |
++
++In memory it is a plain `dict` nested inside the account record. There is no
++token class and no token module (Principle IV).
++
++### The token value
++
++| Property | Rule |
++|---|---|
++| Source | `secrets.token_urlsafe(16)` — the OS CSPRNG via `secrets` (SR-014) |
++| Entropy | exactly 128 bits; `crypto.TOKEN_BYTES = 16` |
++| Rendering | 22 characters, alphabet `A–Z a–z 0–9 - _`, no padding (A-023) |
++| Printability | every character printable ASCII; no whitespace, no quoting character, no control character, nothing that can start a terminal escape (SR-011) |
++| Stored? | **never** — not in the store, not in a temporary file, not in any other stream (SR-013, SC-015) |
++| Compared | `hmac.compare_digest` over derived digests, constant time (SR-014) |
++| Compared how exactly | byte for byte after terminator stripping; **no** whitespace trimming, **no** case folding (A-022) |
++
++### The `reset` field (verification material)
++
++Exactly these eight keys, no more and no fewer — an allow-list, not a minimum
++(SR-010):
++
++| Key | Type | Rules |
++|---|---|---|
++| `kdf` | `str` | MUST be exactly `"scrypt"` |
++| `n` | `int` | power of two, `2 … 1048576` |
++| `r` | `int` | `1 … 32` |
++| `p` | `int` | `1 … 16` |
++| `dklen` | `int` | `16 … 64` |
++| `salt` | `str` | base64 (standard alphabet, padded) of exactly 16 bytes from `secrets.token_bytes`. **Fresh per issued token** (SR-013) — never the account's password salt and never reused across issuances |
++| `hash` | `str` | base64 of exactly `dklen` bytes: `scrypt(token, salt, n, r, p, dklen)` at the module's *current* parameters (SR-013) |
++| `expires_ms` | `int` | absolute instant, milliseconds since the Unix epoch, `1 … 253402300799000`. See [research R13](./research.md#r13--representing-the-expiry-instant) for why integer milliseconds |
++
++The first seven keys are deliberately the same names, types and ranges as the
++account's own password fields, which is what lets `crypto.verify(token,
++record["reset"])` be reused with no change
++([research R12](./research.md#r12--what-is-recorded-against-the-account)).
++
++**Constraints**
++
++- **At most one per account.** Enforced *structurally* — one key per record, so
++  issuing assigns and thereby replaces (FR-029, A-015). There is no check to
++  forget and no list to grow.
++- **Fixed size.** The serialised field is 174 bytes, independent of the token,
++  the username and the number of issuances (FR-043, SR-015). No account record
++  can grow without limit, so the existing 8 MiB / 10 000-account caps continue
++  to bound the file — measured worst case 3 440 027 bytes
++  ([research R20](./research.md#r20--performance-budget-and-a-flagged-tightness)).
++- **Validated on load, every load.** Against the table above, before any of it
++  is used (SR-010). One invalid `reset` object fails the **whole** load with
++  status 5. It is never repaired, never defaulted, never dropped — and in
++  particular a missing or non-integer `expires_ms` is **not** treated as "not
++  expired".
++- **Optional.** A record with no `reset` key is valid and means "no outstanding
++  token" (FR-041). A record written before this feature is exactly that.
++- **Never partially present.** Either all eight keys or no `reset` key at all;
++  a subset is malformed (status 5).
++
++### Derived attribute
++
++`is_current(record, now_ms)` — not stored, computed at the moment of each
++attempt (FR-030, SR-016):
++
++```text
++"reset" in record  and  record["reset"]["expires_ms"] >= now_ms
++```
++
++where `now_ms = int(time.time() * 1000)` read **in the invocation making the
++attempt**, never carried over (FR-030). "Unused" needs no term: a redeemed
++token's `reset` key is gone, so a used token fails the first clause.
++
++### State transitions
++
++A token has no stored state field; its state is its presence plus its expiry.
++
++```text
++            reset-token (account exists)
++   absent ─────────────────────────────────▶ outstanding
++      ▲                                        │   │
++      │                                        │   │ expires_ms < now_ms
++      │  reset   (token matches, password ok)   │   ▼
++      ├────────────────────────────────────────┤ expired ──┐
++      │  passwd  (success, FR-042)             │           │ refused, status 1
++      ├────────────────────────────────────────┤◀──────────┘
++      │  delete  (success — record and token go together)
++      ├────────────────────────────────────────┤
++      │  reset-token again (replaces, A-015)   │
++      └────────────────────────────────────────┘
++```
++
++| From | Event | To | Observable |
++|---|---|---|---|
++| absent | `reset-token`, account exists | outstanding | token on stdout, status 0 |
++| outstanding | `reset-token` again | outstanding (**new** material; old value dead at once) | token on stdout, status 0 |
++| outstanding | `reset` with the matching value, new password valid | absent | `password reset`, status 0 |
++| outstanding | `reset` with the matching value, new password refused | **outstanding, expiry unchanged** | status 2, token still usable (FR-036) |
++| outstanding | `reset` with any other value | outstanding, unchanged | `invalid token`, status 1 |
++| outstanding | clock passes `expires_ms` | expired | — (no write; expiry is not swept, A-027) |
++| expired / absent | `reset` with any value | unchanged | `invalid token`, status 1 |
++| outstanding | successful `passwd` | absent (FR-042) | `passwd`'s own output, unchanged |
++| outstanding | successful `delete` | absent with the record (FR-042) | `delete`'s own output, unchanged |
++| outstanding | `login` (success or failure), `unlock` | **outstanding, untouched** (FR-042) | that command's own output, unchanged |
++| expired | anything | expired until overwritten or the record goes | an expired field is never cleaned up on its own (A-027) |
++
++Transitions that write the store do so **only** on success, inside the lock,
++atomically (FR-027, SR-016). No transition is triggered by a failed operation
++of any kind.
++
++---
++
++## Entity: Account (extended)
++
++Unchanged in identity, in its password material, and in `failed_logins`. One
++field is added:
++
++| Field | Type | Rules |
++|---|---|---|
++| *(key)* `username` | `str` | unchanged — 3–32 of `[A-Za-z0-9_]`, case-sensitive (FR-011). `Alice` and `alice` remain two accounts, each with its own independent token |
++| `kdf`, `n`, `r`, `p`, `dklen`, `salt`, `hash` | — | unchanged (SR-004) |
++| `failed_logins` | `int` | unchanged, `0 … 5`. **Never written by either new operation** — not on success, not on a refused token (FR-027, FR-039, A-020) |
++| `reset` | `dict` \| *absent* | **new, optional.** The Reset token entity above. Absent means no outstanding token |
++
++**Constraints added by this feature**
++
++- **Lock state is still derived** from `failed_logins` (001 R7) and is still
++  defined over `login` only. Neither new operation reads it to decide whether to
++  proceed (FR-031, FR-039, A-018), so status 4 is unreachable from both
++  (FR-024).
++- **A successful `reset` sets three things together**: fresh password material
++  at the module's current parameters, `failed_logins = 0`, and `reset` removed
++  (FR-034, A-018). The old password stops verifying because the material is
++  replaced wholesale, not amended.
++- **Every other account is untouched** by a successful reset, byte for byte
++  (FR-034, SC-021).
++- A record carrying `reset` is still a valid record for every existing
++  operation; none of the five reads the field, and `login`/`unlock` mutate
++  `failed_logins` in place so the field survives them (FR-042, scenario 5.4).
++
++---
++
++## Entity: Store (extended)
++
++Unchanged as the single JSON file at the operator-supplied path.
++
++| Field | Type | Rules |
++|---|---|---|
++| `version` | `int` | **still exactly `1`.** Deliberately not bumped — see [research R18](./research.md#r18--store-compatibility-in-both-directions): bumping would make every pre-existing store unloadable and break FR-041 |
++| `accounts` | `dict[str, Account]` | unchanged: 0–10 000 members, each key a valid username |
++
++**Constraints added or restated**
++
++- **Maximum nesting depth becomes 4** (`document` → `accounts` → `record` →
++  `reset`), up from 3. Still non-recursive, so parse cost stays linear in file
++  size and no regular expression is involved in parsing (SR-015).
++- **Backward compatibility (FR-041)**: a store written before this feature
++  loads unchanged; every account in it simply has no `reset` key and every
++  password in it still verifies. Nothing is migrated or rewritten on load.
++- **Forward compatibility is not offered (A-026)**: the previous build
++  validates records against a closed eight-key set, so it reports a store
++  carrying an outstanding token as malformed (status 5). Loud, not silent;
++  downgrading is out of scope.
++- **Neither new operation creates the store** (FR-032, FR-038). A missing file
++  still loads as an empty in-memory store, so both operations reach "no such
++  account" (status 3) and write nothing — not the store, not a temporary file,
++  not a lock file.
++- **Size and count caps unchanged** (8 MiB, 10 000 accounts). They still bound
++  the file because the new field is of fixed size (FR-043).
++- **Permissions, atomicity and locking unchanged**: `0o600` set at creation,
++  whole-file replacement via `os.replace`, exclusive `flock` on the store's
++  directory held across the entire read–modify–write (SR-012, SR-016, SR-017).
++
++---
++
++## Value object: Validity (`--ttl`)
++
++Not persisted — it exists only between argv and the computation of
++`expires_ms`.
++
++| Property | Rule |
++|---|---|
++| Source | `--ttl SECONDS` on `reset-token` only (FR-021) |
++| Default when absent | `900` seconds (FR-021) |
++| Accepted form | `[0-9]{1,5}`, then `1 … 86400` (FR-022, A-016) |
++| Rejected | anything else — including `-5`, `+60`, `0`, `1.5`, `6e1`, `100000`, `99999`, the empty string, surrounding whitespace, and non-ASCII digits such as `１２`. Status 2, no token issued, store not written |
++| Why the regex precedes `int()` | `int()` accepts Unicode digits, whitespace and a sign; the allow-list is the format, not just the range (SR-010). The five-digit cap also bounds conversion cost (SR-015) |
++| Consumed by | `expires_ms = int(time.time() * 1000) + ttl * 1000` |
++
++---
++
++## Requirement traceability for this model
++
++| Requirement | Where it lands in the model |
++|---|---|
++| FR-028 record what verifies and expires a token | the `reset` field's eight keys |
++| FR-029 / A-015 at most one, issuing replaces | one key per record — structural |
++| FR-030 expiry measured at each attempt | `is_current`, derived not stored |
++| FR-034 reset sets password, clears count and lock, consumes token | Account constraints |
++| FR-035 at most one use in total | the key is removed inside the same locked section that verified it |
++| FR-036 refused password leaves the token and its expiry alone | state table, "outstanding → outstanding" row |
++| FR-041 old stores load | `reset` optional; `version` stays 1 |
++| FR-042 `passwd`/`delete` clear it, `login`/`unlock` do not | Account constraints, state table |
++| FR-043 fixed, bounded size | 174 B per record, measured |
++| SR-010 stored material validated, malformed expiry not "not expired" | `reset` validated on every load against the closed table; `expires_ms` is a range-checked `int` |
++| SR-013 salted slow digest, fresh salt, token never written | the `reset` field holds no token value; `salt` fresh per issuance |
++| SR-014 CSPRNG, ≥128 bits, constant-time compare | token value properties |
++| SR-015 bounded sizes and arithmetic | fixed field size; `ttl` range bounds `expires_ms` |
+diff --git a/specs/002-password-reset/plan.md b/specs/002-password-reset/plan.md
+new file mode 100644
+index 0000000..66165b1
+--- /dev/null
++++ b/specs/002-password-reset/plan.md
+@@ -0,0 +1,324 @@
++# Implementation Plan: Password Reset by One-Time Token
++
++**Branch**: `002-password-reset` | **Date**: 2026-11-05 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/002-password-reset/spec.md`
++
++## Summary
++
++Two new operations on the existing tool — `reset-token` issues a short-lived,
++single-use token for one account and prints it; `reset` redeems that token
++together with a new password — while the five existing operations keep their
++inputs, outputs, messages and exit statuses byte for byte.
++
++Technical approach: **no new source module and no new mechanism.** The token is
++`secrets.token_urlsafe(16)` (128 bits, 22 URL-safe characters). What is recorded
++against the account is one optional record key, `reset`, holding a nested object
++whose seven credential fields are deliberately the same names, types and ranges
++as the account's own password fields, plus an integer `expires_ms` — so
++`crypto.verify` and its `hmac.compare_digest` are reused unchanged and this
++feature writes no new cryptographic code. Issuing assigns that key (which is
++what makes "at most one outstanding token" structural rather than a check);
++redeeming pops it inside the same `fcntl.flock` critical section that verified
++it, which is what makes one token unable to set two passwords. `version` stays
++at `1` and `reset` is optional, which is the whole of backward compatibility.
++Every refused-token path answers the identical `invalid token`/status 1 after
++spending exactly one scrypt derivation, so the refusals cannot be told apart by
++message or by stopwatch. The only edit to code the five existing commands run is
++a pure extraction of the stdin line reader so a token line can say "token" in
++its diagnostics.
++
++Full rationale and measurements: [research.md](./research.md).
++
++## Technical Context
++
++**Language/Version**: Python 3.11+ (planning input, A-013). Development and
++measurement host: CPython 3.13.17, Linux 6.18, x86-64.
++
++**Primary Dependencies**: none at runtime — standard library only (Principle I,
++A-013). Modules already used by the package: `argparse`, `base64`, `fcntl`,
++`hashlib`, `hmac`, `json`, `os`, `pathlib`, `re`, `secrets`, `sys`. This feature
++adds exactly one: **`time`** (for `time.time()`). Development only: `pytest`,
++declared in `requirements-dev.txt` and never imported by shipped code.
++
++**Storage**: the same single JSON file at the operator-supplied path, still
++`version: 1`, extended by one optional per-record key. Format contract:
++[contracts/store-format.md](./contracts/store-format.md).
++
++**Testing**: `pytest`, driving the real executable in a subprocess with piped
++streams so assertions are against the operator-visible contract. `pytest.ini`
++already sets `pythonpath = src` and `testpaths = tests`; the 1 000-account,
++concurrency, crash-loop and expiry-wait checks carry the existing `slow` marker.
++
++**Target Platform**: POSIX (Linux, macOS), unchanged — `fcntl.flock` and
++`os.replace` remain hard requirements.
++
++**Project Type**: single-project CLI tool, extended from five to seven
++operations. No network, no service, no UI, no role model (A-012, A-014).
++
++**Performance Goals**: `reset-token` and `reset` each under 1 s on a
++1 000-account store (SC-022). Measured components: one scrypt derivation
++0.399 s; JSON parse of a 1 000-account store with reset material on every record
++2.5 ms; serialise 3.6 ms. So `reset-token` ≈ 0.41 s and `reset` ≈ 0.81 s — about
++1.2× headroom, flagged below. See
++[research R20](./research.md#r20--performance-budget-and-a-flagged-tightness).
++
++**Constraints**: unchanged limits — password 12–1 024 characters, input line
++≤ 4 096 bytes, store ≤ 8 MiB, ≤ 10 000 accounts. Added: `--ttl` in `1 … 86400`
++whole seconds (A-016); reset material of **fixed** 174-byte serialised size
++(FR-043), so 10 000 accounts all carrying a token serialise to 3 440 027 bytes,
++inside the existing cap. The issued token is the single value permitted to reach
++an output stream (SR-018) and is written nowhere else.
++
++**Scale/Scope**: single machine, single operator; 7 commands, 6 exit statuses
++(status 4 unreachable from the two new ones). 24 functional, 9 security and 14
++success-criteria requirements to cover, plus all 19 + 9 of feature 001 held
++unchanged.
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++Constitution version 1.0.0.
++
++| Gate | Pre-Phase 0 | Post-Phase 1 | Evidence |
++|---|---|---|---|
++| **I. Standard Library Only** — no third-party runtime import; bare `python3`, no install step; dev tools declared separately | PASS | **PASS** | Every mechanism Phase 0 chose is stdlib: `secrets.token_urlsafe`, `secrets.token_bytes`, `hashlib.scrypt`, `hmac.compare_digest`, `json`, `fcntl.flock`, `os.replace`, `argparse`, `re`, and the one addition `time.time`. `pytest` remains dev-only in `requirements-dev.txt`, never imported by `src/`. Run instruction unchanged: `PYTHONPATH=src python -m accounts`. |
++| **II. Fail Loudly** — clear actionable message, non-zero exit, states expected/received/where, no broad suppression, no fallback or silent coercion | PASS | **PASS** | Every new failure has a row in [contracts/cli-contract.md](./contracts/cli-contract.md#failure-output) with its status. Malformed stored reset material is status 5 and is never repaired, defaulted or skipped — the SR-010 trap case, a malformed `expires_ms`, fails the load instead of reading as "not expired", which [research R13](./research.md#r13--representing-the-expiry-instant) is the reason the field is an integer. An over-long token line is refused, never truncated. The `--ttl` message names what was expected and what was received. **No new `except` clause of any kind is introduced**, so 001's single recorded suppression remains the only one. The one deliberate silence — `invalid token` carrying no detail — is not a Principle II violation but an explicit Principle V requirement (FR-026, SR-018); it is recorded in [Flagged notes](#flagged-notes-not-blocking) so the omission reads as chosen, not forgotten. |
++| **III. Every Requirement Is Testable** — every FR and SR maps to a named automated test; error paths assert message *and* status | PASS | **PASS** | [Requirement-to-test mapping](#requirement-to-test-mapping) covers FR-020…043, SR-010…018 and SC-012…025 with no empty row. Tests assert status, stdout and stderr together. Security requirements are tested as negatives as well as positives. SC-019 is itself a test: the 001 suite runs unchanged apart from the two A-025 strings. |
++| **IV. Simplicity** — smallest design, functions over classes, flat over nested, stdlib over hand-rolled, nothing for anticipated needs | PASS | **PASS** | **No new source module, no new class, no new mechanism.** The four existing modules gain functions; `crypto` gains exactly one (`new_token`) because `verify`, `dummy_verify`, `new_salt` and `hash_password` are reused as they stand. "At most one token" is structural (one key), not a check. Concurrency, atomicity, permissions, the stdin byte cap and the message sanitiser are all existing machinery reused. No audit trail, notification, rate limit or expiry sweep is built — A-027 says the request asks for none. **One** deviation, the nested `reset` object against the constitution's flat-over-nested preference, is recorded in [Complexity Tracking](#complexity-tracking) with the requirement that forces it. |
++| **V. Secure by Default (NON-NEGOTIABLE)** — every applicable baseline rule named, mapped to an enforcing boundary with its stdlib mechanism, and tested | PASS | **PASS** | The spec walks all nine rules as SR-010…018 and justifies the non-applicable part (SR-012, path confinement, for SR-003's existing reason). [Security mapping](#security-requirement-mapping) gives the enforcing module, function, stdlib mechanism and test id for each. No rule is weakened: the token digest is held at the same OWASP-minimum work factor as a password even though that is what makes SC-022 tight, and timing parity on the refusal paths is *added* beyond what SR-018 literally demands. |
++
++**Planning-stage obligation** (constitution, Security Requirements §Planning):
++"map every security requirement to the module, function, or boundary that
++enforces it, name the standard-library mechanism used, and record the
++identifiers of the tests that will prove it" — discharged by the
++[Security requirement mapping](#security-requirement-mapping).
++
++**Gate result**: PASS before Phase 0 and PASS after Phase 1 design. One
++justified complexity entry, no unjustified violation; nothing blocks
++`/speckit-tasks`.
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/002-password-reset/
++├── spec.md              # Feature specification (/speckit-specify output)
++├── plan.md              # This file (/speckit-plan output)
++├── research.md          # Phase 0 — R11…R20, decisions with measurements
++├── data-model.md        # Phase 1 — the Reset token entity, extended Account and Store
++├── quickstart.md        # Phase 1 — run and validation guide (V13…V25)
++├── contracts/           # Phase 1 — both are deltas on feature 001's contracts
++│   ├── cli-contract.md  #   the two new operations, statuses, messages, A-025 changes
++│   └── store-format.md  #   the optional `reset` field, its validation, compatibility
++├── checklists/
++│   └── requirements.md  # existing
++└── tasks.md             # Phase 2 output (/speckit-tasks — NOT created here)
++```
++
++### Source Code (repository root)
++
++No file is added and no file is removed. The four existing modules are extended;
++`__init__.py`, `__main__.py` and `errors.py` are untouched.
++
++```text
++src/
++└── accounts/
++    ├── __init__.py       # unchanged
++    ├── __main__.py       # unchanged
++    ├── errors.py         # unchanged
++    ├── cli.py            # + COMMANDS/USAGE grow (A-025); + --ttl in parse_args;
++    │                     #   + read_line extraction; + cmd_reset_token, cmd_reset
++    ├── store.py          # + RESET_KEYS; validate_record accepts optional `reset`
++    │                     #   and validates its interior
++    ├── crypto.py         # + TOKEN_BYTES, new_token()  — verify/dummy_verify reused as-is
++    └── validation.py     # + TTL_DEFAULT/MIN/MAX, EXPIRES_MS_MAX, validate_ttl()
++
++tests/
++├── conftest.py                    # + synthetic token literals, reset_material() builder,
++│                                  #   issue_token() helper  (secrets hygiene: one place only)
++├── test_cli_contract.py           # ~ the two A-025 strings; + seven commands accepted
++├── test_reset_token.py            # NEW — US1 issuance, FR-021/022/028/029/031/032, US4
++├── test_reset.py                  # NEW — US1 redemption, US3, FR-023/033/034/036/037
++├── test_reset_invalid_token.py    # NEW — US2 all ten scenarios, SC-018
++├── test_reset_security.py         # NEW — SR-010…018 negatives, leakage, entropy
++├── test_compatibility.py          # NEW — US5, FR-040/041/042, SC-019, SC-020
++├── test_store_format.py           # + `reset` field validation, malformed-expiry cases
++├── test_concurrency.py            # + SC-023 simultaneous redemption (slow)
++├── test_crash_safety.py           # + SC-024 kill during issue/redeem (slow)
++├── test_performance.py            # + SC-022 at 1 000 accounts (slow)
++├── test_example_sequence.py       # + SC-025 the new worked sequence
++└── (test_register/login_lockout/passwd/delete/security.py — unchanged, and that is the point)
++
++pytest.ini                         # unchanged
++requirements-dev.txt               # unchanged — pytest only
++```
++
++**Structure Decision**: extend in place. The four boundaries feature 001
++established are exactly the four this feature needs — request handling (`cli`),
++persistence (`store`), cryptography (`crypto`), input rules (`validation`) — so
++each new obligation lands in the module that already owns its kind of decision,
++and the constitution's "map every security requirement to the boundary that
++enforces it" rule is satisfied without a fifth boundary. A `reset.py` was
++considered and rejected: it would have to reach into `store`'s record validation,
++`crypto`'s parameters and `cli`'s check ordering, so it would add an import edge
++and a boundary without owning a decision. Tests are added per user story, one
++file per story, so each spec "Independent Test" stays a single runnable file —
++and the five existing per-story test files staying untouched is itself the
++evidence for FR-040.
++
++## Security requirement mapping
++
++Required by the constitution's Planning-stage obligation. Test ids are
++`file::test` and are the names `/speckit-tasks` should carry forward.
++SR-001 … SR-009 of feature 001 remain mapped by
++[its plan](../001-user-accounts-cli/plan.md#security-requirement-mapping).
++
++| SR | Enforcing module / function | Stdlib mechanism | Test id |
++|---|---|---|---|
++| **SR-010** all new input untrusted, allow-list, validate on the way in; stored reset material validated; malformed expiry is **not** "not expired" | `cli.parse_args` (`_command_name`), `validation.validate_username`, `validation.validate_ttl`, `cli.read_line`, `validation.check_settable_password`, `store.validate_record` → reset interior | `argparse choices=`, `re.fullmatch(r"[0-9]{1,5}")` **before** `int()`, explicit `type(v) is int` with range checks, closed `frozenset` field sets | `test_reset_token.py::test_fr022_ttl_allowlist`, `::test_sr010_int_does_not_accept_unicode_digits`, `test_reset_security.py::test_sr010_reset_field_allowlist`, `::test_sr010_malformed_expires_ms_is_status_5_not_unexpired`, `::test_sr010_invalid_reset_never_repaired_or_skipped` |
++| **SR-011** no injection by concatenation; printed token cannot forge a line or a terminal control sequence | `store.serialise`/`store.load` (structured encoding only), `crypto.new_token` (alphabet), `validation.sanitize_for_message` | `json.dumps(ensure_ascii=True)` / `json.loads`; `secrets.token_urlsafe` alphabet is `[A-Za-z0-9_-]` only; no shell, query or markup anywhere in the feature | `test_reset_security.py::test_sr011_token_alphabet_is_safe_printable_ascii`, `::test_sr011_token_output_is_exactly_one_line`, `::test_sr011_control_chars_in_token_line_not_echoed` |
++| **SR-012** path containment N/A (SR-003's recorded reason); temp-file discipline applies unchanged to both new writes | `store.atomic_write` — reused, not modified | `os.path.realpath` + `os.open(..., O_WRONLY\|O_CREAT\|O_EXCL, 0o600)` with `secrets.token_hex(8)` in the name; unlink on failure | `test_reset_security.py::test_sr012_no_temp_file_survives_a_failed_reset`, `::test_sr012_no_new_path_derived_from_input`, `test_reset_token.py::test_fr032_creates_no_file_when_store_absent` |
++| **SR-013** token never stored or logged; salted slow digest at current parameters with a fresh salt per issuance; new password stored under SR-004 | `crypto.new_token` (generates, returns, does not persist), `cli._new_reset` (digest + salt + expiry), `cli._new_record` (reused for the new password) | `hashlib.scrypt(n=2**17, r=8, p=1, dklen=32, maxmem=192MiB)`, `secrets.token_bytes(16)` per issuance | `test_reset_security.py::test_sr013_token_absent_from_store_bytes`, `::test_sr013_fresh_salt_per_issuance`, `::test_sr013_token_digest_uses_current_parameters`, `::test_sr013_no_token_literal_in_repo_fixtures` |
++| **SR-014** CSPRNG, ≥128 bits, constant-time comparison | `crypto.new_token`, `crypto.new_salt`, `crypto.verify` (reused) | `secrets.token_urlsafe(16)` → exactly 128 bits; `secrets.token_bytes`; `hmac.compare_digest` | `test_reset_security.py::test_sr014_token_entropy_is_at_least_128_bits`, `::test_sr014_ten_thousand_tokens_distinct`, `::test_sr014_package_never_imports_random`, `::test_sr014_token_compared_in_constant_time` |
++| **SR-015** enforced maxima on every new input; expiry arithmetic bounded; fixed-size record; no super-linear matching | `cli.read_line` (4 096 B cap), `validation.validate_ttl` (5 digits then `1…86400`), `validation.EXPIRES_MS_MAX`, `store.validate_record` | `BufferedReader.readline(4097)`; bounded character class with no alternation or nesting; range check on `expires_ms` | `test_reset.py::test_sr015_overlong_token_line_refused_not_truncated`, `test_reset_token.py::test_sr015_ttl_bounded_at_five_digits`, `test_reset_security.py::test_sr015_reset_material_is_fixed_size`, `test_store_format.py::test_sr015_expires_ms_out_of_range_is_status_5` |
++| **SR-016** authorisation at the point of operation; holds under concurrency; expiry and single use read from the store at the attempt | `cli.cmd_reset` (verify → change → consume, all in one invocation), `store.locked_store` (reused) | `fcntl.flock(dir_fd, LOCK_EX)` held across the whole read–modify–write; `record.pop("reset", None)` inside that section; `time.time()` read in the attempting invocation | `test_reset.py::test_sr016_expiry_read_at_attempt_not_cached`, `test_reset_invalid_token.py::test_fr037_current_password_not_accepted_as_token`, `test_concurrency.py::test_sc023_simultaneous_redemption_one_success`, `::test_sr016_concurrent_issuance_leaves_one_token` |
++| **SR-017** least-privilege files, set at creation; nothing written anywhere else | `store.atomic_write` (reused, unmodified) | explicit `0o600` mode argument to `os.open`, preserved across `os.replace` | `test_reset_security.py::test_sr017_store_mode_600_after_issue_and_redeem`, `::test_sr017_no_sidecar_spool_or_log_created` |
++| **SR-018** no sensitive data in output; the token is the single deliberate exception; all refusals identical; redaction before writing | `cli` message table, `validation.sanitize_for_message`, `cli._reset_is_valid` (one derivation on every refusal path), `errors.AccountsError` (carries pre-redacted text only) | fixed string `invalid token`; `crypto.dummy_verify` for timing parity; lengths and counts only in messages; no traceback reaches a stream | `test_reset_security.py::test_sr018_no_secret_material_in_either_stream`, `::test_sr018_token_only_on_reset_token_stdout_on_success`, `::test_sr018_all_refusal_paths_byte_identical`, `::test_sr018_refusal_timing_parity`, `::test_sr018_no_traceback_on_any_new_failure_path` |
++
++## Requirement-to-test mapping
++
++Principle III makes an unmapped requirement a blocker. No row is empty.
++FR-001 … FR-019 and SR-001 … SR-009 remain mapped by
++[feature 001's plan](../001-user-accounts-cli/plan.md#requirement-to-test-mapping)
++and their tests are re-run unchanged (SC-019).
++
++| Requirement | Test id |
++|---|---|
++| FR-020 seven operations, no other name, five unchanged | `test_cli_contract.py::test_fr020_seven_commands_accepted`, `test_compatibility.py::test_fr040_existing_five_unchanged` |
++| FR-021 `--ttl` optional, default 900, only with `reset-token`, no abbreviation, not repeated | `test_reset_token.py::test_fr021_default_validity_is_900`, `::test_fr021_ttl_only_with_reset_token`, `::test_fr021_ttl_not_abbreviated`, `::test_fr021_ttl_not_repeated` |
++| FR-022 validity accepted only in range, else 2 with expected/received and no token | `test_reset_token.py::test_fr022_ttl_allowlist`, `::test_fr022_invalid_ttl_issues_no_token` |
++| FR-023 `reset-token` reads nothing; `reset` reads exactly two lines; extras ignored; short stream is 2 | `test_reset_token.py::test_fr023_succeeds_with_stdin_closed`, `test_reset.py::test_fr023_two_lines_in_order`, `::test_fr023_extra_lines_ignored`, `::test_fr023_missing_input_is_status_2` |
++| FR-024 only the documented statuses; status 4 unreachable | `test_reset.py::test_fr024_every_status_reachable`, `test_reset_token.py::test_fr024_no_status_4_ever` |
++| FR-025 success output exactly, stderr empty | `test_reset_token.py::test_fr025_token_is_the_only_stdout_line`, `test_reset.py::test_fr025_password_reset_on_stdout` |
++| FR-026 one stderr line, empty stdout, `invalid token` detail-free | `test_reset_invalid_token.py::test_fr026_failure_streams`, `::test_fr026_invalid_token_is_exact_and_detail_free` |
++| FR-027 failures leave the store byte-identical; no count or lock write | `test_reset_invalid_token.py::test_fr027_store_byte_identical_after_each_failure`, `::test_fr039_wrong_token_does_not_increment_count` |
++| FR-028 generate, record, persist, print | `test_reset_token.py::test_fr028_issue_records_material_and_prints_token` |
++| FR-029 at most one outstanding; issuing replaces | `test_reset_token.py::test_fr029_reissue_replaces`, `test_reset_invalid_token.py::test_fr029_replaced_token_refused` |
++| FR-030 valid until elapsed, measured at each attempt | `test_reset.py::test_fr030_valid_before_expiry`, `test_reset_invalid_token.py::test_fr030_expired_token_refused` |
++| FR-031 succeeds on a locked account, changing neither lock nor count | `test_reset_token.py::test_fr031_issue_on_locked_account_changes_nothing` |
++| FR-032 `reset-token` does not create the store | `test_reset_token.py::test_fr032_creates_no_file_when_store_absent` |
++| FR-033 exact order of checks | `test_reset.py::test_fr033_check_order_precedence` |
++| FR-034 sets password, consumes token, zeroes count, clears lock, leaves others alone | `test_reset.py::test_fr034_reset_replaces_password_and_clears_lock`, `::test_fr034_other_accounts_byte_identical` |
++| FR-035 usable at most once, including concurrently | `test_reset_invalid_token.py::test_fr035_second_use_refused`, `test_concurrency.py::test_sc023_simultaneous_redemption_one_success` |
++| FR-036 short/long new password: status 2, password unchanged, token survives with original expiry | `test_reset.py::test_fr036_short_password_keeps_token`, `::test_fr036_long_password_keeps_token`, `::test_fr036_expiry_unchanged_after_refusal` |
++| FR-037 no current password required or accepted | `test_reset.py::test_fr037_no_current_password_required`, `test_reset_invalid_token.py::test_fr037_current_password_not_accepted_as_token` |
++| FR-038 `reset` does not create the store | `test_reset.py::test_fr038_creates_no_file_when_store_absent` |
++| FR-039 refused token does not increment the count and is not restricted by a lockout | `test_reset_invalid_token.py::test_fr039_wrong_token_does_not_increment_count`, `test_reset.py::test_fr039_lockout_does_not_restrict_reset` |
++| FR-040 five operations unchanged but for the A-025 strings | `test_compatibility.py::test_fr040_existing_five_unchanged`, `::test_a025_only_two_diagnostics_changed`, and the eleven unchanged 001 test files |
++| FR-041 pre-feature store loads; every password still verifies | `test_compatibility.py::test_fr041_pre_feature_store_loads`, `::test_fr041_passwords_still_verify` |
++| FR-042 `passwd` invalidates, `delete` removes, `login`/`unlock` leave alone | `test_compatibility.py::test_fr042_passwd_invalidates_token`, `::test_fr042_delete_removes_token`, `::test_fr042_login_and_unlock_leave_token` |
++| FR-043 existing limits hold; reset material fixed and bounded | `test_reset.py::test_sr015_overlong_token_line_refused_not_truncated`, `test_reset_security.py::test_sr015_reset_material_is_fixed_size` |
++| SR-010 … SR-018 | see [security mapping](#security-requirement-mapping) |
++| SC-012 every extended outcome reachable and asserted | `test_reset.py::test_fr024_every_status_reachable` |
++| SC-013 cross-invocation redemption; second attempt refused | `test_reset.py::test_sc013_issue_and_redeem_across_invocations`, `test_reset_invalid_token.py::test_fr035_second_use_refused` |
++| SC-014 accepted before, refused after, default and explicit validity | `test_reset.py::test_sc014_validity_boundary_explicit`, `::test_sc014_validity_boundary_default` |
++| SC-015 token appears nowhere but the one stdout line | `test_reset_security.py::test_sr013_token_absent_from_store_bytes`, `::test_sc015_token_in_no_temp_file_or_stderr` |
++| SC-016 10 000 tokens distinct, ≥128 bits each | `test_reset_security.py::test_sr014_ten_thousand_tokens_distinct`, `::test_sr014_token_entropy_is_at_least_128_bits` |
++| SC-017 refused password leaves the token usable | `test_reset.py::test_fr036_short_password_keeps_token` |
++| SC-018 all refusals indistinguishable | `test_reset_security.py::test_sr018_all_refusal_paths_byte_identical`, `::test_sr018_refusal_timing_parity` |
++| SC-019 the 001 suite passes against the extended tool | `test_compatibility.py::test_sc019_feature_001_suite_passes` plus the eleven unchanged files |
++| SC-020 pre-feature store loads and verifies | `test_compatibility.py::test_fr041_pre_feature_store_loads` |
++| SC-021 failures byte-identical; other accounts byte-identical after success | `test_reset_invalid_token.py::test_fr027_store_byte_identical_after_each_failure`, `test_reset.py::test_fr034_other_accounts_byte_identical` |
++| SC-022 each operation under a second at 1 000 accounts | `test_performance.py::test_sc022_reset_operations_under_one_second`, `::test_sc022_store_scaling_component_negligible` |
++| SC-023 simultaneous redemption: one success | `test_concurrency.py::test_sc023_simultaneous_redemption_one_success` |
++| SC-024 kill mid-operation leaves a valid store | `test_crash_safety.py::test_sc024_sigkill_during_issue_and_redeem` |
++| SC-025 documented sequence reproduced line for line | `test_example_sequence.py::test_sc025_reset_worked_sequence` |
++
++## Check ordering
++
++Fixed by FR-033 for `reset` and by the analogous reasoning for `reset-token`;
++full tables in
++[research R14](./research.md#r14--ordering-of-checks-for-the-two-new-operations),
++asserted by `test_reset.py::test_fr033_check_order_precedence`. The three
++non-obvious points:
++
++- **The token is judged before the new password.** The password line is *read*
++  before the store is opened (so a missing or over-long line is a status-2 bad
++  request) but *validated* only after the token is accepted. An expired token
++  with an 11-character password therefore answers `invalid token`/1, not 2
++  (scenario 3.4). Reversing this would leak whether a token is outstanding,
++  because the two statuses would distinguish "valid token, bad password" from
++  "bad token, bad password".
++- **Neither operation checks the lock at all**, exactly as `passwd` and `delete`
++  already do not (FR-019), which is what makes status 4 unreachable from both
++  (FR-024, FR-031, FR-039, A-018).
++- **Nothing is written before the last step.** That is the single reason FR-027
++  (failures change nothing), FR-036 (a refused password leaves the token with its
++  original expiry) and FR-039 (no failure count on a refused token) all hold
++  without individual safeguards.
++
++## Flagged notes (not blocking)
++
++Decided during planning so design and implementation can proceed. Each is a
++candidate for `/speckit-clarify`; none changes the architecture.
++
++1. **`reset` has only ~1.2× headroom against SC-022's absolute one-second
++   bound.** Two deliberate scrypt derivations — verify the token, hash the new
++   password — are inherent to the operation, and at the measured 0.399 s each
++   that is ≈ 0.81 s on this host, with the store-size component ~6 ms. This is
++   the same position feature 001 recorded for `passwd` and has the same single
++   lever: the work factor. SR-013 names "the same deliberately slow algorithm and
++   current parameters already used for passwords", and Principle IV forbids
++   simplifying away a Principle V control, so lowering it is an SR-013/SR-004
++   amendment rather than an implementation choice. The suite asserts both the
++   absolute bound and the hardware-independent scaling claim. See
++   [research R20](./research.md#r20--performance-budget-and-a-flagged-tightness).
++2. **`invalid token` deliberately violates Principle II's "state what was
++   expected and what was received".** FR-026 and SR-018 require one
++   indistinguishable answer across wrong, used, replaced, expired and
++   never-issued, so the operator gets no diagnostic help here. This is a
++   requirement conflict the spec resolves in Principle V's favour, and the plan
++   follows it; it is recorded so the missing detail reads as chosen. Timing
++   parity was *added* beyond the literal requirement for the same reason
++   ([research R17](./research.md#r17--making-every-refusal-indistinguishable-including-by-stopwatch)).
++3. **`version` stays at `1`, so a store carrying a token is unreadable by the
++   previous build.** Bumping it would make every pre-existing store unloadable
++   and break FR-041 outright, so the asymmetry A-026 already anticipates is
++   accepted: the old build reports such a store as malformed (status 5) — loud,
++   never misread. If downgrading ever becomes a requirement, it needs a real
++   migration path and a clarification, not a version number
++   ([research R18](./research.md#r18--store-compatibility-in-both-directions)).
++4. **`--ttl 0060` is accepted as 60.** `validate_ttl` allows `[0-9]{1,5}`, so a
++   leading zero passes. Rejecting it would need a second pattern for no stated
++   benefit; the behaviour is documented in the contract and pinned by a test so
++   it is a decision rather than an accident.
++5. **An expired `reset` field is never swept.** A-027 says the request asks for
++   no expiry sweep, so an expired token simply stops being accepted and is
++   overwritten by the next issuance or removed by the next successful `reset`,
++   `passwd` or `delete` for that account. A store can therefore carry expired
++   material indefinitely — harmless, fixed-size, and verified by SC-021's byte
++   comparisons to change nothing.
++
++**Non-applicability already justified in the spec**: SR-012's path-containment
++rule does not apply, for SR-003's recorded reason — naming the store is the
++operator's explicit purpose — and this feature introduces no new path derived
++from input at all. The temporary-file half of the rule does apply and is
++enforced by the unmodified `store.atomic_write`. Principle V requires this
++statement rather than silence.
++
++## Complexity Tracking
++
++> Deviations toward added structure, each with the requirement that forces it
++> (Principle IV). Feature 001's five entries remain in force and are not
++> restated. This feature adds **one**.
++
++| Violation | Why Needed | Simpler Alternative Rejected Because |
++|---|---|---|
++| A **nested** `reset` object inside the account record, against the constitution's explicit "prefer … a flat data structure over a nested one" | SR-013 requires the token's verification material to be a salted digest from the same slow algorithm and *current parameters* as a password, which means carrying the same seven credential fields. Nesting them under one key is what lets `crypto.verify` — and with it the `hmac.compare_digest` that SR-014 mandates — be reused **with no change**, so this feature writes no new cryptographic code. It is also what makes FR-029/A-015 ("at most one outstanding token, issuing replaces") structural rather than a check that can be forgotten, and FR-035's consumption a single `pop` inside the locked section | Eight flat keys (`reset_kdf` … `reset_expires_ms`) was the Principle IV default. Rejected because `crypto.verify` would then need a key-prefix parameter or a caller-built projection dict — new code on the one path where constant-time comparison lives — and because "replace the token" and "consume the token" become eight-key operations where missing one leaves half a token behind, in a record whose field set is a closed allow-list. The nesting costs one level of depth (3 → 4) in a structure that is still non-recursive, still linear to parse, and still of fixed per-record size |
++
++This entry *adds* no control and relaxes none; it is a shape decision taken to
++let an existing Principle V control be reused rather than reimplemented. No
++entry here weakens Principle V.
+diff --git a/specs/002-password-reset/quickstart.md b/specs/002-password-reset/quickstart.md
+new file mode 100644
+index 0000000..ab72dec
+--- /dev/null
++++ b/specs/002-password-reset/quickstart.md
+@@ -0,0 +1,324 @@
++# Quickstart & Validation Guide: Password Reset by One-Time Token
++
++**Feature**: `002-password-reset` | **Date**: 2026-11-05
++
++How to run the extended tool and how to prove this feature works end to end.
++Continues the numbering of
++[feature 001's guide](../001-user-accounts-cli/quickstart.md) (V1 … V12), whose
++scenarios all still apply and are re-run unchanged as **V13**.
++
++Interface details are in
++[contracts/cli-contract.md](./contracts/cli-contract.md); field rules in
++[contracts/store-format.md](./contracts/store-format.md); entity rules in
++[data-model.md](./data-model.md). Nothing is duplicated here.
++
++## Prerequisites
++
++- **Python 3.11 or newer** (A-013, planning input). No install step, no runtime
++  dependency — standard library only (Principle I).
++- **POSIX** host: `fcntl.flock` and `os.replace` are hard requirements.
++- `pytest` for the suite only — a development dependency, declared in
++  `requirements-dev.txt` and never imported by `src/` (Principle I).
++
++```bash
++cd <repo root>
++python3 --version                 # expect 3.11 or newer
++python3 -m pip install -r requirements-dev.txt   # pytest, for tests only
++```
++
++## Running the tool
++
++`src/` goes on `PYTHONPATH`; there is nothing to install (A-013).
++
++```bash
++export PYTHONPATH=src
++export STORE=./demo.store
++```
++
++### Issue a token (administrator)
++
++```bash
++python -m accounts --store "$STORE" reset-token alice < /dev/null
++python -m accounts --store "$STORE" reset-token alice --ttl 60 < /dev/null
++```
++
++Prints the token on a line of its own and nothing else; exit 0. Reads no input,
++so it works with stdin closed. Default validity is 900 seconds.
++
++### Redeem it (account holder)
++
++```bash
++printf '%s\n%s\n' "$TOKEN" "$NEW_PASSWORD" \
++  | python -m accounts --store "$STORE" reset alice
++```
++
++Prints `password reset`; exit 0. Reads exactly two lines — token, then new
++password.
++
++### Capture a token for scripted use
++
++```bash
++TOKEN=$(python -m accounts --store "$STORE" reset-token alice < /dev/null)
++```
++
++Safe because the token is the only thing on stdout on success, and its alphabet
++contains no whitespace, quoting or control characters (A-023, SR-011).
++
++## Running the suite
++
++```bash
++python3 -m pytest                      # everything except the slow markers is fast
++python3 -m pytest -m "not slow"        # skip the 1 000-account, concurrency, crash and expiry waits
++python3 -m pytest tests/test_reset.py tests/test_reset_token.py -v
++python3 -m pytest tests/test_compatibility.py -v   # proves feature 001 is untouched
++```
++
++`pytest.ini` already sets `pythonpath = src` and `testpaths = tests`. The suite
++drives the real executable in a subprocess with piped streams, so it asserts the
++operator-visible contract rather than internal function returns.
++
++**Every password and token literal the suite uses is synthetic** and defined
++only in `tests/conftest.py` (constitution, secrets hygiene). Real tokens are
++captured from stdout at runtime and never committed.
++
++---
++
++## Validation scenarios
++
++Each is runnable, states its expected outcome, and names the requirements and
++the test file that automates it. V13–V23 are new; V1–V12 are feature 001's and
++are re-run unchanged.
++
++### V13 — Feature 001 still passes, unchanged (US5, FR-040, SC-019)
++
++**The gate for this whole feature.** Run the complete existing suite against the
++extended tool.
++
++```bash
++python3 -m pytest tests/test_cli_contract.py tests/test_register.py \
++  tests/test_login_lockout.py tests/test_passwd.py tests/test_delete.py \
++  tests/test_store_format.py tests/test_security.py tests/test_concurrency.py \
++  tests/test_crash_safety.py tests/test_performance.py tests/test_example_sequence.py
++```
++
++**Expected**: all pass. The **only** permitted edit to any of those files is the
++two diagnostic strings of A-025 in `tests/test_cli_contract.py` (the usage line
++and the unknown-command message, both of which enumerate the operation names).
++Any other changed assertion means the feature regressed the tool, not that the
++test was wrong.
++
++**Automated by**: the files above, plus
++`tests/test_compatibility.py::test_a025_only_two_diagnostics_changed`.
++
++### V14 — Issue and redeem across two invocations (US1, FR-028, SC-013)
++
++```bash
++rm -f "$STORE"
++printf 'quarry-lantern-glide\n' | python -m accounts --store "$STORE" register alice
++TOKEN=$(python -m accounts --store "$STORE" reset-token alice < /dev/null); echo "exit=$?"
++printf '%s\ncobalt-meadow-stencil\n' "$TOKEN" | python -m accounts --store "$STORE" reset alice
++printf 'cobalt-meadow-stencil\n' | python -m accounts --store "$STORE" login alice
++printf 'quarry-lantern-glide\n'   | python -m accounts --store "$STORE" login alice
++```
++
++**Expected**: the token line then `exit=0`; `password reset` and 0; `ok` and 0;
++then `invalid credentials` and 1 — the old password is dead. No setup step
++between issuing and redeeming.
++
++**Automated by**: `tests/test_reset.py`.
++
++### V15 — The token works only once (US2, FR-035, SC-013)
++
++Repeat the redemption from V14 with the same `$TOKEN` and a different password.
++
++**Expected**: `invalid token` on stderr, exit 1, empty stdout, and the password
++set by the first redemption still verifies.
++
++**Automated by**: `tests/test_reset_invalid_token.py`.
++
++### V16 — Every refusal is indistinguishable (US2, SR-018, SC-018)
++
++Compare the five refusal paths: never issued; already redeemed; replaced by a
++later issuance; expired; and an account that never had a token. Also try an
++empty token line, a token issued for another account, and the account's own
++current password on the token line.
++
++**Expected**: all eight produce byte-identical stderr (`invalid token`),
++identical exit status 1, identical empty stdout, and comparable wall-clock time.
++`stat` the store before and after each: byte-identical, and `failed_logins` is
++unchanged — a wrong token can neither lock the account nor be slowed by a
++lockout (FR-039, A-020).
++
++**Automated by**: `tests/test_reset_invalid_token.py`,
++`tests/test_reset_security.py`.
++
++### V17 — Validity is honoured at both ends (FR-030, SC-014)
++
++```bash
++T1=$(python -m accounts --store "$STORE" reset-token alice --ttl 5 < /dev/null)
++printf '%s\nharbor-mellow-quartz\n' "$T1" | python -m accounts --store "$STORE" reset alice
++T2=$(python -m accounts --store "$STORE" reset-token alice --ttl 1 < /dev/null)
++sleep 2
++printf '%s\nthistle-amber-driftx\n' "$T2" | python -m accounts --store "$STORE" reset alice
++```
++
++**Expected**: the immediate redemption succeeds (`password reset`, 0); the
++expired one is refused (`invalid token`, 1). Expiry is read from the clock at the
++moment of the attempt, never cached from the issuing run.
++
++**Automated by**: `tests/test_reset.py` (marked `slow` where it waits).
++
++### V18 — A refused new password does not burn the token (US3, FR-036, SC-017)
++
++```bash
++T=$(python -m accounts --store "$STORE" reset-token alice < /dev/null)
++printf '%s\nelevenchars\n' "$T"  | python -m accounts --store "$STORE" reset alice   # 11 chars
++printf '%s\ntwelvecharss\n' "$T" | python -m accounts --store "$STORE" reset alice   # 12 chars
++```
++
++**Expected**: first → `error: new password too short: expected at least 12
++characters, received 11` on stderr, exit **2**, empty stdout, stored password
++unchanged, token still outstanding **with its original expiry**. Second →
++`password reset`, exit 0. Also check the over-long case (status 2, token
++survives) and that an **expired** token with an 11-character password answers
++`invalid token`/1 rather than 2 — the token is judged before the password
++(scenario 3.4).
++
++**Automated by**: `tests/test_reset.py`.
++
++### V19 — Reissuing replaces; tokens do not cross accounts (FR-029, A-015)
++
++Issue twice for `alice` and confirm the first value is dead and the second
++works. Issue for `alice` and `bob`, then present each token against the other
++account.
++
++**Expected**: the replaced token and the wrong-account token both give
++`invalid token`/1; each correct pairing succeeds. At most one token is ever
++outstanding per account. `Alice` and `alice` are two accounts with independent
++tokens.
++
++**Automated by**: `tests/test_reset_token.py`,
++`tests/test_reset_invalid_token.py`.
++
++### V20 — Locked accounts: the recovery path works and clears the lock (FR-031, FR-034, A-018)
++
++Drive `alice` to five failed logins, then issue and redeem a token.
++
++**Expected**: both operations succeed on the locked account (**never** status
++4), the reset clears the lock and zeroes `failed_logins`, and the new password is
++accepted immediately afterwards. `reset-token` alone leaves the lock state and
++count exactly as they were.
++
++**Automated by**: `tests/test_reset.py`, `tests/test_reset_token.py`.
++
++### V21 — Bad requests change nothing, and never create the store (US4, FR-027, FR-032, FR-038)
++
++```bash
++python -m accounts --store ./does-not-exist reset-token alice < /dev/null ; echo "exit=$?"
++ls ./does-not-exist* 2>&1
++python -m accounts --store "$STORE" reset-token ab < /dev/null               ; echo "exit=$?"
++python -m accounts --store "$STORE" reset-token alice --ttl 0 < /dev/null    ; echo "exit=$?"
++python -m accounts --store "$STORE" reset-token alice --ttl abc < /dev/null  ; echo "exit=$?"
++python -m accounts --store "$STORE" reset-token alice --ttl 100000 < /dev/null; echo "exit=$?"
++python -m accounts --store "$STORE" reset-token alice --ttl 60 --ttl 60 < /dev/null; echo "exit=$?"
++python -m accounts --store "$STORE" login alice --ttl 60 < /dev/null         ; echo "exit=$?"
++python -m accounts --store "$STORE" reset alice < /dev/null                  ; echo "exit=$?"
++```
++
++**Expected**, in order: 3 with `error: no such account 'alice'` and **no file
++created**; 2 (invalid username); 2, 2, 2 (invalid ttl, message naming expected
++and received); 2 with the usage line (`--ttl` twice); 2 with the usage line
++(`--ttl` on another command); 2 with `error: missing reset input: expected a
++token line then a new password line on stdin, received 0 line(s)`. Also check
++the stream closing after the token line only → 2, `received 1 line(s)`. Every
++case leaves the store byte-identical and issues no token.
++
++**Automated by**: `tests/test_reset_token.py`, `tests/test_reset.py`.
++
++### V22 — The token leaks nowhere (SR-013, SR-017, SR-018, SC-015, SC-016)
++
++After every operation, search the store file, any file left beside it, and both
++streams for the issued token value.
++
++**Expected**: zero occurrences anywhere except the one stdout line that printed
++it. The store holds only a salted scrypt digest and an expiry. No sidecar, spool
++or log file exists. No password, salt, digest, parameter, expiry instant or
++stack trace appears on either stream.
++
++Also: 10 000 tokens generated in-process are all distinct, each decodes to
++exactly 16 bytes (128 bits), and the package never imports `random`.
++
++**Automated by**: `tests/test_reset_security.py`.
++
++### V23 — Malformed reset material is loud (SR-010)
++
++Hand-write stores (synthetic material only) in which `reset` is not an object,
++is missing `expires_ms`, has `expires_ms` as a string / float / `true` /
++negative / above the cap, has a ninth key, or has a bad salt length.
++
++**Expected**: every one is `error: store 'PATH' is malformed: <structural
++reason>` with exit **5**, for both new operations and for the existing five. In
++particular a malformed `expires_ms` is **not** treated as "not expired" — the
++load fails rather than the token being accepted. No account is created, deleted
++or altered.
++
++**Automated by**: `tests/test_store_format.py`,
++`tests/test_reset_security.py`.
++
++### V24 — Concurrency, crash safety and performance (SC-022, SC-023, SC-024)
++
++```bash
++python3 -m pytest -m slow -v
++```
++
++**Expected**:
++
++- two simultaneous redemptions of one valid token → exactly one `password
++  reset`/0 and one `invalid token`/1, and the password afterwards is the one set
++  by the single success;
++- `SIGKILL` during issuance or redemption → the store still parses and every
++  account it held before still verifies;
++- `reset-token` and `reset` each finish in under one second on a 1 000-account
++  store.
++
++**Note on the last one**: `reset` performs two deliberate scrypt derivations
++(verify the token, hash the new password) at ≈ 0.40 s each on the development
++host, so it lands at ≈ 0.81 s — about 1.2× headroom against the one-second
++bound, the same position `passwd` is in. The store-size component is ~6 ms, so
++this is a statement about host CPU, not about the design. See
++[research R20](./research.md#r20--performance-budget-and-a-flagged-tightness)
++and the plan's flagged notes.
++
++**Automated by**: `tests/test_concurrency.py`, `tests/test_crash_safety.py`,
++`tests/test_performance.py`.
++
++### V25 — The documented sequence reproduces exactly (SC-025)
++
++```bash
++python3 -m pytest tests/test_example_sequence.py -v
++```
++
++**Expected**: the sequence in
++[contracts/cli-contract.md](./contracts/cli-contract.md#worked-example-sequence)
++reproduces line for line and status for status, with the token captured at
++runtime rather than hard-coded.
++
++---
++
++## Definition of done for this feature
++
++From the constitution's Development Workflow, checked against this feature:
++
++- [ ] Every FR-020 … FR-043 and SR-010 … SR-018 maps to a passing `pytest`
++      test — see the plan's
++      [requirement-to-test mapping](./plan.md#requirement-to-test-mapping).
++- [ ] Error paths assert the **message and the exit status** together, not just
++      the status.
++- [ ] Security requirements are tested as **negatives** too: the wrong, used,
++      replaced, expired and never-issued token; the out-of-range `--ttl`; the
++      over-long and non-UTF-8 token line; the malformed stored reset material;
++      the token-leakage searches.
++- [ ] The full suite passes, including V13 — feature 001 unchanged apart from
++      the two A-025 strings.
++- [ ] No third-party runtime import added; `pytest` stays development-only.
++- [ ] No placeholder, stub or `TODO` in the delivered path.
+diff --git a/specs/002-password-reset/research.md b/specs/002-password-reset/research.md
+new file mode 100644
+index 0000000..2518fa0
+--- /dev/null
++++ b/specs/002-password-reset/research.md
+@@ -0,0 +1,506 @@
++# Phase 0 Research: Password Reset by One-Time Token
++
++**Feature**: `002-password-reset` | **Date**: 2026-11-05
++
++Continues the numbering of
++[feature 001 research](../001-user-accounts-cli/research.md) (R1 … R10), whose
++decisions all remain in force. This file records only what feature 002 adds or
++has to reconcile.
++
++## Purpose
++
++The specification carries no `NEEDS CLARIFICATION` marker, and the planning
++input fixes the three things a plan would otherwise have to choose:
++
++- **Language/runtime**: Python 3.11 or newer, standard library only (also A-013,
++  Principle I).
++- **Interface**: exactly as the specification states it — `reset-token` and
++  `reset` under the existing `--store PATH COMMAND USERNAME` form, with
++  `--ttl SECONDS` on `reset-token` only.
++- **Testing**: `pytest`, a development-only dependency (Principle I).
++
++So Phase 0 is not about resolving unknowns in the request. It is about the
++decisions the specification deliberately leaves to the plan — how a token is
++generated, what is recorded against an account, how an instant is represented,
++and in what order the checks run — plus one reconciliation the existing code
++forces (R18) and one budget that turns out to be tight (R20).
++
++Host for every measurement below: CPython 3.13.17, Linux 6.18, x86-64 —
++the same host as feature 001's R8.
++
++---
++
++## R11 — Token generation: source, entropy, alphabet, length
++
++**Decision**: `secrets.token_urlsafe(16)` — 16 bytes from the OS CSPRNG,
++rendered as 22 characters of the URL-safe base64 alphabet
++(`A–Z a–z 0–9 - _`) with the padding stripped. Exposed as
++`crypto.new_token()` with `crypto.TOKEN_BYTES = 16`.
++
++**Rationale**:
++
++- `secrets` is the stdlib's CSPRNG facade over `os.urandom`, which is what
++  SR-014 names. `random` is excluded by the same requirement and the test suite
++  asserts the package never imports it.
++- 16 bytes is **exactly** the 128 bits SR-014 demands ("at least 128 bits"), and
++  A-023 says the length "follows from the 128-bit entropy requirement" — so the
++  spec itself points at the minimum rather than at a margin. The result is 22
++  characters, short enough to read over the phone and paste into a shell, which
++  is the hand-off A-014 describes.
++- The alphabet satisfies A-023 and SR-011 by construction: every character is
++  printable ASCII, none is whitespace, none is a quoting character, none is a
++  control character, and none can begin a terminal escape sequence. Printing
++  the token therefore cannot forge an extra line of output or move the cursor.
++- Verified on the host: `len(secrets.token_urlsafe(16)) == 22`, the value
++  base64url-decodes to exactly 16 bytes, and 10 000 tokens generated in one
++  process were all distinct (0.013 s) — which is how SC-016 is checked without
++  10 000 subprocess invocations.
++
++**Alternatives considered**:
++
++- `secrets.token_hex(16)` — 32 characters for the same 128 bits. Rejected:
++  longer to transcribe for no gain.
++- `secrets.token_urlsafe(32)` — 256 bits, 43 characters. Rejected: SR-014's
++  bound is 128 bits and the extra 21 characters make the hand-off worse.
++  Changing `TOKEN_BYTES` later is a one-constant change and no requirement
++  depends on 16.
++- A hand-rolled alphabet via `secrets.choice` over a custom character set.
++  Rejected under Principle IV: the stdlib already has the exact function, and a
++  hand-rolled loop is where an off-by-one in the entropy accounting lives.
++
++---
++
++## R12 — What is recorded against the account
++
++**Decision**: one optional record key, `reset`, holding a nested object with
++exactly eight keys — the same seven credential fields a password record carries
++(`kdf`, `n`, `r`, `p`, `dklen`, `salt`, `hash`) plus `expires_ms`. The token
++itself is never written. The digest is `scrypt` at the module's **current**
++parameters over the token text, with a fresh 16-byte `secrets` salt per
++issuance.
++
++```json
++"alice": {
++  "kdf": "scrypt", "n": 131072, "r": 8, "p": 1, "dklen": 32,
++  "salt": "…", "hash": "…", "failed_logins": 0,
++  "reset": {
++    "kdf": "scrypt", "n": 131072, "r": 8, "p": 1, "dklen": 32,
++    "salt": "…", "hash": "…", "expires_ms": 1762300000000
++  }
++}
++```
++
++**Rationale**:
++
++- SR-013 requires "a salted digest of the token produced by the same
++  deliberately slow algorithm and current parameters already used for
++  passwords, with a fresh salt per issued token". Mirroring the password field
++  set is the literal reading of that, and it makes `crypto.verify(token,
++  record["reset"])` work **unchanged** — `verify` already reads exactly
++  `salt`, `n`, `r`, `p`, `dklen`, `hash` from the mapping it is handed and
++  already compares with `hmac.compare_digest`. No new cryptographic code is
++  written for this feature; `crypto` gains only `new_token`.
++- One key makes the three lifecycle operations single expressions:
++  issue is `record["reset"] = …` (which *replaces*, satisfying FR-029 and A-015
++  structurally rather than by a check), consume is
++  `record.pop("reset", None)`, and "has no outstanding token" is
++  `"reset" not in record`.
++- The field set is fixed and so is its serialised size — 174 bytes per record,
++  measured — which is what FR-043 and SR-015 require: no account record can
++  grow without limit. Worst case measured: 10 000 accounts each carrying reset
++  material serialises to 3 440 027 bytes, comfortably inside the existing
++  8 MiB store cap, so the A-011 limits continue to bound the file with no new
++  limit needed.
++- Optionality is what delivers FR-041: a record written before this feature has
++  eight keys and no `reset`, which is a valid record under the extended rule.
++
++**Alternatives considered**:
++
++- **Eight flat keys** (`reset_kdf`, `reset_n`, … `reset_expires_ms`).
++  Constitution Principle IV prefers a flat structure to a nested one, so this
++  was the default. Rejected because `crypto.verify` would then need either a
++  key-prefix parameter or a projection dict built at the call site — new code on
++  the one path where SR-014's constant-time comparison lives — and because
++  "replace the token" and "consume the token" become eight-key operations where
++  forgetting one leaves half a token behind. The deviation is recorded in the
++  plan's Complexity Tracking with this requirement as its justification.
++- **Storing the token in plaintext** with only an expiry. Rejected outright:
++  SR-013 and constitution rule 4 forbid it, and the store is exactly the file
++  an attacker who can read the store already has.
++- **A single unsalted SHA-256 of the token**, on the argument that 128 bits of
++  entropy makes a dictionary attack pointless. Rejected: SR-013 names the slow
++  algorithm and a fresh salt, and Principle IV explicitly does not permit
++  simplifying away a Principle V control. The cost is one derivation, which
++  R20 budgets.
++- **A separate top-level `resets` object** in the document, keyed by username.
++  Rejected: it duplicates the account key, admits a token for a username that
++  does not exist, and makes `delete` responsible for cleaning up a second place
++  (FR-042) instead of the token simply going with the record.
++
++---
++
++## R13 — Representing the expiry instant
++
++**Decision**: `expires_ms` — an **integer** count of milliseconds since the Unix
++epoch, computed at issuance as `int(time.time() * 1000) + ttl * 1000`, and
++validated on load as an integer in `1 … 253402300799000`. A token is valid iff
++`int(time.time() * 1000) <= expires_ms`, evaluated at the moment of the
++attempt.
++
++**Rationale**:
++
++- **Why an integer, not a float.** SR-010 states the trap directly: "a malformed
++  expiry MUST NOT be treated as 'not expired'". `json` accepts and emits
++  `NaN`, and `NaN <= x` is `False` — a `NaN` expiry in a hand-edited store
++  would read as *never expired*, which is the exact failure SR-010 names. An
++  integer field with `type(v) is int` and a range check (the discipline
++  store-format.md already uses, including its explicit rejection of `bool`)
++  has no such value. Integers also keep the store byte-deterministic, which is
++  what lets SC-021 be a byte comparison.
++- **Why milliseconds, not whole seconds.** Whole seconds cannot satisfy the
++  spec's own boundary cases together. SC-014 requires a token to be "accepted
++  before its validity has elapsed and refused after it", and scenario 2.4
++  requires a 1-second token to be refused once "more than 1 second has since
++  elapsed". With second truncation a 1-second token issued at `t = 10.9` expires
++  at `11`, so it is still accepted at `t = 11.5` — 0.6 s *after* its validity
++  elapsed — and rounding the other way refuses it early, breaking scenario 1.5
++  and "a token redeemed in the same second it was issued is valid".
++  Millisecond resolution bounds the error at 1 ms, under which every boundary
++  scenario in the spec holds as written.
++- **Why the name carries the unit.** `expires` would invite a reader — or a
++  later maintainer comparing against `time.time()` — to assume seconds and be
++  wrong by a factor of 1 000, which is a silent wrong answer (Principle II).
++- **Why absolute, from `time.time()`.** A-024 fixes this: an absolute instant
++  recorded at issue, compared against the system clock at each attempt, with a
++  clock the operator can move declared out of scope. `time.monotonic()` is
++  unusable here because it is not comparable across processes, and the two
++  operations are by design separate invocations.
++- **Range bound.** `ttl ≤ 86 400` (A-016) means the arithmetic adds at most
++  86 400 000, so an expiry computed from any accepted `ttl` is far inside the
++  bound; the load-time upper bound of `253402300799000` (end of year 9999)
++  exists to refuse a stored value that could only have been hand-written, and
++  discharges SR-015's "no arithmetic on it can overflow or produce a value
++  outside the store's accepted range". Python integers do not overflow, so the
++  requirement is really about range *validation*, which is where this is done.
++
++**Alternatives considered**:
++
++- Integer **seconds** — simplest and matches the spec's unit, but fails the
++  boundary scenarios above.
++- A **float** POSIX timestamp — right resolution, but the `NaN`/`Infinity`
++  hazard SR-010 calls out, plus a serialisation-determinism wrinkle.
++- An **ISO-8601 string** — human-readable in the store, but needs
++  `datetime.fromisoformat` parsing on the validation path (a new failure mode
++  per load) and invites timezone ambiguity. Rejected under Principle IV.
++- Storing **`issued_ms` + `ttl`** and deriving the expiry. Rejected: it stores
++  two fields to answer one question and adds an arithmetic step on the
++  authorisation path, where SR-016 wants the fewest.
++
++---
++
++## R14 — Ordering of checks for the two new operations
++
++**Decision**: `reset` follows FR-033 literally; `reset-token` follows the
++analogous order. Both are asserted by a dedicated precedence test.
++
++`reset`:
++
++| # | Check | Failure |
++|---|---|---|
++| 1 | username rules (FR-011) | 2 |
++| 2 | read the token line, then the new-password line | 2 |
++| 3 | acquire the directory lock, load and validate the store | 5 |
++| 4 | the account exists | 3 |
++| 5 | an outstanding token exists, is unexpired, and matches | 1 |
++| 6 | the new password satisfies FR-012 | 2 |
++| 7 | apply: new digest, token consumed, count zeroed, lock cleared, store written | 0 |
++
++`reset-token`:
++
++| # | Check | Failure |
++|---|---|---|
++| 1 | argument shape: `--ttl` present at most once, and only with `reset-token` | 2 |
++| 2 | username rules (FR-011) | 2 |
++| 3 | `--ttl` value: format then range (FR-022) | 2 |
++| 4 | acquire the directory lock, load and validate the store | 5 |
++| 5 | the account exists | 3 |
++| 6 | issue: fresh token, fresh salt, digest, expiry, store written, token printed | 0 |
++
++**Rationale**:
++
++- Steps 1–2 of `reset` run **before** the store is touched, which is what makes
++  an over-long token line a status-2 bad request (spec edge case "Over-long
++  token line") rather than something compared against a record, and what makes
++  "missing input against an unreadable store" report the missing input.
++- Step 5 **before** step 6 is scenario 3.4 stated as an order: an expired token
++  with an 11-character password answers `invalid token` (1), not a password
++  error (2). The password line is *read* at step 2 but *judged* at step 6.
++- Step 6 before step 7 is scenario 3.1 and FR-036: the refusal happens with the
++  token still outstanding and its original expiry untouched, because nothing has
++  been written yet.
++- `reset-token` validates the username before the `--ttl` value so that the two
++  new operations agree with the five existing ones on which status an invalid
++  username produces first; the only shape checks ahead of it are the ones
++  argparse necessarily performs on argv before any handler runs.
++- There is **no lock check** in either table. FR-031, FR-039 and A-018 require
++  the lock to restrict `login` only, exactly as FR-019 already has it for
++  `passwd` and `delete`, so status 4 is unreachable from both new operations
++  (FR-024).
++
++**Alternatives considered**: validating the new password before the token
++(status 2 ahead of status 1). Rejected — it contradicts scenario 3.4 and leaks
++whether a token is outstanding, because the two statuses would then distinguish
++"valid token, bad password" from "bad token, bad password".
++
++---
++
++## R15 — `--ttl` inside the existing argparse shape
++
++**Decision**: add `--ttl` to the one existing parser as
++`action="append"`, `default=None`, with **no** `type=` converter, so the raw
++string reaches the handler. Keep `allow_abbrev=False` and `add_help=False`.
++After parsing: more than one occurrence, or any occurrence with a command other
++than `reset-token`, raises the usage error (status 2). The value is validated by
++`validation.validate_ttl`.
++
++**Rationale**:
++
++- `allow_abbrev=False` is already set, so `--tt` and `--t` are errors with no
++  extra code — FR-021's "MUST NOT be abbreviated".
++- `action="append"` plus a length check is the pattern `--store` already uses
++  for "given more than once is a shape error, not last-one-wins" — FR-021's
++  "MUST NOT be given more than once". Reusing the existing pattern is cheaper
++  than introducing a second one.
++- **No `type=int`.** argparse would turn a bad value into its own message and
++  its own exit path, and FR-022 requires a message that "names what was expected
++  and what was received". Taking the raw string and validating it in
++  `validation` keeps that message in the one place the project writes messages,
++  and keeps the check order of R14 explicit rather than implicit in argparse.
++- The "only with `reset-token`" rule is enforced after parsing rather than by a
++  second parser or a subparser tree, because a subparser would restructure the
++  argv handling of all seven commands — a change with blast radius across
++  FR-040, for one option.
++- `validate_ttl` accepts `re.fullmatch(r"[0-9]{1,5}", text)` and then
++  `1 <= int(text) <= 86400`. The regex is checked **before** `int()`, which
++  matters more than it looks: `int()` accepts Unicode decimal digits
++  (`int("１２") == 12`), surrounding whitespace, and a leading `+`/`-`, none of
++  which is "a whole number of seconds" written plainly. Bounding the match at
++  five digits also bounds the conversion cost (SR-015) and makes
++  `--ttl 100000` a format refusal while `--ttl 99999` is a range refusal —
++  both status 2. The pattern is a bounded character class with no alternation
++  or nesting, so its cost is linear (SR-015).
++- `--ttl -5`: the parser declares no option that looks like a negative number,
++  so argparse passes `-5` through as the option's value and `validate_ttl`
++  refuses it. Asserted rather than assumed.
++
++**Alternatives considered**: `argparse` subparsers per command (restructures
++everything for one option); a positional optional `SECONDS` (the spec names the
++option `--ttl`, and the planning input says follow the interface exactly);
++`type=int` with a custom `ArgumentTypeError` (argparse reformats the text, so
++the contract's message table stops being literally true).
++
++---
++
++## R16 — Reading the token line
++
++**Decision**: factor the body of `cli.read_password_line` into
++`cli.read_line(kind, missing_message)` and keep `read_password_line` as a
++two-line wrapper that passes `kind="password"` and the **byte-identical**
++message it emits today. `reset` calls `read_line("token", …)` then
++`read_line("password", …)`.
++
++**Rationale**:
++
++- A-022 says the token line is read and bounded exactly as a password line is,
++  so the mechanism is already written and already tested: one
++  `sys.stdin.buffer.readline(MAX_LINE_BYTES + 1)`, which never asks for more
++  than the cap and so refuses an over-long line without loading or truncating
++  it (feature 001 R5, FR-014, SR-015).
++- The messages must differ. "error: password line too long" on a refused *token*
++  line would misreport which line was at fault — a Principle II problem, not a
++  cosmetic one. Parameterising `kind` yields `error: token line too long: …`
++  and `error: token line is not valid UTF-8 text` from the same code path.
++- The missing-input message is passed in rather than derived because `reset`'s
++  is not of the existing shape: it names both lines in order
++  (`error: missing reset input: expected a token line then a new password line
++  on stdin, received N line(s)`), which is what scenario 4.6 asks to be
++  reported — the stream being empty and the stream ending after the token line
++  are distinguished by `N`.
++- Because `read_password_line` keeps its signature and emits the same bytes,
++  no existing command's output changes (FR-040). This is the only edit this
++  feature makes to code any of the five existing commands executes, and it is
++  a pure extraction — the reason FR-040 is checkable by running the 001 suite
++  unchanged (SC-019).
++
++**Alternatives considered**: calling `read_password_line` from `reset` and
++accepting "password" in a token message (rejected: misreports the fault);
++duplicating the whole reader for tokens (Principle IV tolerates duplication,
++but this is the second occurrence of a *security control* — the byte cap — and
++two copies of a cap is how one of them later drifts).
++
++---
++
++## R17 — Making every refusal indistinguishable, including by stopwatch
++
++**Decision**: every refused-token path spends **exactly one** scrypt derivation
++before answering, and answers with the identical byte string `invalid token` and
++status 1. Where there is nothing real to verify — no `reset` key at all, or an
++expired one — the derivation is `crypto.dummy_verify(token)`, the function
++feature 001 already uses on `login`'s unknown-account path.
++
++**Rationale**:
++
++- SR-018 and SC-018 require a wrong, used, replaced or expired token — and an
++  account that never had one — to be externally identical in message, status
++  and stdout. Those are satisfied by the fixed string and the single status.
++- They do not mention timing, but without the dummy derivation the paths differ
++  by ~0.4 s (R20), which tells a caller whether a reset is in progress for an
++  account — precisely the state SR-018 says output must not reveal. Spending the
++  derivation closes it using a mechanism already in the package, with no new
++  code and no new concept. It is also the same decision 001 made for SC-004,
++  so the two refusal families behave alike.
++- "Already used" needs no special case: a consumed token's `reset` key is gone,
++  so it takes the no-token path and is identical to it by construction rather
++  than by matching two message strings.
++- The account-does-not-exist path is **not** made uniform with these: A-021 and
++  FR-024 put it at status 3 on purpose, and A-021 records that this is a
++  deliberate departure from `login`'s enumeration resistance, scoped to callers
++  who can already read the store.
++
++**Alternatives considered**: returning early when there is no token (leaves the
++timing oracle); distinct messages per refusal reason, which would be friendlier
++to the operator and is what Principle II would otherwise favour — overruled
++explicitly by SR-018 and FR-026, and noted here so the omission reads as
++deliberate.
++
++---
++
++## R18 — Store compatibility in both directions
++
++**Decision**: the record validator's field set becomes "exactly the eight
++existing keys, **plus** an optional `reset`"; the `reset` object is then
++validated against its own exact eight-key allow-list with the same per-field
++type and range rules. `version` stays `1`. Nesting depth of a valid store
++becomes 4.
++
++**Rationale**:
++
++- FR-041 requires an old store to load with every account simply having no
++  token. Making `reset` optional is the whole mechanism; nothing migrates and
++  nothing is rewritten on load.
++- **`version` is deliberately not bumped.** The honest argument for bumping it
++  is that the format changed. The argument against, which wins: `version` is
++  defined by 001's store-format contract as the compatibility mechanism in
++  the *forward* direction only — a store whose version the reader does not
++  recognise is status 5, never best-effort. Bumping to `2` would therefore make
++  every pre-existing store (`version: 1`) **unloadable**, which is a direct
++  FR-041 violation. The change is additive and optional, so a version 1 store
++  written by either generation of the tool is readable by this one.
++- The cost is the asymmetry A-026 already records and accepts: the *previous*
++  build validates against a closed eight-key set, so it reports a store
++  carrying an outstanding token as malformed (status 5) rather than
++  misreading it. Loud, not silent — which is the behaviour Principle II wants
++  from a downgrade, and better than what a version bump would give (an equally
++  loud failure, but for *every* store rather than only the ones with a token
++  outstanding). Downgrading is out of scope by A-026.
++- Validating the nested object against a closed field set, rather than
++  skipping unknown keys inside it, is SR-010: an account record whose reset
++  material fails validation is status 5 and is never repaired, guessed at or
++  ignored. In particular a `reset` object missing `expires_ms`, or carrying a
++  non-integer one, fails the load — it does not default to "not expired".
++
++**Alternatives considered**: bump `version` to 2 (breaks FR-041, as above);
++accept `reset` with a relaxed interior so old and new tools interoperate
++(violates SR-010's allow-list rule and A-026's explicit non-goal); write reset
++material to a sidecar file so the store format never changes (violates SR-017's
++"no spool, no audit log, no sidecar" and loses atomicity across the two files).
++
++---
++
++## R19 — Single use under simultaneous redemption
++
++**Decision**: no new mechanism. Both operations perform their entire
++read–modify–write inside the existing `store.locked_store(path)` context, with
++the token verification, the password replacement and the token consumption all
++inside the same critical section.
++
++**Rationale**:
++
++- SR-016 requires the check and the change to be in one invocation and
++  serialised against other invocations "so that no interleaving lets one token
++  set two passwords and no concurrent issuance leaves two tokens outstanding
++  for one account". The existing lock is an exclusive `fcntl.flock` on the
++  store's *directory*, held across load → mutate → `os.replace` (001 R4), which
++  is exactly that guarantee.
++- Because the token is consumed by `record.pop("reset", None)` inside the same
++  locked section that verified it, the second of two simultaneous redemptions
++  loads a store with no `reset` key and takes the no-token path: one success,
++  one `invalid token`, status 1 (FR-035, SC-023).
++- Concurrent issuance is serialised by the same lock, and `record["reset"] = …`
++  overwrites, so "at most one outstanding token" (FR-029, A-015) holds under
++  interleaving without a check.
++- Crash safety (SC-024) likewise needs nothing new: the token record is part of
++  the one document replaced by `os.replace` after an `fsync`, so a kill at any
++  point leaves the complete old or the complete new store (001 R3).
++
++**Alternatives considered**: a per-account lock file (new file, violates SR-017
++and adds a cleanup path); an optimistic compare-and-swap on the serialised
++bytes (a second mechanism for a problem the existing lock already solves).
++
++---
++
++## R20 — Performance budget, and a flagged tightness
++
++**Decision**: proceed at the unchanged scrypt work factor and accept that
++`reset` sits at roughly 1.2× headroom against SC-022's absolute one-second
++bound on this host. Test the absolute bound *and* a hardware-independent
++assertion that the store-size component is negligible.
++
++**Measured on the host** (CPython 3.13.17, Linux 6.18, x86-64):
++
++| Component | Cost |
++|---|---|
++| One scrypt derivation at `n=2**17, r=8, p=1` | **0.399 s** |
++| JSON parse, 1 000 accounts all carrying reset material (344 027 B) | 0.0025 s |
++| Serialise, same document | 0.0036 s |
++| Reset material, serialised, per record | 174 B (fixed) |
++| 10 000 accounts all carrying reset material | 3 440 027 B (cap 8 388 608) |
++
++Derived per-operation cost on a 1 000-account store:
++
++| Operation | Derivations | Estimated total |
++|---|---|---|
++| `reset-token` (success) | 1 — digest the new token | ≈ 0.41 s |
++| `reset` (success) | 2 — verify the token, digest the new password | ≈ 0.81 s |
++| `reset` (refused token) | 1 — real or dummy (R17) | ≈ 0.41 s |
++| `reset` (short new password) | 1 — the token verification only | ≈ 0.41 s |
++
++**Rationale and the flag**: `reset` at ≈ 0.81 s against a 1 s bound is about
++1.2× headroom, the same position feature 001 recorded for `passwd` (001 R8 and
++its flagged note 3) and for the same reason — two deliberate derivations are
++inherent to the operation. SR-013 names "the same deliberately slow algorithm
++and current parameters already used for passwords", and Principle IV forbids
++simplifying away a Principle V control, so buying margin by lowering the work
++factor is not available to this plan: it would be an SR-013/SR-004 amendment,
++not an implementation choice. The store-size component is ~6 ms — three orders
++of magnitude below the KDF — so SC-022 is a statement about the host's CPU, not
++about the design, and the suite asserts both the absolute bound (marked `slow`)
++and the scaling claim. Carried forward to the plan's flagged notes.
++
++**Alternatives considered**: a cheaper KDF for the token only, on the argument
++that a 128-bit random token needs no stretching. Technically defensible and
++rejected anyway: SR-013 states the requirement, the constitution marks
++Principle V non-negotiable, and the plan is not the place to weaken it.
++`/speckit-clarify` is.
++
++---
++
++## Resolved: no outstanding NEEDS CLARIFICATION
++
++The specification contained none, and the planning input fixed the runtime,
++the interface and the test framework. Three decisions above are judgement calls
++the spec left open rather than unknowns in the request, and each is recorded
++with the requirement that drove it: the millisecond integer expiry (R13), the
++nested `reset` object (R12, carried into the plan's Complexity Tracking because
++Principle IV prefers flat), and `version` staying at `1` (R18). The tight
++`reset` budget (R20) is carried into the plan's flagged notes, not left here.

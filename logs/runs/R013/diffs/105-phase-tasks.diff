@@ -1,0 +1,272 @@
+diff --git a/specs/001-bookmark-cli-manager/tasks.md b/specs/001-bookmark-cli-manager/tasks.md
+new file mode 100644
+index 0000000..df8787f
+--- /dev/null
++++ b/specs/001-bookmark-cli-manager/tasks.md
+@@ -0,0 +1,266 @@
++---
++
++description: "Task list for Command-Line Bookmark Manager implementation"
++---
++
++# Tasks: Command-Line Bookmark Manager
++
++**Input**: Design documents from `/specs/001-bookmark-cli-manager/`
++
++**Prerequisites**: [plan.md](./plan.md), [spec.md](./spec.md), [research.md](./research.md), [data-model.md](./data-model.md), [contracts/cli.md](./contracts/cli.md), [contracts/output-formats.md](./contracts/output-formats.md)
++
++**Tests**: Test tasks ARE included and are NOT optional for this feature. Constitution Principle III ("Every Requirement Is Testable") requires every functional requirement to map to at least one `pytest` test that names it, and SC-004 requires the same for all 23 FRs including every error path. Tests for a story are written before that story's implementation and must fail first.
++
++**Organization**: Tasks are grouped by user story so each story can be implemented, tested and delivered independently.
++
++## Format: `[ID] [P?] [Story] Description`
++
++- **[P]**: Can run in parallel (different files, no dependencies)
++- **[Story]**: Which user story this task belongs to (US1, US2, US3, US4)
++- Include exact file paths in descriptions
++
++## Path Conventions
++
++Single project, as fixed by [plan.md](./plan.md#project-structure): runtime code in `src/bookmarks/`, tests in `tests/`, `pyproject.toml` at the repository root. No `models/`, `services/` or `lib/` subdivision (Principle IV).
++
++---
++
++## Phase 1: Setup (Shared Infrastructure)
++
++**Purpose**: Make the package importable and the test suite runnable with no install step
++
++- [ ] T001 Create `pyproject.toml` at the repository root containing only `[tool.pytest.ini_options]` with `pythonpath = ["src"]` and `testpaths = ["tests"]`, and declaring no runtime dependencies (research.md D9; Principle I forbids an install step)
++- [ ] T002 [P] Create the package skeleton: `src/bookmarks/__init__.py` as an empty marker file (no re-exports, no package-level state, per plan.md Structure Decision) and an empty `tests/` directory
++- [ ] T003 [P] Add `bookmarks.db` to `.gitignore` so the default store created in the current working directory (FR-002) is never committed; `__pycache__/`, `*.pyc` and `.pytest_cache/` are already listed
++
++---
++
++## Phase 2: Foundational (Blocking Prerequisites)
++
++**Purpose**: The store connection, the argument-parsing shell with its reserved exit statuses, the module entry point, and the test fixtures — everything every user story needs before it can add a single command
++
++**⚠️ CRITICAL**: No user story work can begin until this phase is complete
++
++- [ ] T004 Implement `connect(path)` in `src/bookmarks/storage.py`: open the SQLite file with `sqlite3.connect`, set `row_factory = sqlite3.Row`, and apply the schema idempotently with `CREATE TABLE IF NOT EXISTS bookmarks (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '')` — `AUTOINCREMENT` is required so ids are never reused (FR-003, FR-008, research.md D1/D2); no indexes, no `UNIQUE` on `url` (duplicates are allowed), no module-level cached connection (constitution: no hidden state)
++- [ ] T005 Implement the usage-error parser class in `src/bookmarks/cli.py`: a three-line `argparse.ArgumentParser` subclass overriding `error(message)` to write the message to `sys.stderr` and `raise SystemExit(1)`, so argparse's default status 2 cannot collide with the reserved FR-009 meaning (research.md D5; contracts/cli.md exit-status table)
++- [ ] T006 Implement `build_parser()` in `src/bookmarks/cli.py` using the T005 subclass: the global option `--db PATH` defaulting to `bookmarks.db` in the current working directory and preceding `COMMAND` (FR-002), plus a required subparser group into which each user story registers its own command (FR-001)
++- [ ] T007 Implement `main(argv=None)` in `src/bookmarks/cli.py` (depends on T004, T005, T006): call `sys.stdout.reconfigure(encoding="utf-8")` and the same for `sys.stderr` before any output (research.md D7), parse arguments, dispatch to the selected handler, and return its integer status; catch only `sqlite3.Error` and `OSError` raised while opening or using the store, re-report them as a stderr diagnostic naming the `--db` path and the underlying error, and return 1 (FR-006; no bare `except`, no `except Exception: pass`, per Principle II)
++- [ ] T008 [P] Create `src/bookmarks/__main__.py` containing only the import of `main` and `raise SystemExit(main())`, so `python -m bookmarks` works (FR-001) while importing the package during tests executes nothing
++- [ ] T009 [P] Create `tests/conftest.py` with three fixtures: a store path under pytest's `tmp_path`, an in-process runner calling `cli.main(argv)` and capturing streams via `capsys`, and a subprocess runner invoking `[sys.executable, "-m", "bookmarks", *args]` with `env={"PYTHONPATH": "src"}` that returns `(returncode, stdout, stderr)` so real exit statuses and stream separation are observable (research.md D9)
++
++**Checkpoint**: Foundation ready — `python -m bookmarks --help` works, the store opens, and user story implementation can begin
++
++---
++
++## Phase 3: User Story 1 - Capture a link and see it again later (Priority: P1) 🎯 MVP
++
++**Goal**: `add URL [--title TITLE] [--tags TAGS]` stores a bookmark and prints its id; `list` prints every stored bookmark as tab-separated fields in ascending id order; the store is created on first use and survives across invocations; a bad URL is rejected with status 2 and changes nothing.
++
++**Independent Test**: Add two bookmarks in one invocation each against a fresh `--db` path, then run `list` in a separate invocation and confirm both appear in ascending id order with the ids that were printed on add — `1<TAB>https://docs.python.org<TAB>Python docs<TAB>docs,python` and `2<TAB>https://example.com<TAB><TAB>`. Then add `ftp://example.com` and confirm status 2, an empty stdout, a stderr diagnostic, and a byte-identical listing.
++
++### Tests for User Story 1
++
++> **NOTE: Write these tests FIRST and confirm they FAIL before implementing T016–T022**
++
++- [ ] T010 [P] [US1] Write `tests/test_add.py` covering FR-007 (stdout is exactly the decimal id and a newline, nothing else), FR-008 (first bookmark in a store gets id `1`, each subsequent id strictly increases), FR-010 (an omitted `--title` lists as an empty field), FR-011 (input `"  python , , cli, python "` stores and displays as `cli,python`; `--tags ","` and an omitted `--tags` both yield an empty tags field), and the FR-009 error path (`ftp://example.com`, a bare domain, an empty string and `HTTP://example.com` each give status 2, a stderr diagnostic naming the URL and the expected `http://`/`https://` prefixes, empty stdout, and — against a not-yet-existing `--db` path — no store file created at all). Each test names its requirement in its name or docstring (Principle III)
++- [ ] T011 [P] [US1] Write `tests/test_cli.py` covering FR-002 (`--db PATH` is used as the store; with `--db` omitted the store is `bookmarks.db` in the current working directory, verified with `monkeypatch.chdir(tmp_path)`), FR-003 (the first command against a non-existent path succeeds with no initialisation step and the file then exists), FR-004 (`add` in one subprocess then `list` in another against the same path returns the bookmark), FR-005 (status 0 on each success path), and FR-006 (a rejected command writes to stderr, writes nothing to stdout, exits non-zero, and leaves the listing identical to the listing taken before it — SC-007)
++- [ ] T012 [P] [US1] Write `tests/test_list_search.py` covering FR-012 (`list` prints every bookmark in ascending id order), FR-015 (exactly four tab-separated fields in the order id, URL, title, tags; a bookmark with neither title nor tags yields two trailing empty fields so the line ends with two tabs; no quoting or escaping is applied) and FR-016 for `list` (an empty store prints nothing at all — not a blank line — and exits 0)
++- [ ] T013 [US1] Add the FR-023 fidelity cases to `tests/test_add.py` (same file as T010, so not parallel with it): a non-ASCII URL, title and tags (for example `https://例え.jp`, `日本語のページ — notes`, `日本語,ドキュメント`) are stored and reproduced character-for-character in the `list` output, with no case folding and no trimming beyond the FR-011 tag trimming, under a `C`/`POSIX` locale as well
++
++### Implementation for User Story 1
++
++- [ ] T014 [US1] Implement `add_bookmark(conn, url, title, tags)` in `src/bookmarks/storage.py`: `INSERT INTO bookmarks (url, title, tags) VALUES (?, ?, ?)` with the already-normalised tags string, explicit `conn.commit()`, return `cursor.lastrowid`; `conn.close()` happens in the caller's `finally` (research.md D8)
++- [ ] T015 [US1] Implement `list_bookmarks(conn)` in `src/bookmarks/storage.py`: the single read query `SELECT id, url, title, tags FROM bookmarks ORDER BY id` returning all rows with no `WHERE`, no `LIKE` and no `GROUP_CONCAT` — all filtering is done in Python (research.md D3)
++- [ ] T016 [P] [US1] Implement `normalise_tags(raw)` in `src/bookmarks/cli.py`: split the comma-separated input on `","`, strip surrounding whitespace from each entry, discard empty entries, de-duplicate, sort with Python's default string (code-point) ordering, and join with `","`; an omitted or comma-only input yields `""` (FR-011, data-model.md "Tag normalisation"). Applied on write only, so the stored value is the displayed value
++- [ ] T017 [P] [US1] Implement `validate_url(url)` in `src/bookmarks/cli.py`: the literal, case-sensitive test `url.startswith(("http://", "https://"))` with no parsing and no network access; on failure write a diagnostic naming the rejected URL and both expected prefixes to stderr and yield status 2 (FR-009). Called before any connection is opened so a rejected `add` cannot create the store (research.md D4)
++- [ ] T018 [P] [US1] Implement `format_bookmark_line(row)` in `src/bookmarks/cli.py`: `"\t".join` of the id, url, title and the stored tags string, with no quoting and no escaping — deliberately not `csv.writer(delimiter="\t")`, because the documented TSV format defines no escaping (FR-015, research.md D6)
++- [ ] T019 [US1] Register the `add` subparser in `src/bookmarks/cli.py` (depends on T006): positional `URL` (required), `--title` with `default=""` (FR-010), `--tags` with a default of no tags (FR-011)
++- [ ] T020 [US1] Implement the `add` handler in `src/bookmarks/cli.py` (depends on T014, T016, T017, T019): validate the URL first, then normalise the tags, then open the store, insert, print the id and nothing else to stdout, and return 0 (FR-007, FR-009, research.md D4)
++- [ ] T021 [US1] Register the `list` subparser in `src/bookmarks/cli.py` with no required arguments (depends on T006); `--tag` is added by User Story 2
++- [ ] T022 [US1] Implement the `list` handler in `src/bookmarks/cli.py` (depends on T015, T018, T021): print one formatted line per bookmark in ascending id order, print nothing when the store is empty, and return 0 in both cases (FR-012, FR-015, FR-016)
++
++**Checkpoint**: User Story 1 is fully functional — capture and recall work across separate invocations, and `tests/test_add.py`, `tests/test_cli.py` and `tests/test_list_search.py` pass. This is a shippable MVP.
++
++---
++
++## Phase 4: User Story 2 - Find the link you half-remember (Priority: P2)
++
++**Goal**: `search TEXT` prints every bookmark whose title or URL contains TEXT as a substring ignoring letter case; `list --tag TAG` prints only bookmarks carrying TAG as a whole tag, matched exactly and case-sensitively. Both use the same per-line format as `list`.
++
++**Independent Test**: With bookmark 1 titled `Python docs` at `https://docs.python.org` tagged `docs,python` and bookmark 2 at `https://example.com` untagged, confirm `search PYTHON` prints only line 1, `search EXAMPLE` prints only line 2 (matched in its URL), `list --tag docs` prints only line 1, and `list --tag doc` prints nothing with status 0.
++
++### Tests for User Story 2
++
++> **NOTE: Write these tests FIRST and confirm they FAIL before implementing T024–T027**
++
++- [ ] T023 [US2] Extend `tests/test_list_search.py` (the file created in T012) with FR-013 coverage (`--tag docs` matches a bookmark tagged `docs,python`; `--tag doc` matches nothing because the match is on a whole tag, not a substring; `--tag Python` does not match the tag `python` because tag matching is case-sensitive; a bookmark with no tags is never matched) and FR-014 coverage (`PYTHON` matches the title `Python docs`; a substring present only in the URL matches; a search whose casing differs from the stored text still matches; `TEXT` is matched literally, so `%` and `_` are not wildcards), both asserting ascending id order, and FR-016 for `search` (no matches → no output, status 0)
++
++### Implementation for User Story 2
++
++- [ ] T024 [P] [US2] Implement `matches_tag(stored_tags, tag)` in `src/bookmarks/cli.py`: `tag in stored_tags.split(",")` — a whole-tag, case-sensitive, self-evidently exact comparison with no SQL delimiter trick (FR-013, research.md D3)
++- [ ] T025 [P] [US2] Implement `matches_text(row, needle)` in `src/bookmarks/cli.py`: `needle.casefold() in row["title"].casefold() or needle.casefold() in row["url"].casefold()`, using `str.casefold` so there are no wildcard metacharacters and folding covers Unicode rather than ASCII only (FR-014, research.md D3)
++- [ ] T026 [US2] Add the optional `--tag TAG` argument to the `list` subparser in `src/bookmarks/cli.py` and filter the rows from `list_bookmarks` through `matches_tag` in the `list` handler when it is supplied, preserving ascending id order and the status-0-on-no-match behaviour (FR-013, FR-016; depends on T022, T024)
++- [ ] T027 [US2] Register the `search` subparser (positional `TEXT`, required) and implement its handler in `src/bookmarks/cli.py`, reusing `list_bookmarks`, `matches_text` and `format_bookmark_line`, printing matches in ascending id order and returning 0 including when nothing matches (FR-014, FR-015, FR-016; depends on T015, T018, T025)
++
++**Checkpoint**: User Stories 1 and 2 both work — the collection is searchable by text and filterable by tag, and `tests/test_list_search.py` passes in full.
++
++---
++
++## Phase 5: User Story 3 - Remove a link that no longer belongs (Priority: P3)
++
++**Goal**: `delete ID` removes the bookmark with that id and exits 0, leaving the others untouched; an id not in the store produces a stderr diagnostic naming the id and exit status 3, deleting nothing; deleted ids are never reassigned.
++
++**Independent Test**: With bookmarks 1 and 2 present, delete id 1 (status 0) and confirm a later listing shows only bookmark 2; delete id 1 again and confirm status 3 with the id named on stderr and nothing else removed; then delete id 2 and add a new bookmark, confirming its id is 3.
++
++### Tests for User Story 3
++
++> **NOTE: Write these tests FIRST and confirm they FAIL before implementing T029–T030**
++
++- [ ] T028 [P] [US3] Write `tests/test_delete.py` covering FR-017 (the target bookmark is gone from a subsequent listing, every other bookmark is untouched, status is 0, stdout is empty), FR-018 (deleting an absent id such as 42 writes a diagnostic naming `42` to stderr, exits 3, and deletes nothing — the listing is identical before and after), FR-008's retirement clause (after deleting the highest id, the next `add` receives an id greater than every id ever assigned in that store, so ids 1 and 2 are never handed out again), and the usage-error path for a non-integer or missing `ID` (stderr diagnostic, status 1, nothing deleted). Each test names its requirement (Principle III)
++
++### Implementation for User Story 3
++
++- [ ] T029 [US3] Implement `delete_bookmark(conn, bookmark_id)` in `src/bookmarks/storage.py`: `DELETE FROM bookmarks WHERE id = ?`, explicit `conn.commit()`, and return `cursor.rowcount` so the caller can distinguish an absent id from a successful removal (FR-017, FR-018, data-model.md validation rule 4)
++- [ ] T030 [US3] Register the `delete` subparser in `src/bookmarks/cli.py` with positional `ID` declared `type=int` (so a non-integer id becomes an argparse usage error handled by T005 as exit 1) and implement its handler: a returned row count of 0 writes a diagnostic naming the id to stderr and returns 3; otherwise return 0 with empty stdout (FR-017, FR-018; depends on T029)
++
++**Checkpoint**: User Stories 1, 2 and 3 all work independently — the collection can be pruned, and `tests/test_delete.py` passes.
++
++---
++
++## Phase 6: User Story 4 - Hand the collection to another tool (Priority: P4)
++
++**Goal**: `export --format csv` prints the whole collection as CSV beginning with the exact header `id,url,title,tags`; `export --format json` prints it as a JSON array of objects; an empty store exports successfully; any other format is rejected with a stderr diagnostic and a non-zero status.
++
++**Independent Test**: With a known set of bookmarks — including one whose title contains a comma, a double quote and a newline, and one with non-ASCII text — export in each format and confirm `csv.DictReader` and `json.load` re-read every bookmark's id, URL, title and tags unchanged, in ascending id order with alphabetical tags. Then export an empty store in both formats (header line only / `[]`, both status 0) and request `--format xml` (stderr diagnostic, status 1).
++
++### Tests for User Story 4
++
++> **NOTE: Write these tests FIRST and confirm they FAIL before implementing T032–T034**
++
++- [ ] T031 [P] [US4] Write `tests/test_export.py` covering FR-019 (line 1 is exactly `id,url,title,tags`; one row per bookmark in ascending id order; the tags field holds the alphabetical comma-joined tags; values containing `,`, `"` or a line break round-trip through `csv.reader`/`csv.DictReader` as the original values), FR-020 (`json.loads` of stdout gives a list of objects with exactly the keys `id`, `url`, `title`, `tags`, with `id` a JSON number and `tags` an alphabetically sorted array that is `[]` when the bookmark has no tags), FR-021 (`--format xml` and an omitted `--format` each write a diagnostic to stderr and exit non-zero — status 1 per contracts/cli.md), FR-022 (an empty store prints the header line alone for CSV and `[]` for JSON, both exiting 0), and FR-023 (non-ASCII URL, title and tags are emitted literally, not as `\uXXXX`, and re-read identically from both formats)
++
++### Implementation for User Story 4
++
++- [ ] T032 [P] [US4] Implement `export_csv(rows, stream)` in `src/bookmarks/cli.py` using `csv.writer(stream, lineterminator="\n")`: write the header row `id,url,title,tags` then one row per bookmark with the stored comma-joined tags string, relying on the writer's standard quoting for values containing the delimiter, quotes or line breaks (FR-019, FR-022, research.md D6, contracts/output-formats.md)
++- [ ] T033 [P] [US4] Implement `export_json(rows, stream)` in `src/bookmarks/cli.py` using `json.dump(..., ensure_ascii=False, indent=2)` followed by a trailing newline: a single array of objects with `id` as a number, `url` and `title` as strings, and `tags` as the alphabetical array obtained by splitting the stored string (`[]` when it is empty); an empty store yields `[]` (FR-020, FR-022, research.md D6)
++- [ ] T034 [US4] Register the `export` subparser in `src/bookmarks/cli.py` with `--format` required and `choices=["csv", "json"]` (so any other value becomes an argparse usage error handled by T005 as a stderr diagnostic and exit 1) and implement its handler: read all rows via `list_bookmarks` in ascending id order and delegate to `export_csv` or `export_json` writing to `sys.stdout`, returning 0 (FR-019, FR-020, FR-021, FR-022; depends on T015, T032, T033)
++
++**Checkpoint**: All four user stories are independently functional and the whole collection is portable.
++
++---
++
++## Phase 7: Polish & Cross-Cutting Concerns
++
++**Purpose**: The cross-story requirement, the constitution's completion gates, and the end-to-end validation scenarios
++
++- [ ] T035 [P] Add FR-001 coverage to `tests/test_cli.py`: each of the five commands `add`, `list`, `search`, `delete` and `export` dispatches successfully through `python -m bookmarks [--db PATH] COMMAND ...` in a subprocess, and an unknown command or unknown option writes a diagnostic to stderr with a non-zero status and no change to the store
++- [ ] T036 [P] Verify Principle I in `src/bookmarks/`: `cli.py`, `storage.py`, `__main__.py` and `__init__.py` import only `argparse`, `csv`, `json`, `sqlite3` and `sys`, and no runtime module imports `pytest` or any third-party package
++- [ ] T037 [P] Verify the SC-004 / Principle III mapping against the table in [plan.md](./plan.md#testing-strategy): every requirement FR-001 through FR-023, including all four error paths (exit 2, exit 3, bad export format, unopenable store), is named in at least one test name or docstring under `tests/`
++- [ ] T038 [P] Review `src/bookmarks/cli.py` and `src/bookmarks/storage.py` against Principles II and IV: no bare `except:` and no `except Exception: pass` (the only `except` clauses catch `sqlite3.Error`/`OSError` to re-report with the store path), no silent fallbacks or coerced defaults, no module-level mutable state, no classes beyond the T005 parser subclass, and each module still under ~130 lines
++- [ ] T039 Run `pytest` from the repository root and confirm every test passes with no skipped in-scope tests (constitution quality gate 4)
++- [ ] T040 Run scenarios 1–6 of [quickstart.md](./quickstart.md) and confirm each behaves as documented, including the exit statuses (2 for a rejected URL, 3 for an absent id, 1 for a usage error or a bad format) and the "store not created" check
++- [ ] T041 Run scenario 7 of [quickstart.md](./quickstart.md): populate 1,000 bookmarks and confirm `list`, `search` and `export --format json` each finish in well under one second including interpreter start-up (SC-005)
++
++---
++
++## Dependencies & Execution Order
++
++### Phase Dependencies
++
++- **Setup (Phase 1)**: no dependencies — start immediately
++- **Foundational (Phase 2)**: depends on Setup — **blocks all user stories**
++- **User Story 1 (Phase 3)**: depends on Foundational only
++- **User Story 2 (Phase 4)**: depends on Foundational; extends the `list` handler (T022) and the test file (T012) that User Story 1 creates
++- **User Story 3 (Phase 5)**: depends on Foundational only — its own storage function, subparser, handler and test file
++- **User Story 4 (Phase 6)**: depends on Foundational and on `list_bookmarks` (T015) from User Story 1
++- **Polish (Phase 7)**: depends on all four stories being complete
++
++### User Story Dependencies
++
++- **US1 (P1)**: no dependencies on other stories. Fully independent, and the MVP.
++- **US2 (P2)**: independently testable, but shares two files with US1 — `src/bookmarks/cli.py`'s `list` handler (adds `--tag`) and `tests/test_list_search.py` (appends the search and tag-filter tests). This is the only cross-story file overlap in the plan and follows from plan.md's fixed test-module layout; sequence US1 before US2 rather than running them in parallel on the same files.
++- **US3 (P3)**: independently testable. Touches `storage.py` and `cli.py` but adds only new functions and a new subparser, and its own `tests/test_delete.py`.
++- **US4 (P4)**: independently testable. Reuses `list_bookmarks` read-only; adds only new functions, a new subparser and its own `tests/test_export.py`.
++
++### Within Each User Story
++
++- Tests are written first and must FAIL before the implementation tasks in that phase
++- `storage.py` query functions before the `cli.py` handlers that call them
++- Pure helpers (`normalise_tags`, `validate_url`, `format_bookmark_line`, `matches_tag`, `matches_text`, `export_csv`, `export_json`) before the handlers that compose them
++- Subparser registration before the handler that consumes its arguments
++- Story complete and its checkpoint validated before moving to the next priority
++
++### Parallel Opportunities
++
++- Setup: T002 and T003 run in parallel after T001
++- Foundational: T008 and T009 run in parallel with each other and with T004–T007 once T005/T006 exist in signature form; T004 (storage) is independent of T005/T006 (parser)
++- US1: the three test modules T010, T011, T012 in parallel (different files); T013 follows T010 because it appends to the same file; helpers T016, T017, T018 in parallel (different functions, no shared state)
++- US2: T024 and T025 in parallel
++- US4: T032 and T033 in parallel
++- Polish: T035–T038 in parallel; T039–T041 are sequential validation runs
++- Across stories, once Foundational is done: US3 and US4 can proceed in parallel with each other; US2 should follow US1 because of the shared `list` handler and test file
++
++---
++
++## Parallel Example: User Story 1
++
++```bash
++# Launch the three independent test modules for User Story 1 together:
++Task: "Write tests/test_add.py covering FR-007, FR-008, FR-009, FR-010, FR-011"
++Task: "Write tests/test_cli.py covering FR-002, FR-003, FR-004, FR-005, FR-006"
++Task: "Write tests/test_list_search.py covering FR-012, FR-015, FR-016 for list"
++
++# After the tests fail, launch the three pure helpers together:
++Task: "Implement normalise_tags(raw) in src/bookmarks/cli.py"
++Task: "Implement validate_url(url) in src/bookmarks/cli.py"
++Task: "Implement format_bookmark_line(row) in src/bookmarks/cli.py"
++```
++
++## Parallel Example: User Story 4
++
++```bash
++Task: "Implement export_csv(rows, stream) in src/bookmarks/cli.py"
++Task: "Implement export_json(rows, stream) in src/bookmarks/cli.py"
++```
++
++---
++
++## Implementation Strategy
++
++### MVP First (User Story 1 Only)
++
++1. Complete Phase 1: Setup (T001–T003)
++2. Complete Phase 2: Foundational (T004–T009) — **blocks everything**
++3. Complete Phase 3: User Story 1 (T010–T022)
++4. **STOP and VALIDATE**: run the US1 independent test and quickstart Scenarios 1 and 2
++5. The tool already captures and recalls bookmarks — shippable
++
++### Incremental Delivery
++
++1. Setup + Foundational → `python -m bookmarks --help` works, store opens
++2. Add US1 → validate → capture and recall (MVP, quickstart Scenarios 1–2)
++3. Add US2 → validate → search and tag filter (quickstart Scenario 3)
++4. Add US3 → validate → deletion with the exit-3 path (quickstart Scenario 4)
++5. Add US4 → validate → CSV/JSON export (quickstart Scenario 5)
++6. Polish → full suite, constitution gates, quickstart Scenarios 6–7
++
++### Parallel Team Strategy
++
++With multiple developers, after Phase 2 completes:
++
++- Developer A: US1 (P1), then US2 (P2) — they share the `list` handler and `tests/test_list_search.py`
++- Developer B: US3 (P3) — isolated except for new functions in the shared modules
++- Developer C: US4 (P4) — isolated once `list_bookmarks` (T015) has landed
++
++Developers B and C should pull T015 from US1 first, or stub it against the schema from T004.
++
++---
++
++## Notes
++
++- [P] tasks = different files or independent functions, no dependencies on incomplete tasks
++- Tests are mandatory here, not optional: Principle III and SC-004 require a named covering test for each of FR-001…FR-023, error paths included
++- Exit statuses are contractual: 0 success, 1 usage error / unopenable store / bad export format, 2 rejected URL prefix, 3 absent id on delete. Statuses 2 and 3 carry no other meaning (research.md D5)
++- Validation always precedes opening the store, so a rejected command never creates or alters the store file (research.md D4, FR-006, SC-007)
++- Tags are normalised on write (trimmed, de-duplicated, sorted, comma-joined), so the stored value is the displayed value in TSV, CSV and JSON
++- Commit after each task or logical group; stop at any checkpoint to validate a story independently

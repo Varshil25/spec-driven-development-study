@@ -1,0 +1,1197 @@
+diff --git a/specs/001-tarx-cli/contracts/cli.md b/specs/001-tarx-cli/contracts/cli.md
+new file mode 100644
+index 0000000..dd97646
+--- /dev/null
++++ b/specs/001-tarx-cli/contracts/cli.md
+@@ -0,0 +1,232 @@
++# CLI Contract: `tarx`
++
++**Feature**: `001-tarx-cli` | **Date**: 2026-11-12 | **Spec**: [spec.md](../spec.md)
++
++The command line is this tool's only external interface. This document is the authoritative,
++testable description of it: anything not permitted here is a defect. Message texts below are
++the shapes the implementation must produce; tests assert on the stable, operator-relevant
++parts (exit status, which stream, the named path/member, the key phrase) rather than on
++incidental wording.
++
++---
++
++## Invocation
++
++```text
++python -m tarx list    ARCHIVE
++python -m tarx extract ARCHIVE DEST [--overwrite]
++```
++
++Requires `src/` on `PYTHONPATH`; there is no installation step (MC-002).
++
++- `ARCHIVE` — path to a tar archive, uncompressed or gzip-compressed. Must be non-empty.
++- `DEST` — destination directory for `extract`. Must be non-empty. Created if absent.
++- `--overwrite` — valid only on `extract`. The only accepted option.
++
++Compression is determined from the archive's **content** (leading `1f 8b` magic → gzip),
++never from the filename, so `.tar`, `.tar.gz`, `.tgz`, and misnamed archives all behave
++correctly (FR-008).
++
++---
++
++## Exit statuses
++
++Exactly three statuses are producible (FR-015). No other value may ever be returned.
++
++| Status | Meaning |
++|---|---|
++| `0` | The command succeeded |
++| `2` | Any failure other than an overwrite conflict: usage error, missing/unreadable/invalid archive, unusable destination, rejected member, type conflict, exceeded resource bound, broken pipe |
++| `3` | Extraction was refused **solely** because it would overwrite an existing regular file and `--overwrite` was not given |
++
++---
++
++## Stream discipline (FR-016)
++
++- **stdout** carries only promised data: member names for `list`, the single success line for
++  `extract`. Nothing else, ever.
++- **stderr** carries every error and diagnostic message, one line, newline-terminated.
++- A failing command never prints a success line.
++- No stack trace reaches stderr for any failure described in the spec (SR-008).
++
++---
++
++## `list ARCHIVE`
++
++**Success (exit 0)**
++
++Writes the name of every member to stdout, one per line, in archive order (FR-002). Every
++member is included regardless of type — regular files, directories, symlinks, hard links,
++devices, FIFOs (FR-003). Nothing on the filesystem is created, modified, or deleted (FR-003).
++
++An archive with no members prints nothing and exits 0 (FR-018).
++
++Member names are passed through control-character escaping before printing (SR-007), so one
++member always occupies exactly one output line.
++
++```console
++$ python -m tarx list photos.tar.gz
++photos/
++photos/a.jpg
++photos/b.jpg
++```
++
++**Failures**
++
++| Condition | Stream | Status |
++|---|---|---|
++| `ARCHIVE` missing, unreadable, or not a valid tar archive | stderr | 2 (FR-013) |
++| Archive exceeds a resource bound (member count or declared size) | stderr | 2 (SR-005) |
++| stdout closed / broken pipe | — | 2 |
++
++`list` applies the resource bounds but **not** the member-kind restrictions — refusing to
++list an archive because it contains a symlink would defeat the purpose of having a safe way to
++inspect untrusted input.
++
++---
++
++## `extract ARCHIVE DEST [--overwrite]`
++
++**Success (exit 0)**
++
++Writes every regular-file and directory member beneath `DEST`, preserving each member's path
++relative to the archive root (FR-004). Extracted file contents are byte-for-byte identical to
++the archived contents (FR-005).
++
++stdout receives exactly one line and nothing else (FR-006):
++
++```text
++extracted N files
++```
++
++`N` counts **regular files written only** — directories and unwritten members are excluded
++(FR-019). There is no pluralisation: `extracted 0 files` and `extracted 1 files` are both
++correct (spec Assumptions).
++
++```console
++$ python -m tarx extract photos.tar.gz out
++extracted 2 files
++$ echo $?
++0
++```
++
++**Created-entry properties** (SR-006)
++
++| Entry | Mode at creation | From archive? |
++|---|---|---|
++| regular file | `0o600` (owner read/write) | contents only |
++| directory | `0o700` (owner read/write/execute) | — |
++
++Archive permission bits are never applied. setuid, setgid, and sticky bits are never set.
++Ownership and timestamps are never restored. Modes are set **at creation**, not by a later
++`chmod`.
++
++**Validate-before-write guarantee** (FR-014)
++
++Every member's name, kind, declared size, and destination mapping, and every overwrite and
++type check, are evaluated before any file or directory is written. If any check fails, the
++destination's contents are left exactly as they were. `DEST` itself may be created before
++validation (so that FR-018's empty-archive success still produces the directory); creating an
++empty directory destroys nothing.
++
++**Failures**
++
++| # | Condition | Status | Message names |
++|---|---|---|---|
++| 1 | `ARCHIVE` missing, unreadable, or invalid/truncated/corrupt | 2 | the archive path (FR-013) |
++| 2 | `DEST` exists but is not a directory, or cannot be created/written | 2 | the destination path (FR-007) |
++| 3 | Member path would resolve outside `DEST` (`..`, leading `/`, drive letter, UNC) | 2 | the member (SR-001) |
++| 4 | Member is a symbolic or hard link | 2 | the member (SR-002) |
++| 5 | Member is a device, FIFO, socket, or other unsupported type | 2 | the member and its kind (SR-003) |
++| 6 | A component of a member's destination path is an existing symlink | 2 | the member (SR-004) |
++| 7 | Two members map to the same destination path | 2 | both members and the path (SR-009) |
++| 8 | Member count, total declared size, or single-member size exceeds a bound | 2 | the bound and the member (SR-005) |
++| 9 | Actual bytes read exceed a bound mid-write | 2 | the member **and that the destination may hold a partial extraction** (SR-005) |
++| 10 | Regular-file member maps to an existing regular file, no `--overwrite` | **3** | the first conflicting path (FR-009) |
++| 11 | File member maps to an existing directory, or directory member to an existing file | 2 | the member and the path (FR-011) |
++
++In cases 1–8, 10, and 11 **nothing at all is written** and the destination's contents are
++byte-for-byte unchanged (SC-006). Case 9 is the single documented exception and says so in its
++message.
++
++Case 10 reports only the **first** conflicting path, per FR-009.
++
++Pre-existing directories in `DEST` are reused without error — overwrite protection applies to
++regular files only (FR-012).
++
++With `--overwrite`, existing regular files at mapped paths have their contents replaced, and
++the command completes normally (FR-010). `--overwrite` does **not** suppress any of cases
++1–9 or 11; it changes only case 10.
++
++---
++
++## Usage errors (FR-001, SR-010)
++
++All of the following write a usage message to **stderr** and exit **2**:
++
++- no command given
++- an unrecognised command (`python -m tarx delete x.tar`)
++- a missing required argument (`python -m tarx extract x.tar`)
++- an extra argument (`python -m tarx list a.tar b.tar`)
++- an unrecognised option (`python -m tarx list --verbose a.tar`)
++- `--overwrite` given to `list`
++- an empty-string `ARCHIVE` or `DEST`
++
++`--help` / `-h` is conventional argparse behaviour: usage text on stdout, exit 0. It is the
++one case where stdout carries something other than command data, and it is not a command
++invocation.
++
++Argument values are used as filesystem paths directly. No subprocess is spawned and no shell
++is invoked anywhere in this tool, so there is no command-string interpolation path (SR-010).
++
++---
++
++## Name escaping on output (SR-007)
++
++Every member name written to stdout or stderr is escaped first. A character is escaped when
++it is a C0 control (`< 0x20`), `DEL` (`0x7f`), a C1 control (`0x80`–`0x9f`), or has Unicode
++category `Cc`, `Cf`, `Cs`, `Co`, or `Cn`. Short forms `\n`, `\r`, `\t`, `\\` are used where
++they apply; otherwise `\xXX`, `\uXXXX`, or `\UXXXXXXXX`. A literal backslash becomes `\\` so
++the rendering is unambiguous.
++
++Every other character — including all printable non-ASCII — is emitted unchanged, so names
++with spaces, accents, or CJK characters appear faithfully.
++
++| Member name | Printed as |
++|---|---|
++| `photos/a.jpg` | `photos/a.jpg` |
++| `my photo ü.jpg` | `my photo ü.jpg` |
++| `evil\nextracted 99 files` (real newline) | `evil\nextracted 99 files` (literal backslash-n) |
++| `boom\x1b[2J` | `boom\x1b[2J` |
++
++Consequence: a printed name is a **display** form, not always a shell-pasteable path. SR-007
++deliberately ranks terminal safety above round-tripping.
++
++---
++
++## Resource bounds (SR-005)
++
++| Bound | Value |
++|---|---|
++| members per archive | 10,000 |
++| total uncompressed bytes across all members | 1 GiB |
++| bytes in any single member | 1 GiB |
++
++Fixed constants, not configurable. Declared sizes are checked before writing; bytes actually
++read are counted during writing. Exceeding a bound is always an error (exit 2), never a
++truncated best-effort result.
++
++---
++
++## Invariants a conforming implementation must uphold
++
++1. Only statuses 0, 2, 3 are ever returned (FR-015).
++2. stdout is byte-exact: member names for `list`, `extracted N files\n` for `extract`,
++   nothing else (FR-016).
++3. A non-zero status is never accompanied by a success line on stdout (FR-016).
++4. No traceback reaches stderr for any failure listed here (SR-008).
++5. Except for SR-005 case 9, a non-zero status implies the destination's contents are
++   byte-for-byte unchanged (FR-014, SC-006).
++6. No file is ever created or modified outside `DEST` (SR-001, SR-004).
++7. No link of any kind is ever created (SR-002).
++8. No member's contents are ever held whole in memory (SC-007).
+diff --git a/specs/001-tarx-cli/data-model.md b/specs/001-tarx-cli/data-model.md
+new file mode 100644
+index 0000000..b772069
+--- /dev/null
++++ b/specs/001-tarx-cli/data-model.md
+@@ -0,0 +1,226 @@
++# Phase 1 Data Model: Tar Archive Listing and Extraction Tool
++
++**Feature**: `001-tarx-cli` | **Date**: 2026-11-12 | **Spec**: [spec.md](./spec.md)
++
++This feature has no database and no persisted state. The "data model" is the set of
++in-memory values that flow from command line → archive header → destination path, plus the
++validation rules attached to each. Rules trace to the requirement that imposes them.
++
++---
++
++## 1. `Invocation`
++
++Parsed command-line input. Produced by `cli.parse_args`, consumed by the operations.
++
++| Field | Type | Notes |
++|---|---|---|
++| `command` | `"list" \| "extract"` | Required; anything else is a usage error (FR-001) |
++| `archive` | `str` | Path to the archive, as given |
++| `dest` | `str \| None` | Present only for `extract` |
++| `overwrite` | `bool` | `extract` only; default `False` |
++
++**Validation**
++
++- `command` must be exactly one of the two values; a missing, unknown, or extra argument, or
++  an unknown option, is a usage error → stderr + exit 2 (FR-001, SR-010).
++- `archive` and `dest` must be non-empty strings (SR-010).
++- `--overwrite` is the only accepted option, and only on `extract` (SR-010).
++- Values are used as filesystem paths directly; they are never interpolated into a shell
++  command or any other string-built interface (SR-010, Security Baseline).
++
++**No state transitions.** An `Invocation` is immutable once parsed.
++
++---
++
++## 2. `Archive`
++
++The opened input. Not a stored record — a handle plus the facts derived from its first bytes.
++
++| Field | Type | Notes |
++|---|---|---|
++| `path` | `Path` | The archive as named on the command line |
++| `compression` | `"gzip" \| "none"` | Determined from the leading magic bytes, never the filename (FR-008) |
++| `tar` | `tarfile.TarFile` | Opened `"r:gz"` or `"r:"` accordingly |
++
++**Validation**
++
++- Must exist and be readable; otherwise error naming the archive → exit 2 (FR-013).
++- Must be a valid tar archive, including not truncated and not corrupt → exit 2 (FR-013).
++  Invalidity may surface at open time *or* partway through iteration, so both are guarded.
++- An archive with zero members is **valid**, not an error (FR-018).
++
++**Treated as untrusted in its entirety** — names, types, and declared sizes alike
++(spec Key Entities, Security Baseline "Untrusted input").
++
++---
++
++## 3. `Member`
++
++One archive entry, as reported by the header. Backed by `tarfile.TarInfo`; the fields below
++are the only ones this feature reads.
++
++| Field | Source | Notes |
++|---|---|---|
++| `name` | `TarInfo.name` | A path as recorded in the archive; arbitrary bytes-as-text |
++| `kind` | `isreg/isdir/issym/islnk/ischr/isblk/isfifo` | Mapped to `file`, `dir`, or a rejected kind |
++| `size` | `TarInfo.size` | **Declared** size in bytes; may understate reality (SR-005) |
++| `contents` | `TarFile.extractfile(...)` | A stream, read in chunks; never materialised whole (SC-007) |
++
++**Deliberately ignored**: recorded permission bits, ownership (uid/gid/uname/gname),
++timestamps, extended attributes, and sparse-file layout (SR-006, spec Assumptions).
++
++**Member kind classification**
++
++| Classification | Accepted by `extract`? | Accepted by `list`? |
++|---|---|---|
++| regular file | yes | yes |
++| directory | yes | yes |
++| symbolic link | **no** — exit 2, naming the member (SR-002) | yes |
++| hard link | **no** — exit 2, naming the member (SR-002) | yes |
++| char device, block device, FIFO, socket, any other | **no** — exit 2, naming the member (SR-003) | yes |
++
++`list` prints every member regardless of kind and never touches the filesystem (FR-003); the
++asymmetry is intentional — listing is the safe way to inspect an untrusted archive.
++
++---
++
++## 4. `Destination`
++
++The single boundary inside which every extracted path must fall.
++
++| Field | Type | Notes |
++|---|---|---|
++| `root` | `Path` | `DEST` as given, made absolute once up front |
++
++**Validation**
++
++- If `root` exists and is not a directory → exit 2 (FR-007).
++- If absent, `root` and any missing parents are created with mode `0o700` (FR-007, SR-006).
++- If it cannot be created or written to → exit 2 (FR-007).
++- `root` is created **before** member validation, so an empty archive still yields a created
++  `DEST` plus `extracted 0 files` (FR-018).
++- A symlinked `DEST` supplied by the user is honoured — the user chose the boundary. What is
++  refused is a symlink *inside* the boundary (SR-004).
++
++---
++
++## 5. `PlannedEntry`
++
++One validated, ready-to-write unit. Pass 1 produces a list of these; Pass 2 consumes it.
++Nothing is written until the whole list exists (FR-014).
++
++| Field | Type | Notes |
++|---|---|---|
++| `member_name` | `str` | Raw name, kept for error messages (escaped at print time per SR-007) |
++| `kind` | `"file" \| "dir"` | Only these two reach Pass 2 |
++| `dest_path` | `Path` | `Destination.root` joined with the validated relative path |
++| `declared_size` | `int` | `0` for directories |
++| `tarinfo` | `tarfile.TarInfo` | Handle used by Pass 2 to open the content stream |
++| `exists_as_file` | `bool` | True when overwriting an existing regular file (`--overwrite`) |
++
++**Validation rules applied while building an entry** — in this order, first failure wins:
++
++1. **Name shape** (SR-001): non-empty; not absolute (`/…`); no leading backslash (covers
++   `\…` and `\\server\share`); no `^[A-Za-z]:` drive prefix; no `..` component.
++   `.` components are dropped, not refused (`tar -cf` conventionally emits `./x`).
++2. **Containment** (SR-001): the mapped path must equal `root` or lie under it, checked
++   lexically with `os.path.normpath` — never with `resolve()`, which would follow symlinks
++   and mask the very escape SR-004 guards.
++3. **Kind** (SR-002, SR-003): must be regular file or directory; anything else is refused by
++   name and kind.
++4. **Resource bounds** (SR-005), incrementally: member index < 10,000; `declared_size` ≤
++   1 GiB; running total of declared sizes ≤ 1 GiB.
++5. **No symlink in the path** (SR-004): no component of `dest_path` at or below `root` may be
++   an existing symlink (`os.path.islink`).
++6. **Uniqueness** (SR-009): `dest_path` must not already be claimed by an earlier member;
++   the mapped path is compared, so `a/b`, `./a/b`, and `a//b` collide as they should.
++7. **Destination state** (FR-009, FR-011, FR-012) via `os.path.lstat` — never `stat`, so a
++   symlink is seen as itself:
++
++   | kind | existing state | outcome |
++   |---|---|---|
++   | file | absent | plan a write |
++   | file | regular file, no `--overwrite` | **exit 3**, naming the first such path (FR-009) |
++   | file | regular file, with `--overwrite` | plan a truncating rewrite (FR-010) |
++   | file | directory | **exit 2**, type conflict (FR-011) |
++   | file | symlink or other | **exit 2** (SR-004, SR-003) |
++   | dir | absent | plan a `mkdir` |
++   | dir | directory | reuse silently — not a conflict (FR-012) |
++   | dir | regular file or other | **exit 2**, type conflict (FR-011) |
++
++---
++
++## 6. `ExtractionResult`
++
++What a successful `extract` reports.
++
++| Field | Type | Notes |
++|---|---|---|
++| `files_written` | `int` | Count of **regular files** written; directories excluded (FR-019) |
++
++Rendered as exactly `extracted {files_written} files\n` on stdout — no pluralisation, for
++every value including `0` and `1` (FR-006, FR-018, spec Assumptions). A failing command never
++prints this line (FR-016).
++
++---
++
++## 7. Error model
++
++| Type | `exit_code` | Raised for |
++|---|---|---|
++| `TarxError` | `2` | Every failure except an overwrite conflict: unreadable or invalid archive, unusable destination, rejected member name/kind, symlink in path, duplicate destination, exceeded bound (FR-013, FR-015) |
++| `OverwriteConflict(TarxError)` | `3` | **Only** an existing regular file with no `--overwrite` (FR-009, FR-015) |
++
++**Invariants**
++
++- Each carries a single-line, operator-actionable `message` naming the archive path, member
++  name, or destination path at issue (FR-017), with member names escaped per SR-007.
++- Messages never contain member contents, environment values, or any data beyond paths and
++  reasons; no stack trace reaches stderr for any specified failure (SR-008).
++- `exit_code` 3 has exactly one raise site, which is what makes FR-009's "refused *solely*
++  because of overwrite" structurally true rather than conventional.
++- Exactly one handler, in `cli.main`, turns a `TarxError` into stderr output plus a return
++  code. No other code path chooses an exit status, so FR-015's "no other exit status may be
++  produced" is checkable by reading one function.
++
++---
++
++## 8. Resource bounds (constants, not configuration)
++
++| Constant | Value | Requirement |
++|---|---|---|
++| `MAX_MEMBERS` | 10,000 | SR-005 |
++| `MAX_TOTAL_BYTES` | 1 GiB (`1 << 30`) | SR-005 |
++| `MAX_MEMBER_BYTES` | 1 GiB (`1 << 30`) | SR-005 |
++| `COPY_CHUNK_BYTES` | 64 KiB | SC-007 (bounded memory) |
++
++Declared sizes are checked in Pass 1, before any write. Bytes **actually read** are counted
++again in Pass 2's copy loop against the same two size bounds, so an archive whose headers
++understate its real size is still stopped. That abort is the single documented case where the
++destination may be left partially written, and its message says so (SR-005, SC-006).
++
++Not user-configurable, by decision recorded in the spec's Assumptions and under
++Principle IV.
++
++---
++
++## 9. Lifecycle
++
++```
++Invocation ──parse/validate──► (archive path, dest path, overwrite flag)
++     │
++     ├─ list:    Archive ──lazy iterate, bounds──► Member.name ──escape──► stdout
++     │                                                                     (no writes)
++     └─ extract: Destination created
++                 Archive ──lazy iterate, bounds──► Member ──validate──► [PlannedEntry]
++                                                                            │
++                                     ─── nothing written before this line ──┘
++                                                                            ▼
++                      mkdir 0o700 / os.open(…O_NOFOLLOW, 0o600) + chunked copy
++                                                                            ▼
++                                                           ExtractionResult ──► stdout
++```
++
++Any failure before the "nothing written" line leaves the destination contents byte-for-byte
++unchanged (FR-014, SC-006). The only exception is an SR-005 actual-byte abort during the
++write phase, which reports the possible partial extraction.
+diff --git a/specs/001-tarx-cli/plan.md b/specs/001-tarx-cli/plan.md
+new file mode 100644
+index 0000000..d80c225
+--- /dev/null
++++ b/specs/001-tarx-cli/plan.md
+@@ -0,0 +1,234 @@
++# Implementation Plan: Tar Archive Listing and Extraction Tool
++
++**Branch**: `001-tarx-cli` | **Date**: 2026-11-12 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/001-tarx-cli/spec.md`
++
++## Summary
++
++A zero-dependency command-line tool, run as `python -m tarx`, with two commands: `list
++ARCHIVE` prints every member name in archive order, and `extract ARCHIVE DEST [--overwrite]`
++writes the archive's regular files and directories beneath `DEST` and prints
++`extracted N files`. Both plain and gzip-compressed tar archives are supported, with the
++format decided from the archive's content rather than its filename.
++
++The technical approach treats the archive as wholly untrusted and is built around one
++decision: **validate every member, then write**. A single `tarfile.TarFile` is iterated
++*lazily* to enforce resource bounds, and each member's name, kind, declared size, destination
++mapping, symlink exposure, uniqueness, and destination state are checked before anything is
++written — so a rejected archive leaves the destination contents byte-for-byte unchanged. The
++write phase never calls `TarFile.extract`/`extractall`; it opens each file itself with
++`os.open(..., O_CREAT | O_EXCL-or-O_TRUNC | O_NOFOLLOW, 0o600)` and streams contents in 64 KiB
++chunks. That one choice simultaneously delivers narrowest-permissions-at-creation, refusal to
++follow symlinks, bounded memory for arbitrarily large members, and the guarantee that archive
++permission/ownership/timestamp metadata is never applied.
++
++Failure handling funnels through one exception hierarchy and one handler, so the promise that
++only exit statuses 0, 2, and 3 are producible — and that 3 means *solely* an overwrite
++conflict — is verifiable by reading a single function.
++
++## Technical Context
++
++**Language/Version**: Python 3.11+ (no syntax or API newer than 3.11; verified against
++CPython 3.13.17 in this environment)
++
++**Primary Dependencies**: None. Standard library only (MC-001, constitution Principle I).
++Runtime modules used: `argparse`, `tarfile`, `gzip`, `zlib`, `os`, `os.path`, `pathlib`,
++`shutil` (chunked copy only), `stat`, `errno`, `sys`, `unicodedata`, `dataclasses`, `re`
++
++**Storage**: N/A — no database and no persisted state. The filesystem is the output medium;
++the only state is the destination tree the tool writes.
++
++**Testing**: `pytest` (development-only dependency, never imported by runtime code),
++configured via `pytest.ini` with `pythonpath = src`
++
++**Target Platform**: POSIX-like filesystems, non-privileged user, local paths, no network
++(spec Assumptions). Windows-specific absolute path forms (drive letters, UNC prefixes) are
++still rejected defensively per SR-001.
++
++**Project Type**: Single-project CLI tool — a `tarx` package under `src/`, run as
++`python -m tarx` with `src/` on `PYTHONPATH`, no install step (MC-002)
++
++**Performance Goals**: A 1,000-member, 50 MB archive lists or extracts in under 5 s on a
++typical developer machine (SC-007). Streaming throughput is bounded by `gzip` decompression
++and disk, both of which this design leaves unobstructed.
++
++**Constraints**: Bounded memory regardless of member size — no member's contents are ever
++held whole in memory (SC-007), achieved by 64 KiB chunked copies. Peak memory is dominated by
++at most 10,000 `TarInfo` objects plus plan entries. Resource bounds are fixed constants:
++10,000 members, 1 GiB total uncompressed, 1 GiB per member (SR-005). Offline-capable; no
++configuration file.
++
++**Scale/Scope**: 7 runtime modules, roughly 450–550 lines of runtime code; 19 functional
++requirements and 10 security requirements, each with at least one automated test.
++
++**No `NEEDS CLARIFICATION` items remain.** Every technical choice above is fixed by the
++specification, the requester's input, or a Phase 0 decision recorded in
++[research.md](./research.md).
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++Constitution version 1.0.0. The Development Workflow section requires a plan to state, per
++principle, how it complies.
++
++### Initial check (before Phase 0) — **PASS**
++
++| Principle | Compliance |
++|---|---|
++| **I. Standard Library Only** | Zero runtime dependencies by design; `tarfile` + `gzip` cover the whole problem. `pytest` is dev-only and is not importable from any runtime path. |
++| **II. Fail Loudly** | Every failure exits non-zero with an actionable stderr message (FR-013, FR-015 – FR-017). The spec explicitly forbids silently skipping unsupported members (SR-002, SR-003). |
++| **III. Every Requirement Is Testable** | All 19 FR and 10 SR identifiers are mechanically checkable; SC-008 already requires each to appear in a test name or docstring. |
++| **IV. Simplicity** | A two-command CLI over `tarfile` with no abstraction layers, no configuration, no concurrency, no caching. |
++| **V. Secure by Default** | The spec carries a dedicated Security Requirements section (SR-001 – SR-010) derived from OWASP Top 10 and ASVS file-handling requirements, so the feature is eligible to proceed to planning. |
++
++### Post-design re-check (after Phase 1) — **PASS**
++
++**I. Standard Library Only.** Dependencies considered and replaced with std-lib facilities:
++
++| Considered | Replaced by |
++|---|---|
++| `click` / `typer` for the CLI | `argparse` with subparsers — already produces FR-001's exact behaviour (usage to stderr, exit 2) |
++| a safe-extraction helper library | our own validate-then-write pass over `tarfile`, which is *stricter* than `tarfile`'s own `data` filter (R-003) |
++| `pytest-cov` for coverage | requirement-identifier traceability via `test_traceability.py`, which is what Principle III actually asks for |
++
++No runtime module imports anything outside the standard library. `pytest.ini` (not
++`pyproject.toml`) holds the test configuration, so the project ships no package metadata and
++cannot be mistaken for something requiring installation (MC-002).
++
++**II. Fail Loudly.** Invalid input fails as follows: usage errors via `argparse` → stderr +
++exit 2; archive and member problems via `TarxError` → one-line stderr message naming the
++archive path, member name, or destination path, + exit 2; overwrite conflicts via
++`OverwriteConflict` → exit 3. There is no bare `except`; the broadest catch is
++`except OSError`, which still produces a message and a non-zero status. No failure is
++degraded into a default or partial result — the one case where a partial result is possible
++(SR-005 actual-byte abort) still exits non-zero *and* states in its message that the
++destination may hold a partial extraction. Messages comply with Principle V's output
++restriction: paths and reasons only (SR-008).
++
++**III. Every Requirement Is Testable.** Requirement-to-test mapping:
++
++| Test module | Requirement identifiers covered |
++|---|---|
++| `tests/test_cli_contract.py` | FR-001, FR-015, FR-016, FR-017, SR-010 |
++| `tests/test_list.py` | FR-002, FR-003, FR-008, FR-018 |
++| `tests/test_extract.py` | FR-004, FR-005, FR-006, FR-007, FR-008, FR-013, FR-014, FR-018, FR-019 |
++| `tests/test_overwrite.py` | FR-009, FR-010, FR-011, FR-012 |
++| `tests/test_security.py` | SR-001, SR-002, SR-003, SR-004, SR-006, SR-007, SR-008, SR-009 |
++| `tests/test_limits.py` | SR-005 |
++| `tests/test_performance.py` | SC-007 |
++| `tests/test_traceability.py` | SC-008 — fails if any FR-xxx/SR-xxx in `spec.md` is unreferenced |
++
++Every test function carries its requirement identifiers in its name or docstring, and
++`test_traceability.py` makes the mapping a gate rather than a convention. Tests for a
++requirement ship in the same change as the code implementing it.
++
++**IV. Simplicity.** Complexity explicitly declined:
++
++| Declined | Why not needed now |
++|---|---|
++| Configurable resource limits | SR-005 fixes the three bounds as constants; the spec records configurability as a possible later change |
++| Pluggable compression backends | Only tar and gzip are in scope; `mode="r:*"` was rejected precisely because it would silently widen support (R-002) |
++| An abstraction over the filesystem for testing | `pytest`'s `tmp_path` exercises the real filesystem, which is where the symlink and permission behaviour under test actually lives |
++| Transactional extraction (temp dir + atomic rename) | FR-014's validate-before-write already delivers the "destination unchanged on failure" guarantee that a transaction would buy |
++| Concurrency / parallel member writes | SC-007's 5 s budget is met by straightforward streaming |
++| `openat`-based race-free directory descent | Rejected in R-007: the threat model is a hostile archive, not a hostile concurrent local process, and `O_NOFOLLOW` + `O_EXCL` already prevent the symlink write |
++
++The 7-module split is not layering — each module is one cohesive responsibility with no
++indirection between them, and no module exists to anticipate a future need.
++
++**V. Secure by Default.** Security Baseline, control by control:
++
++| Baseline control | How this design satisfies it |
++|---|---|
++| **Untrusted input** | Archive names, kinds, and declared sizes are all validated against an allowed shape before use (SR-001 – SR-003, SR-005); command-line arguments validated before use (SR-010). Rejected, never repaired. |
++| **No string-built interfaces** | No subprocess, no shell, no SQL, no markup anywhere in the tool. Paths are resolved against `DEST` as the allowed base, containment is confirmed lexically, and symlinks out of the base are refused (SR-001, SR-004). Output destined for a terminal is encoded for that context (SR-007). |
++| **Credentials and secrets** | N/A — the tool handles no credentials, reads no environment secrets, and persists no state. |
++| **Randomness and comparison** | N/A — no identifiers, tokens, nonces, or secret comparisons. |
++| **Resource limits** | SR-005: 10,000 members, 1 GiB total, 1 GiB per member, enforced on declared sizes before writing *and* on actual bytes during writing. Lazy iteration is what makes the member cap enforceable. Exceeding a bound is an error, never truncation. |
++| **Access control** | No multi-user model, so no authorisation decisions exist. The closest analogue — the destination boundary — is checked at the point each path is used, not only where it is requested, and `O_NOFOLLOW`/`O_EXCL` keep the check valid at write time. |
++| **File permissions** | SR-006: `0o600` for files and `0o700` for directories, passed to `os.open`/`os.mkdir` as the mode argument so they are set **at creation**. Archive modes are never read; setuid/setgid/sticky can never be set. |
++| **Output hygiene** | SR-008: messages contain only paths and reasons. No member contents, no environment values, no tracebacks — including the verified `EOFError` from a corrupt gzip stream, which is caught explicitly (R-010). |
++
++**No exceptions to the Security Baseline are taken.** Two consequences of security decisions
++are recorded for reviewers rather than being exceptions: an escaped member name on output is
++a display form and not always a shell-pasteable path (SR-007, R-008), and a broken pipe exits
++2 rather than the conventional 141 because FR-015 forbids any other status (R-011).
++
++**Result: PASS.** No violations, so Complexity Tracking below stays empty.
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/001-tarx-cli/
++├── plan.md              # This file (/speckit-plan command output)
++├── spec.md              # Feature specification
++├── research.md          # Phase 0 output — R-001 … R-016 decisions
++├── data-model.md        # Phase 1 output — in-memory entities and validation rules
++├── quickstart.md        # Phase 1 output — run + validation guide
++├── contracts/
++│   └── cli.md           # Phase 1 output — authoritative CLI contract
++├── checklists/
++│   └── requirements.md  # Pre-existing spec quality checklist
++└── tasks.md             # Phase 2 output (/speckit-tasks — NOT created by /speckit-plan)
++```
++
++### Source Code (repository root)
++
++```text
++pytest.ini                      # dev-only: pythonpath = src  (no package metadata, no install)
++
++src/
++└── tarx/
++    ├── __init__.py             # package marker; no runtime logic
++    ├── __main__.py             # `python -m tarx` entry: raise SystemExit(cli.main())
++    ├── cli.py                  # argparse definition, dispatch, stdout writing,
++    │                           #   the single TarxError→exit-status handler
++    ├── errors.py               # TarxError (exit 2), OverwriteConflict (exit 3)
++    ├── archive.py              # magic-byte format sniffing, TarFile opening,
++    │                           #   lazy bounded member iteration, limit constants
++    ├── paths.py                # member-name validation, destination mapping,
++    │                           #   symlink-component refusal, escape_name for display
++    └── extract.py              # Pass 1 plan building + Pass 2 chunked writing
++
++tests/
++├── conftest.py                 # tmp_path-based archive-builder fixtures
++├── helpers.py                  # in-process tarfile/TarInfo construction, incl. hostile members
++├── test_cli_contract.py        # FR-001, FR-015, FR-016, FR-017, SR-010
++├── test_list.py                # FR-002, FR-003, FR-008, FR-018
++├── test_extract.py             # FR-004 – FR-008, FR-013, FR-014, FR-018, FR-019
++├── test_overwrite.py           # FR-009 – FR-012
++├── test_security.py            # SR-001 – SR-004, SR-006 – SR-009 (adversarial corpus)
++├── test_limits.py              # SR-005
++├── test_performance.py         # SC-007
++└── test_traceability.py        # SC-008 — every FR/SR identifier is referenced by a test
++```
++
++**Structure Decision**: Single-project layout. `src/tarx/` holds the package, which MC-002
++requires to be importable from `src/` and runnable as `python -m tarx` with no install step;
++`tests/` sits beside it at the repository root and finds the package through
++`pytest.ini`'s `pythonpath = src`. There is no `models/`, `services/`, or `lib/` subdivision —
++the tool has no persistence layer and no service boundary, so the template's layered
++directories would be empty ceremony (Principle IV). The 7 modules divide by responsibility,
++not by layer:
++
++- `errors.py` is the only place exit statuses are defined, and `cli.py` the only place one is
++  chosen, which is what makes FR-015 auditable;
++- `paths.py` holds every decision about a member *name* — validating it, mapping it to a
++  destination, and rendering it safely for display — so SR-001, SR-004, and SR-007 are
++  reviewable in one file;
++- `archive.py` owns format detection and the resource bounds, the two things that must happen
++  before any member is trusted;
++- `extract.py` holds the validate-then-write sequence, with the boundary between the two
++  passes visible in one function, which is where FR-014 and SC-006 are enforced.
++
++## Complexity Tracking
++
++> **Fill ONLY if Constitution Check has violations that must be justified**
++
++No violations. The Constitution Check passes both before Phase 0 and after Phase 1 design,
++with no Security Baseline exceptions taken. Complexity declined rather than added is listed
++under Principle IV above.
+diff --git a/specs/001-tarx-cli/quickstart.md b/specs/001-tarx-cli/quickstart.md
+new file mode 100644
+index 0000000..6f9594d
+--- /dev/null
++++ b/specs/001-tarx-cli/quickstart.md
+@@ -0,0 +1,157 @@
++# Quickstart & Validation Guide
++
++**Feature**: `001-tarx-cli` | **Date**: 2026-11-12 | **Spec**: [spec.md](./spec.md) |
++**Contract**: [contracts/cli.md](./contracts/cli.md)
++
++How to run the tool and how to prove it works end to end. Scenario details live in the
++[CLI contract](./contracts/cli.md) and [data model](./data-model.md); this file does not
++repeat them and contains no implementation code.
++
++---
++
++## Prerequisites
++
++- Python 3.11 or newer (`python3 --version`)
++- `pytest` for the test suite — the only development dependency, and never imported by
++  runtime code (constitution Principle I)
++- No installation, configuration, or network access of any kind (SC-001)
++
++## Setup
++
++Nothing to install. `src/` only has to be importable:
++
++```bash
++cd <repo root>
++export PYTHONPATH=src
++python -m tarx --help
++```
++
++`pytest.ini` sets `pythonpath = src`, so the test suite needs no `PYTHONPATH` export of its
++own.
++
++---
++
++## Smoke run (2 minutes)
++
++```bash
++# Build a small archive to play with
++mkdir -p /tmp/tarx-demo/photos && cd /tmp/tarx-demo
++printf 'alpha' > photos/a.jpg
++printf 'beta'  > photos/b.jpg
++tar -czf photos.tar.gz photos
++
++cd <repo root>
++export PYTHONPATH=src
++
++# Inspect without extracting
++python -m tarx list /tmp/tarx-demo/photos.tar.gz
++
++# Extract
++python -m tarx extract /tmp/tarx-demo/photos.tar.gz /tmp/tarx-demo/out
++echo "status=$?"
++```
++
++Expected: `list` prints each member on its own line in archive order, exit 0. `extract`
++prints `extracted 2 files` and exits 0. Then:
++
++```bash
++# Same tree, byte-identical contents?
++diff -r /tmp/tarx-demo/photos /tmp/tarx-demo/out/photos && echo IDENTICAL
++
++# Narrowest permissions, set at creation (SR-006)
++stat -c '%a %n' /tmp/tarx-demo/out/photos /tmp/tarx-demo/out/photos/a.jpg
++# expect: 700 for the directory, 600 for the file
++
++# Overwrite protection: refuses, destination untouched, status 3 (FR-009)
++python -m tarx extract /tmp/tarx-demo/photos.tar.gz /tmp/tarx-demo/out
++echo "status=$?"   # expect 3, message on stderr, no success line
++
++# Deliberate overwrite succeeds (FR-010)
++python -m tarx extract /tmp/tarx-demo/photos.tar.gz /tmp/tarx-demo/out --overwrite
++echo "status=$?"   # expect 0 and "extracted 2 files"
++
++# Content-based format detection: gzip archive misnamed .tar still works (FR-008)
++cp /tmp/tarx-demo/photos.tar.gz /tmp/tarx-demo/misnamed.tar
++python -m tarx list /tmp/tarx-demo/misnamed.tar   # expect the same listing, exit 0
++
++# Missing archive: error on stderr, nothing on stdout, status 2 (FR-013)
++python -m tarx extract /tmp/tarx-demo/nope.tar.gz /tmp/tarx-demo/out2 >/tmp/tarx-demo/stdout.txt
++echo "status=$?"                 # expect 2
++test ! -s /tmp/tarx-demo/stdout.txt && echo "stdout empty as required"
++```
++
++---
++
++## Full validation
++
++```bash
++cd <repo root>
++pytest                 # must pass in full before any merge (constitution)
++pytest -q tests/test_security.py     # the adversarial corpus alone
++pytest -q tests/test_traceability.py # SC-008: every FR-xxx/SR-xxx is referenced by a test
++```
++
++The suite is the enforceable record of what the tool promises (Principle III). Every test
++function names the requirement identifiers it covers in its name or docstring, and
++`test_traceability.py` fails if any identifier in `spec.md` has no referencing test — so
++SC-008 is a gate, not an aspiration.
++
++### What the suite must demonstrate
++
++Grouped by the success criterion each group discharges. Expected behaviour for every row is
++specified in [contracts/cli.md](./contracts/cli.md).
++
++| Group | Covers | Scenarios |
++|---|---|---|
++| Round-trip corpus | SC-002, SC-003 | uncompressed and gzip archives; nested directories; empty archive; zero-byte members; names with spaces and non-ASCII characters; very long paths — extracted tree compared to the original for identical relative paths and byte-identical contents, and listings compared line-for-line in archive order |
++| Listing | FR-002, FR-003, FR-018 | archive order preserved; every member type printed; empty archive prints nothing; filesystem provably unchanged |
++| Extraction | FR-004 – FR-008, FR-019 | counts regular files only; creates missing `DEST` and parents; content-based gzip detection including misnamed archives; exact `extracted N files` line, `N` = 0 and 1 included |
++| Overwrite | FR-009 – FR-012 | refusal with status 3 and an unchanged destination; `--overwrite` replaces contents; pre-existing directories reused silently; file↔directory type conflicts exit 2 with and without `--overwrite` |
++| Exit statuses | SC-004 | each of 0, 2, 3 produced by its specified scenarios **and by no others** — every failure condition in FR-013, FR-015, and the Security Requirements |
++| Adversarial corpus | SC-005 | `..` traversal, absolute and drive-letter/UNC member names, symlink-escape via an existing symlink in `DEST`, symlink/hard-link members, device/FIFO members, duplicate destination paths, oversized and decompression-bomb archives, control characters in names — **zero** files created or modified outside `DEST`, and zero existing files replaced without `--overwrite` |
++| Atomicity | SC-006 | destination snapshotted before and after every failing run and compared byte-for-byte; the SR-005 actual-bytes abort is the only case allowed to differ, and must report the partial extraction |
++| Output hygiene | FR-016, FR-017, SR-007, SR-008 | errors only on stderr; no success line on failure; control characters in names escaped so one member is one line; no traceback, no member contents, no environment values in messages |
++| Usage errors | FR-001, SR-010 | no command, unknown command, missing/extra argument, unknown option, `--overwrite` on `list`, empty-string `ARCHIVE`/`DEST` — all stderr + exit 2 |
++| Performance | SC-007 | a 1,000-member, 50 MB archive lists and extracts in under 5 s; a single member far larger than any buffer is streamed, proving no member is held whole in memory |
++
++### Fixtures
++
++All archives, including the hostile ones, are built in-process with `tarfile`/`TarInfo` into
++`tmp_path`. No binary fixtures are committed, and no elevated privileges are needed — hostile
++members are rejected from their *headers*, so no real device node or escaping symlink has to
++exist on disk (see [research.md](./research.md) R-016).
++
++---
++
++## Manual adversarial check (optional, ~1 minute)
++
++Confirms the headline safety property by hand:
++
++```bash
++cd /tmp/tarx-demo
++python3 -c "
++import io, tarfile
++with tarfile.open('evil.tar','w') as t:
++    i = tarfile.TarInfo('../escaped.txt'); i.size = 5
++    t.addfile(i, io.BytesIO(b'pwned'))
++"
++cd <repo root>
++PYTHONPATH=src python -m tarx extract /tmp/tarx-demo/evil.tar /tmp/tarx-demo/safe
++echo "status=$?"                              # expect 2, message naming the member
++test ! -e /tmp/tarx-demo/escaped.txt && echo "nothing escaped the destination"
++```
++
++`list` on the same archive is expected to print `../escaped.txt` and exit 0 — listing is
++non-destructive and deliberately unfiltered, which is what makes it the safe way to inspect
++an untrusted archive (FR-003).
++
++---
++
++## Definition of done
++
++- [ ] `pytest` passes in full
++- [ ] Every `FR-xxx` and `SR-xxx` in `spec.md` is referenced by at least one test name or
++      docstring, enforced by `test_traceability.py` (SC-008)
++- [ ] No runtime module imports anything outside the standard library (Principle I)
++- [ ] Both commands behave exactly as [contracts/cli.md](./contracts/cli.md) specifies,
++      including all eight invariants listed at the end of it
+diff --git a/specs/001-tarx-cli/research.md b/specs/001-tarx-cli/research.md
+new file mode 100644
+index 0000000..6624ed0
+--- /dev/null
++++ b/specs/001-tarx-cli/research.md
+@@ -0,0 +1,318 @@
++# Phase 0 Research: Tar Archive Listing and Extraction Tool
++
++**Feature**: `001-tarx-cli` | **Date**: 2026-11-12 | **Spec**: [spec.md](./spec.md)
++
++All items below were resolved before design. The Technical Context in [plan.md](./plan.md)
++contains no `NEEDS CLARIFICATION` markers.
++
++Every claim marked **Verified** was checked by running the relevant standard-library call
++on the target interpreter (CPython 3.13.17 available in this environment; nothing used is
++newer than 3.11).
++
++---
++
++## R-001: Language, dependencies, and test runner
++
++- **Decision**: Python 3.11+ (no syntax or API newer than 3.11), standard library only for
++  all runtime code, `pytest` as the only development dependency.
++- **Rationale**: Mandated by the requester (MC-001) and by constitution Principle I.
++  `pytest` is explicitly permitted as dev-only tooling and is never imported by runtime
++  modules.
++- **Alternatives considered**: `unittest` (std-lib, would remove even the dev dependency)
++  — rejected because the requester asked for pytest and the constitution permits it;
++  pytest's `tmp_path` fixture and parametrisation materially shorten the adversarial-corpus
++  tests. Third-party helpers (`click`, `typer`, `pytest-cov`) — rejected, Principle I and IV.
++
++## R-002: Determining tar vs. gzip from content, not filename (FR-008)
++
++- **Decision**: Read the first two bytes of the archive file. `1f 8b` → open with
++  `tarfile.open(fileobj=…, mode="r:gz")`; anything else → `mode="r:"`. Never use the
++  filename extension, and never use `mode="r:*"`.
++- **Rationale**: Explicit two-byte sniffing is content-based (satisfies FR-008 for `.tar`,
++  `.tar.gz`, `.tgz`, and misnamed archives) *and* restricts the accepted formats to exactly
++  the two in scope. `mode="r:*"` would silently also accept bzip2, xz, and (3.14+) zstd,
++  which the spec puts out of scope; accepting them would be scope creep and would widen the
++  decompression-bomb surface.
++- **Verified**: a gzip-compressed tar has magic `1f8b`; an uncompressed tar starts with the
++  first byte of the member name. `extractfile()` works after fully iterating a
++  `mode="r:gz"` archive, because `gzip.GzipFile` is seekable.
++- **Alternatives considered**: `tarfile.is_tarfile()` first then fall back — rejected, it
++  opens the archive twice and still consults compression auto-detection. Trusting the
++  extension — rejected, FR-008 forbids it.
++
++## R-003: Validate-everything-before-writing with bounded memory (FR-014, SC-007)
++
++- **Decision**: Two passes over one open `TarFile`.
++  - **Pass 1 (validate)**: iterate the archive lazily with `for member in tf:` (i.e.
++    `TarFile.__iter__`/`next()`), enforcing the resource bounds as we go, validating each
++    member, and accumulating a small plan entry per member (destination path, kind,
++    declared size) plus the original `TarInfo`.
++  - **Pass 2 (apply)**: for each planned entry, `tf.extractfile(tarinfo)` and copy to the
++    destination in fixed-size chunks (64 KiB).
++- **Rationale**: Lazy iteration is what makes the member-count bound enforceable — see
++  R-005. Holding at most 10,000 `TarInfo` objects is bounded memory; no member's contents
++  are ever held whole in memory, so SC-007's memory requirement holds for arbitrarily large
++  members. `extractfile` + chunked copy is the only std-lib way to control permissions and
++  symlink-following at write time (R-007).
++- **Verified**: iteration is genuinely lazy — after `next()` twice on a 50-member,
++  30,720-byte archive only 8,192 bytes (one buffered read) had been consumed from the
++  underlying stream. `extractfile()` after a full iteration returns correct contents for
++  both plain and gzip archives.
++- **Alternatives considered**: `tf.getmembers()` — rejected, it reads the *entire* archive
++  index before returning, so a 10-million-member archive is fully parsed before the member
++  cap could fire (SR-005 violation). `TarFile.extractall(filter="data")` — rejected on
++  three counts: it writes before all members are validated (FR-014), it *skips or rewrites*
++  unsafe members where SR-002/SR-003 require a loud refusal, and it restores archive
++  permission bits where SR-006 forbids it. Streaming mode `"r|gz"` — rejected, it forbids
++  the random access Pass 2 needs and would force buffering member contents.
++
++## R-004: Argument parsing and usage errors (FR-001, SR-010)
++
++- **Decision**: `argparse.ArgumentParser(prog="python -m tarx")` with
++  `add_subparsers(dest="command", required=True)` and two subparsers, `list ARCHIVE` and
++  `extract ARCHIVE DEST [--overwrite]` (`--overwrite` as `action="store_true"`).
++  `main()` returns an int; `__main__.py` does `raise SystemExit(main())`.
++- **Rationale**: argparse already does exactly what FR-001 demands — a missing command, an
++  unknown command, a missing or extra positional, and an unknown option each print a usage
++  message to **stderr** and exit **2**. Reusing that is the smallest design (Principle IV)
++  and removes a whole class of hand-rolled parsing bugs. After parsing, `main()` additionally
++  rejects an empty `ARCHIVE` or `DEST` string as a usage error (SR-010), since argparse
++  accepts `""` for a positional.
++- **Alternatives considered**: hand-written parsing — rejected, more code and more ways to
++  get exit codes wrong. `getopt` — rejected, no subcommand support, so the dispatch and all
++  usage text would still be hand-written.
++- **Note on argument safety (SR-010)**: no subprocess is ever spawned and no shell is ever
++  invoked by this tool, so there is no shell-interpolation path at all. Argument values are
++  passed to `os`/`pathlib` calls as path objects, never interpolated into a command string.
++
++## R-005: Resource bounds (SR-005)
++
++- **Decision**: Three module-level constants in `archive.py` —
++  `MAX_MEMBERS = 10_000`, `MAX_TOTAL_BYTES = 1 << 30` (1 GiB),
++  `MAX_MEMBER_BYTES = 1 << 30` (1 GiB). Enforcement:
++  1. **During Pass 1**, incrementally: refuse as soon as the member counter would exceed
++     `MAX_MEMBERS`, as soon as any `member.size` exceeds `MAX_MEMBER_BYTES`, and as soon as
++     the running sum of declared sizes exceeds `MAX_TOTAL_BYTES`. All three fire *before any
++     write*, so the destination is untouched (SC-006).
++  2. **During Pass 2**, on bytes actually read: the chunked copy loop counts real bytes per
++     member and in total, and aborts if either bound is crossed. That abort is the one
++     documented case where the destination may be left partially written, so its message
++     ends with `the destination may contain a partial extraction` (SR-005, SC-006).
++  3. Both bounds apply to `list` as well: `list` enforces the member cap and the declared
++     per-member/total size caps while iterating, because SR-005 says *both* commands bound
++     what one archive can consume.
++- **Rationale**: Checking declared sizes catches the ordinary bomb cheaply; counting real
++  bytes catches an archive whose headers understate reality. Constants, not options, per the
++  spec's Assumptions and Principle IV.
++- **Verified**: `tarfile`'s `ExFileObject` already truncates reads at the member's declared
++  size (a member declaring 2 bytes yields exactly 2), so under current CPython the Pass 2
++  actual-byte counter is defence in depth rather than the primary control. It is implemented
++  anyway because SR-005 requires it explicitly and because the guarantee is not documented
++  API.
++- **Alternatives considered**: bounding only decompressed stream bytes with a counting
++  file-object wrapper — rejected as redundant: a tar member's declared size governs how much
++  is written, the two zero blocks terminate the archive, and the declared-size sum already
++  bounds the total. Making the limits configurable — rejected, Principle IV and the spec's
++  stated assumption.
++
++## R-006: Member path containment, purely lexically (SR-001)
++
++- **Decision**: Reject a member name before mapping it if any of the following hold:
++  the name is empty; `PurePosixPath(name)` is absolute (leading `/`); the name begins with a
++  backslash (covers `\…` and the `\\server\share` UNC prefix); the name matches
++  `^[A-Za-z]:` (a Windows drive prefix); or any path component equals `..`. Otherwise the
++  destination is `dest_root / <components of name, with "." components dropped>`, and as a
++  belt-and-braces check the mapped path must still be `dest_root` or lie under it
++  (`os.path.normpath` comparison, no `resolve()`).
++- **Rationale**: Validation is **lexical** and happens on the name as recorded in the
++  archive header, so it cannot be defeated by filesystem state, and it is deliberately kept
++  separate from the symlink question (R-007). Dropping `.` components is needed because
++  `tar -cf` conventionally prefixes names with `./`; `..` is never dropped, only refused.
++  `resolve()` is *not* used for the containment test because `resolve()` follows symlinks and
++  would mask exactly the escape SR-004 is about.
++- **Verified**: `tarfile` does **not** sanitise names — reading an archive built with members
++  `/abs.txt`, `../esc.txt`, `./dot.txt`, `a//b.txt` returns those names verbatim. So the raw
++  hostile forms really do reach our validator and really are testable.
++- **Alternatives considered**: `os.path.realpath` + `startswith` — rejected, string prefix
++  comparison mis-handles `destfoo` vs `dest`, and realpath follows symlinks.
++  `tarfile.data_filter` — rejected, it *rewrites or skips* rather than refusing (SR-002/003)
++  and it reports through exceptions we would have to re-map anyway.
++
++## R-007: Not following symlinks that already exist in the destination (SR-004, SR-006)
++
++- **Decision**: Two complementary measures.
++  - **At validation**: for each mapped destination path, walk its components from
++    `dest_root` downward and refuse if `os.path.islink(partial)` is true for any component
++    at or below `dest_root` (`dest_root` itself is resolved once up front, so a symlinked
++    `DEST` supplied by the user is honoured — the boundary is the user's choice; what is
++    refused is a symlink *inside* it).
++  - **At write time**: create files with
++    `os.open(path, O_WRONLY | O_CREAT | (O_EXCL or O_TRUNC) | O_NOFOLLOW, 0o600)` and
++    directories with `os.mkdir(path, 0o700)`. `O_EXCL` is used without `--overwrite`,
++    `O_TRUNC` with it.
++- **Rationale**: The validation walk gives the loud, pre-write refusal FR-014 and SR-004
++  require. The `O_NOFOLLOW` / `O_EXCL` flags close the time-of-check-to-time-of-use window
++  between validation and writing, and the mode argument sets the narrowest permissions **at
++  creation** rather than with a later `chmod`, exactly as SR-006 requires. Because we write
++  with `os.open`/`os.mkdir` ourselves and never call `TarFile.extract`, archive permission,
++  owner, and timestamp metadata is simply never consulted — setuid/setgid/sticky bits cannot
++  be set even by accident.
++- **Verified**: `os.open(..., O_NOFOLLOW)` on an existing symlink raises `OSError` with
++  `errno.ELOOP` (40, "Too many levels of symbolic links"); a file created with mode `0o600`
++  has exactly mode `0o600` (umask can only clear further bits, never add).
++- **Alternatives considered**: `O_PATH`/`openat` directory-fd walking for a fully
++  race-free descent — rejected under Principle IV: it is substantially more code, is not
++  portable, and the spec's threat model is a hostile *archive*, not a hostile concurrent
++  local process. The `O_NOFOLLOW` + `O_EXCL` pair already prevents the symlink write.
++
++## R-008: Escaping control characters in displayed names (SR-007)
++
++- **Decision**: One helper, `escape_name(name)`, applied to **every** member name written to
++  stdout or stderr. A character is escaped when it is a C0 control (`< 0x20`), `DEL`
++  (`0x7f`), a C1 control (`0x80`–`0x9f`), or has Unicode category `Cc`, `Cf`, `Cs`, `Co`, or
++  `Cn` (via `unicodedata.category`). Escapes use Python's familiar short forms where they
++  exist (`\n`, `\r`, `\t`, `\\`) and `\xXX` / `\uXXXX` / `\UXXXXXXXX` otherwise. A literal
++  backslash is escaped to `\\` so the rendering is unambiguous. Every other character —
++  including all printable non-ASCII — is emitted unchanged.
++- **Rationale**: Guarantees one member per output line and makes terminal escape-sequence
++  injection impossible, while keeping the Edge Case promise that names with spaces and
++  non-ASCII characters are reproduced faithfully in listings.
++- **Alternatives considered**: `name.encode("unicode_escape").decode("ascii")` — rejected,
++  it escapes *all* non-ASCII, breaking the non-ASCII faithfulness requirement.
++  `repr(name)` — rejected, it adds surrounding quotes and escapes quotes, changing names
++  that contain no control characters at all (SR-007's last sentence).
++- **Consequence to document**: an escaped name is a *display* form. The file on disk still
++  carries the real name, so a listing is not always a verbatim shell-pasteable path. That is
++  the intended trade: SR-007 ranks terminal safety above round-tripping.
++
++## R-009: Mapping failures to exit statuses (FR-015, SR-008)
++
++- **Decision**: One exception hierarchy in `errors.py`: `TarxError(Exception)` carrying a
++  one-line, already-escaped `message` and a class attribute `exit_code = 2`; a single
++  subclass `OverwriteConflict(TarxError)` with `exit_code = 3`. `cli.main()` wraps the whole
++  operation in `try/except TarxError` → print `python -m tarx: error: {message}` to stderr,
++  return `err.exit_code`. A final `except OSError` maps unforeseen filesystem errors to a
++  message built from `e.strerror` and exit 2, so no traceback can escape.
++- **Rationale**: Exactly one place decides exit codes, which is what makes FR-015's "no
++  other exit status may be produced" and SC-004 auditable. Status 3 is reachable from exactly
++  one raise site, so "refused *solely* because of overwrite" is structurally true rather than
++  a convention. Catching `OSError` (not bare `except`) and reporting `e.strerror` rather than
++  `repr(e)` satisfies SR-008: no stack trace, no member contents, no environment values.
++  Principle II is satisfied because nothing is swallowed — every caught error becomes a
++  message plus a non-zero status.
++- **Alternatives considered**: returning `(code, message)` tuples through the call stack —
++  rejected, every intermediate function would have to propagate them, and a forgotten check
++  becomes a silent success. One exception class per failure mode — rejected, the exit code is
++  the only behavioural difference, so two classes suffice (Principle IV).
++
++## R-010: Error sources that must be caught when reading an archive (FR-013)
++
++- **Decision**: Treat `tarfile.TarError` (notably `ReadError`), `EOFError`, `gzip.BadGzipFile`,
++  `zlib.error`, and `OSError` as "archive is missing, unreadable, or invalid" → exit 2, at
++  **both** `tarfile.open` time and during iteration/reading, since a truncation only
++  surfaces partway through.
++- **Verified**: non-tar data → `tarfile.ReadError: invalid header`; a truncated archive →
++  `ReadError: unexpected end of data` raised *during iteration*, not at open; a zero-byte
++  file → `ReadError: empty file`; `\x1f\x8b` followed by garbage → **`EOFError`**, which is
++  *not* an `OSError` and would otherwise escape as a traceback. A valid empty archive (two
++  zero blocks) opens cleanly and yields `[]`, which is what makes FR-018 a plain success
++  rather than a special case.
++- **Alternatives considered**: catching only `tarfile.TarError` — rejected, the verified
++  `EOFError` from a corrupt gzip stream would crash with a traceback and violate SR-008.
++
++## R-011: Broken pipe on stdout (Edge Case, FR-016)
++
++- **Decision**: `list` writes with `print()` inside a `try/except BrokenPipeError`. On
++  `BrokenPipeError`, redirect fd 1 to `os.devnull` with `os.dup2` before returning, so the
++  interpreter's shutdown flush cannot emit Python's "Exception ignored in: …sys.stdout"
++  noise, and return 2.
++- **Rationale**: This is the documented CPython recipe for the `yourtool | head -1` case. It
++  meets the Edge Case ("terminates without an unhandled crash report") while keeping exit
++  statuses to the three FR-015 allows — a broken pipe is a failure, so it is 2.
++- **Consequence to document**: a POSIX tool killed by `SIGPIPE` would exit 141; this tool
++  deliberately reports 2 instead because FR-015 forbids any other status. Worth noting for
++  anyone scripting around it.
++- **Alternatives considered**: restoring the default `SIGPIPE` disposition with
++  `signal.signal(SIGPIPE, SIG_DFL)` — rejected, it produces exit status 141 and violates
++  FR-015.
++
++## R-012: Detecting duplicate destination paths (SR-009)
++
++- **Decision**: During Pass 1 keep a `dict[Path, str]` from mapped destination path to the
++  first member name that claimed it. A second claim on the same path is refused, naming both
++  members. The comparison uses the mapped path, so `a/b`, `./a/b`, and `a//b` are correctly
++  recognised as the same destination.
++- **Rationale**: Comparing *mapped* paths rather than raw names is what actually prevents the
++  FR-009 bypass. A directory member and a file member claiming one path is also a conflict
++  and is caught by the same check (and is in any case a type conflict under FR-011).
++- **Alternatives considered**: comparing raw `member.name` strings — rejected, `./a/b` and
++  `a/b` would slip through as distinct names mapping to one file.
++
++## R-013: Pre-existing destination state checks (FR-007, FR-009, FR-011, FR-012)
++
++- **Decision**: All destination-state checks run in Pass 1, using `os.path.lstat` (never
++  `stat`, so a symlink is seen as a symlink rather than its target):
++  | Member kind | Existing path state | Outcome |
++  |---|---|---|
++  | file | absent | write it |
++  | file | regular file, no `--overwrite` | **exit 3**, naming the path (first conflict only) |
++  | file | regular file, with `--overwrite` | truncate and rewrite |
++  | file | directory | **exit 2**, type conflict |
++  | file | symlink / other | **exit 2** (SR-004 / SR-003) |
++  | dir | absent | create it |
++  | dir | directory | reuse silently (FR-012) |
++  | dir | regular file or other | **exit 2**, type conflict |
++  `DEST` itself: if it exists and is not a directory → exit 2; otherwise
++  `os.makedirs(dest, mode=0o700, exist_ok=True)` creates it and any missing parents (FR-007).
++  `DEST` is created *before* Pass 1 so that FR-018's `extracted 0 files` still creates it, and
++  so that destination-state checks have a real directory to stat against.
++- **Rationale**: Doing every check before any write is FR-014. Reporting only the *first*
++  overwrite conflict is FR-009's exact wording. Creating `DEST` up front is the one write that
++  precedes validation; it is not a destructive act (it creates an empty directory, and a
++  pre-existing `DEST` is left exactly as it was), so SC-006's "byte-for-byte unchanged"
++  guarantee about *destination contents* still holds.
++- **Alternatives considered**: creating `DEST` only after validation succeeds — rejected,
++  FR-007 and FR-018 require `DEST` to exist after a successful empty-archive extraction, and
++  deferring creation would mean destination-state checks run against a non-existent directory.
++
++## R-014: Non-file, non-directory members (SR-002, SR-003)
++
++- **Decision**: In Pass 1, classify with `TarInfo.isreg()` / `isfile()` and `isdir()`.
++  Anything else is refused with a message naming the member and the kind it is, derived from
++  `issym()`, `islnk()`, `ischr()`, `isblk()`, `isfifo()`, falling back to
++  `"an unsupported member type"`. Refusal is unconditional — never a skip.
++- **Rationale**: Principle II (Fail Loudly) and the spec's explicit Assumption that silent
++  skipping is forbidden. Naming the concrete kind makes the message actionable (FR-017).
++- **Note**: `list` does **not** apply this classification — it prints every member of every
++  type (FR-003), which is the whole point of having a safe way to inspect an untrusted
++  archive.
++
++## R-015: Test layout and requirement traceability (Principle III, SC-008)
++
++- **Decision**: `pytest.ini` at the repo root with `pythonpath = src`, so `import tarx`
++  works with no install step (MC-002) and the setting is unambiguously dev-only tooling.
++  Tests live in `tests/`, grouped by concern, and **every** test function name or docstring
++  carries the requirement identifiers it covers (e.g.
++  `def test_extract_refuses_parent_traversal(): """SR-001: …"""`). A single
++  `test_traceability.py` test greps the test suite's own source for each `FR-xxx`/`SR-xxx`
++  identifier appearing in `spec.md` and fails if any is unreferenced — turning SC-008 from an
++  aspiration into a gate.
++- **Rationale**: Principle III demands the spec-to-test mapping be *auditable, not assumed*;
++  a mechanical check is the only way that survives later edits. `pytest.ini` over
++  `pyproject.toml` because the project ships no package metadata and must not look installable
++  (MC-002, Principle I).
++- **Alternatives considered**: a hand-maintained traceability table in Markdown — rejected,
++  it drifts and nothing fails when it does.
++
++## R-016: Archive fixtures for tests, including hostile ones
++
++- **Decision**: Build every fixture archive in-process with `tarfile` and `TarInfo` objects
++  written to a `tmp_path` file; no binary fixtures are committed. Hostile members (absolute
++  names, `..`, symlinks, device nodes, duplicates, understated sizes) are constructed by
++  setting `TarInfo.name`, `.type`, `.size`, `.linkname`, `.mode` directly and using
++  `tf.addfile()` — this needs no special privileges, because the tool under test rejects such
++  members from the *header*, never needing a real device node on disk.
++- **Rationale**: Keeps the adversarial corpus (SC-005) readable, reviewable, and diffable, and
++  lets CI run unprivileged. Committed binary blobs would be unauditable in review.
++- **Verified**: a plain `TarInfo` with a hostile `name` round-trips through `tarfile` intact
++  (see R-006), so the fixtures genuinely exercise the validator.
