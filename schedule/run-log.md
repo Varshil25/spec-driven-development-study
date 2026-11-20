@@ -51,7 +51,7 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R035C | 2026-11-19 | T-TARX-01-CR | sdd_clarify | OK | 0 | no | ok | change request on R035; operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $26.99 |
 | R036 | 2026-11-19 | T-REDACT-01 | unstructured | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $2.09 |
 | R036C | 2026-11-20 | T-REDACT-01-CR | unstructured | OK | 0 | no | ok | change request on R036; operated by Claude; Claude Code 2.1.317 (pinned); resumed after the usage limit; Claude Code cost $2.43 |
-| R037 | | T-PASTE-01 | sdd | | | | |  |
+| R037 | 2026-11-20 | T-PASTE-01 | sdd | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); implement resumed after a workspace restart; Claude Code cost $24.04 |
 | R037C | | T-PASTE-01-CR | sdd | | | | | change request on R037 |
 | R038 | | T-BOOKMARKS-01 | sdd_secure | | | | |  |
 | R038C | | T-BOOKMARKS-01-CR | sdd_secure | | | | | change request on R038 |
