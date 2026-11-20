@@ -1,0 +1,226 @@
+diff --git a/specs/002-phone-redaction-out-dir/spec.md b/specs/002-phone-redaction-out-dir/spec.md
+index c09659e..28fd138 100644
+--- a/specs/002-phone-redaction-out-dir/spec.md
++++ b/specs/002-phone-redaction-out-dir/spec.md
+@@ -23,12 +23,21 @@ exactly three of its statements:
+ 
+ Everything else the tool does today — pass-through fidelity, line-ending and non-UTF-8 byte
+ preservation, email/IPv4/card recognition, `--help`, exit statuses, read-failure and
+-write-failure handling — MUST continue to behave exactly as it does now. Requirement FR-049
+-below makes that preservation itself a testable requirement rather than an aspiration.
++write-failure handling — MUST continue to behave exactly as it does now. Requirements FR-052
++and FR-053 below make that preservation itself a testable requirement rather than an aspiration.
+ 
+ New requirement identifiers continue the existing sequence at **FR-032**; new success
+ criteria continue at **SC-010**.
+ 
++## Clarifications
++
++### Session 2026-11-20
++
++- Q: How should the tool decide that an output file would overwrite one of the input files it was asked to redact (FR-049)? → A: By filesystem identity — resolve both paths and compare the actual file on disk, so differently-spelled paths, symlinks, and hard links are all caught.
++- Q: Should the tool check that the output folder is usable and that no output file would overwrite an input file before writing any output file, or check each input as it reaches it (FR-048, FR-049, FR-050)? → A: Check the folder and every operand's output path up front before any output file is written; genuine read/write failures discovered later still leave earlier completed files on disk.
++- Q: Do only the digits `0`-`9` count toward a phone number's 8-to-15 digits, or do digits from other writing systems count too (FR-033, FR-034)? → A: Only `0`-`9`, matching the existing email, IPv4, and card rules; a digit from another writing system neither forms part of a candidate nor triggers the followed-by-a-digit exclusion.
++- Q: Does the existing speed expectation of 100,000 lines in under 30 seconds also apply to `--out-dir` runs (SC-007, SC-018)? → A: Yes — the same budget applies, measured across all FILE operands of a single run together.
++
+ ## User Scenarios & Testing *(mandatory)*
+ 
+ ### User Story 1 - Redact phone numbers from a log (Priority: P1)
+@@ -57,6 +66,8 @@ replaced by `[PHONE]` and all surrounding text intact.
+ 6. **Given** a line containing a phone number, an email address, an IPv4 address, and a Luhn-valid card number, **When** it is piped through the tool, **Then** all four are replaced by their respective placeholders and the rest of the line is unchanged.
+ 7. **Given** input that already contains the literal text `[PHONE]`, **When** it is piped through the tool, **Then** that text is passed through unchanged and is not counted.
+ 8. **Given** a log containing no `+` character at all, **When** it is piped through the tool, **Then** the output is byte-identical to what the tool produced for that input before this feature.
++9. **Given** the input `+٠١٢٣٤٥٦٧٨` written in Arabic-Indic digits, **When** it is piped through the tool, **Then** it appears in the output unchanged — only `0`-`9` are digits for this rule.
++10. **Given** the input `+12345678٩`, **When** it is piped through the tool, **Then** standard output is `[PHONE]٩` — the trailing non-`0`-`9` digit does not extend the candidate and does not exclude it.
+ 
+ ---
+ 
+@@ -131,13 +142,16 @@ is 2.
+ 
+ **Acceptance Scenarios**:
+ 
+-1. **Given** `--out-dir clean` and a FILE path that does not exist, **When** the tool runs, **Then** an error message including that path is written to standard error, no `wrote N files` line appears on standard output, and the exit status is 2.
++1. **Given** `--out-dir clean` and a FILE path that does not exist, **When** the tool runs, **Then** an error message including that path is written to standard error, no `wrote N files` line appears on standard output, the exit status is 2, and `clean` exists but is empty — the directory is created before input is read, and no output file was written.
+ 2. **Given** `--out-dir clean`, a readable file followed by an unreadable one, **When** the tool runs, **Then** the readable file's output file exists in `clean` with its redacted contents, the unreadable file is named on standard error, no summary line is printed, and the exit status is 2.
+ 3. **Given** `--out-dir clean`, an unreadable FILE, and `--count`, **When** the tool fails, **Then** no tally line is written — the only standard-error output is the error message — and the exit status is 2.
+ 4. **Given** `--out-dir` and no FILE operands, **When** the tool runs, **Then** a diagnostic naming the conflict is written to standard error, standard input is not read, no directory is created, and the exit status is 2.
+ 5. **Given** `--out-dir` naming a path that exists as a regular file rather than a directory, **When** the tool runs, **Then** a diagnostic naming that path is written to standard error and the exit status is 2.
+ 6. **Given** `--out-dir` naming a directory that cannot be created or written to because of permissions, **When** the tool runs, **Then** a diagnostic naming that directory is written to standard error, no summary line is printed, and the exit status is 2.
+ 7. **Given** a FILE whose output file in DIR would be that same file — for example `python -m logredact --out-dir . app.log` run in the directory holding `app.log` — **When** the tool runs, **Then** a diagnostic naming that file is written to standard error, the file's contents are left untouched, and the exit status is 2.
++7a. **Given** the FILE `logs/app.log` and `--out-dir ./logs`, which spell the same directory differently, **When** the tool runs, **Then** the collision is still detected: a diagnostic naming that file is written to standard error, `logs/app.log` is left untouched, and the exit status is 2.
++7b. **Given** `--out-dir clean` where `clean/app.log` is a symbolic link to the input file `app.log`, **When** the tool runs, **Then** the collision is detected by the file both paths reach, the input is left untouched, and the exit status is 2.
++7c. **Given** `--out-dir .` and three FILE operands of which only the second resolves to its own output path, **When** the tool runs, **Then** the run fails before any output file is written — the first operand's output file does not exist, no input file is modified, a diagnostic names the offending file, and the exit status is 2.
+ 8. **Given** `--help` together with `--out-dir`, **When** the tool runs, **Then** usage text describing `--out-dir` appears on standard output, the directory is not created, no input is read, standard error is empty, and the exit status is 0.
+ 9. **Given** `--out-dir` without a directory argument after it, **When** the tool runs, **Then** a usage message is written to standard error and the exit status is 2.
+ 
+@@ -171,6 +185,10 @@ is 2.
+   rule is purely `+` followed by 8-15 digits and does not inspect what precedes the `+`.
+ - **Non-UTF-8 byte inside the digits**: a byte that is not valid UTF-8 between the `+` and the
+   digits, or interrupting them, breaks the candidate; the byte still passes through unchanged.
++- **Digits from other writing systems**: only `0`-`9` are digits here. `+٠١٢٣٤٥٦٧٨` is left
++  unchanged, and a foreign digit after a valid candidate does not shield it, so `+12345678٩`
++  becomes `[PHONE]٩`. This matches how the existing email, IPv4, and card rules already treat
++  such characters.
+ - **Phone split across lines**: a `+` at the end of one line and digits at the start of the
+   next is not a phone number; matching never spans a line boundary.
+ 
+@@ -189,8 +207,18 @@ is 2.
+   would discard or misreport the user's input.
+ - **Summary when a read fails**: no `wrote N files` line is printed on a failing run, so the
+   line never implies files that are not there. Output files already completed stay on disk.
++- **Knowable problems surface before any writing**: an unusable `DIR` and an output path that
++  collides with any input are detected before the first output file is opened, so these
++  failures never leave a partial set of redacted files. An unreadable FILE or a mid-write
++  failure cannot be known in advance and still leaves earlier output files complete.
++- **An empty `DIR` can be left behind**: `DIR` is created before input is read, so a run that
++  fails on its first FILE leaves the directory in place and empty. Exit status 2 and the
++  missing summary line, not the directory's existence, are what report the outcome.
+ - **Output path collides with an input file**: the run fails before the input is truncated,
+-  so `--out-dir .` cannot destroy the log it was asked to redact.
++  so `--out-dir .` cannot destroy the log it was asked to redact. The collision is judged by
++  which file on disk the path reaches, not by how the path is spelled, so `--out-dir ./logs`
++  on `logs/app.log`, and an output path that is a symbolic or hard link to the input, fail the
++  same way.
+ - **Standard output still matters**: if writing the summary line to standard output fails,
+   the run fails with the existing output-write diagnostic and exit status 2, and no tally is
+   written.
+@@ -206,8 +234,15 @@ is 2.
+ - **FR-032**: The tool MUST replace each recognized phone number in the input with the literal
+   text `[PHONE]`.
+ - **FR-033**: A recognized phone number MUST be a `+` character followed immediately by 8 to
+-  15 decimal digits, inclusive, with no separators, spaces, or other characters between them.
++  15 digits, inclusive, with no separators, spaces, or other characters between them.
+   `+14155552671` and `+442071838750` MUST be recognized; `+1234567` MUST NOT.
++- **FR-033a**: Throughout FR-032 through FR-034, "digit" means one of the characters `0` to `9`
++  only — the same set the existing email, IPv4, and card rules use. A decimal digit from another
++  writing system (for example Arabic-Indic `٠`-`٩`, Devanagari `०`-`९`, or full-width `０`-`９`)
++  MUST NOT count toward the 8-to-15 digit length and MUST NOT satisfy FR-034's
++  followed-by-a-digit exclusion; it ends a candidate exactly as any other non-digit character
++  would. `+٠١٢٣٤٥٦٧٨` MUST therefore be passed through unchanged, and `+12345678٩` MUST produce
++  `[PHONE]٩`.
+ - **FR-034**: A phone number candidate that is immediately followed by a further digit MUST
+   NOT be redacted. Consequently a `+` followed by 16 or more digits produces no `[PHONE]`, and
+   the digits are then subject to the existing card rule (FR-016 through FR-019a) unchanged.
+@@ -266,6 +301,12 @@ is 2.
+ - **FR-049**: If the output file computed for a FILE would be that same FILE, the tool MUST
+   write to standard error a diagnostic naming that file, MUST leave that file's contents
+   unmodified, MUST NOT write a summary line, and MUST exit with status 2.
++- **FR-049a**: Sameness under FR-049 MUST be decided by filesystem identity, not by comparing
++  path text: the computed output path is that same FILE when the output path already exists and
++  refers to the same file on disk as the FILE being read. Paths that are spelled differently but
++  resolve to the same file (`logs/app.log` with `--out-dir ./logs`), an output path that is a
++  symbolic link to the input, and an output path hard-linked to the input MUST all be detected.
++  An output path that does not yet exist cannot collide and MUST NOT be rejected.
+ - **FR-050**: On encountering an unreadable FILE while `--out-dir` is in effect, the existing
+   behaviour (FR-028, FR-029) MUST apply unchanged: a diagnostic naming the path as given on the
+   command line, no further sources read, exit status 2. Additionally, no summary line and no
+@@ -274,7 +315,6 @@ is 2.
+ - **FR-051**: `--help` and `-h` MUST continue to satisfy FR-030a when `--out-dir` is also
+   given: usage text — which MUST document `--out-dir` — goes to standard output, `DIR` is not
+   created, no input source is opened, standard error is empty, and the exit status is 0.
+-
+ **Preservation of existing behaviour**
+ 
+ - **FR-052**: Without `--out-dir`, every behaviour specified by FR-001 through FR-031a MUST be
+@@ -284,6 +324,26 @@ is 2.
+   error, and exit status MUST be unchanged by this feature, except that a `--count` tally line
+   gains the `phones=0` field required by FR-038.
+ 
++**Order of checks**
++
++- **FR-054**: With `--out-dir`, the tool MUST perform the checks it can make in advance before
++  it opens or writes any output file, in this order:
++  1. a help request (FR-051) and command-line usage errors (FR-040, FR-047) are handled first,
++     and leave the filesystem untouched;
++  2. `DIR` is then created if absent and confirmed usable as a directory (FR-042, FR-048),
++     before any input source is read;
++  3. the output path computed for every FILE operand is then checked against that operand under
++     FR-049a, and a collision in any operand fails the run before any output file is opened and
++     before any input source is read.
++
++  Consequently a run that fails at step 2 or step 3 MUST NOT have written, replaced, or
++  truncated any output file, and a collision in a later operand MUST NOT leave output files
++  written for earlier operands. A run that reaches step 3 cleanly MUST then stream each FILE
++  (FR-041, FR-044); failures discovered only during that streaming — an unreadable FILE
++  (FR-050) or an output file that cannot be written (FR-048) — retain the existing behaviour of
++  leaving output files already completed for earlier operands on disk. The tool MUST NOT delete
++  or roll back output files it has already written.
++
+ ### Key Entities
+ 
+ - **Redaction category**: now one of **four** — email, IPv4 address, payment card number, or
+@@ -305,9 +365,9 @@ is 2.
+   byte-identical standard output, byte-identical standard error, the stated output files and
+   their contents, and the stated exit status — with no manual interpretation needed.
+ - **SC-011**: On a fixture of at least 50 lines containing known international-format phone
+-  numbers and known look-alikes (7-digit, 16-digit, separator-grouped, and unprefixed digit
+-  runs), 100% of the planted phone numbers are redacted and 0% of the look-alike tokens are
+-  altered.
++  numbers and known look-alikes (7-digit, 16-digit, separator-grouped, unprefixed digit runs,
++  and runs written in digits from another writing system), 100% of the planted phone numbers are
++  redacted and 0% of the look-alike tokens are altered.
+ - **SC-012**: The complete list of input shapes whose redacted output differs from before this
+   feature is exactly two — text containing a `+` followed by 8 to 15 digits, and a `--count`
+   tally line — and that list is demonstrated rather than asserted, by replaying the feature-001
+@@ -318,18 +378,25 @@ is 2.
+   endings, a missing final newline, and bytes that are not valid UTF-8, each `--out-dir` output
+   file is byte-identical to the standard output the same tool produces for that single file
+   without `--out-dir`, in 100% of cases.
+-- **SC-015**: Every new functional requirement FR-032 through FR-053 is covered by at least one
+-  automated test that cites its identifier, and the full suite passes.
++- **SC-015**: Every new functional requirement FR-032 through FR-054, including the lettered
++  additions FR-033a and FR-049a, is covered by at least one automated test that cites its
++  identifier, and the full suite passes.
+ - **SC-016**: Every new failure path (no FILE with `--out-dir`, `DIR` unusable, output file
+   unwritable, output path equal to its input, unreadable FILE under `--out-dir`, `--out-dir`
+   missing its argument) has a test asserting both the diagnostic naming the offending path or
+   conflict and the exit status 2, and asserting that no stack trace appears on standard error.
++  The output-path-equal-to-input case additionally has a test where the two paths are spelled
++  differently but reach the same file, and one where the output path is a link to the input.
+ - **SC-017**: A reviewer can tell from the tool's output alone whether a complete set of
+   redacted files was produced, because `wrote N files` appears only on a run that exits 0 and
+   never on a run that exits 2.
+ - **SC-018**: Memory use for an `--out-dir` run stays bounded by the longest input line rather
+   than growing with total input size or with the number of FILE operands, verified on a
+   multi-file input of at least 1 GB in total.
++- **SC-019**: SC-007's speed expectation holds for `--out-dir` runs as well: 100,000 lines are
++  redacted in under 30 seconds on an ordinary developer machine, measured across all FILE
++  operands of a single run together, so per-file or per-line overhead does not accumulate with
++  the number of operands.
+ 
+ ## Assumptions
+ 
+@@ -366,7 +433,7 @@ was decided and why, so a different choice can be made deliberately rather than
+   alternatives — silently writing standard input's redacted output to standard output anyway,
+   or printing `wrote 0 files` after discarding it — are both exactly the "plausible-looking
+   wrong answer" the project constitution's Fail Loudly principle forbids.
+-- **An output path that is also an input path fails (FR-049)**: `--out-dir .` on a log in the
++- **An output path that is also an input path fails (FR-049, FR-049a)**: `--out-dir .` on a log in the
+   current directory would otherwise truncate the input while it was being read, producing a
+   partly-empty "redacted" file and no diagnostic. This guard is a deliberate, small addition
+   beyond the literal description, justified by Fail Loudly; it is the only new failure mode the
+@@ -390,9 +457,21 @@ was decided and why, so a different choice can be made deliberately rather than
+   a later failure leaves earlier files complete (FR-050). No temporary-file-and-rename scheme is
+   specified; a run that fails partway may leave a partially written output file for the FILE it
+   failed on, and the exit status 2 is what tells the caller not to trust the set.
+-- **Directories are created when needed, not eagerly**: `DIR` is created on a run that will
+-  actually write to it, which is why a help run (FR-051) and a usage error (FR-047) leave the
+-  filesystem untouched.
++- **Directories are created once the command line is accepted (FR-054)**: `DIR` is created and
++  confirmed usable after help and usage handling but before any input is read, which is why a
++  help run (FR-051) and a usage error (FR-047) leave the filesystem untouched. The trade-off is
++  that a run which then fails for an unrelated reason — an unreadable FILE, or an output-path
++  collision — can leave an empty `DIR` behind. That is accepted because the alternative is
++  reporting "cannot create DIR" only after some input has already been read and some output
++  files written, and because an empty directory is not a misleading result: the absence of a
++  `wrote N files` line and the exit status 2 are what tell the caller the run failed.
++- **Knowable failures are reported before any output is written (FR-054)**: the output-path
++  collision check runs across all FILE operands up front rather than operand by operand, so
++  `--out-dir .` on the second of three logs cannot rewrite the first log's output before the
++  problem is reported. Failures that genuinely cannot be known in advance — a read error, a
++  disk filling mid-write — still surface during streaming and leave earlier files complete.
++  Nothing already written is deleted or rolled back; that would add a staging scheme Principle
++  IV does not justify, and the exit status already tells the caller not to trust the set.
+ - **Existing constraints carry over unchanged**: Python 3.11 or newer, standard library only,
+   the `logredact` package under `src/`, invoked as `python -m logredact`, one line resident at a
+   time, no network access, and no modification of named input files. The new `--out-dir` writes
