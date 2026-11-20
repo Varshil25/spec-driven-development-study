@@ -1,0 +1,731 @@
+diff --git a/README.md b/README.md
+index de7809c..2273b80 100644
+--- a/README.md
++++ b/README.md
+@@ -3,20 +3,21 @@
+ Strip personal data out of log files before sharing them.
+ 
+ ```
+-python -m logredact [--count] [FILE ...]
++python -m logredact [--count] [--out-dir DIR] [FILE ...]
+ ```
+ 
+ Each `FILE` is read in the order given, or standard input when no file is
+ given (a `FILE` of `-` also means standard input). Every line is written to
+-standard output with three kinds of data replaced; everything else on the
+-line, including lines with nothing to redact, is passed through byte for
+-byte.
++standard output — or, with `--out-dir`, to a file of the same name in `DIR`
++— with four kinds of data replaced; everything else on the line, including
++lines with nothing to redact, is passed through byte for byte.
+ 
+ | Data | Replacement | Rule |
+ | --- | --- | --- |
+ | E-mail address | `[EMAIL]` | `jane.doe+test@mail.example.com` → `[EMAIL]` |
+ | IPv4 address | `[IP]` | four dot-separated octets, each 0-255 |
+ | Payment card number | `[CARD]` | 13-19 digits, optionally in groups separated by single spaces or hyphens, passing the Luhn checksum |
++| Phone number | `[PHONE]` | international format: a `+` followed by 8-15 digits, as in `+14155552671` |
+ 
+ ```console
+ $ printf 'user jane@example.com from 10.0.0.7\n' | python -m logredact
+@@ -25,13 +26,43 @@ user [EMAIL] from [IP]
+ $ printf 'paid with 4111 1111 1111 1111, ref 1234567890123\n' | python -m logredact
+ paid with [CARD], ref 1234567890123
+ 
+-$ printf 'a@b.io 1.2.3.4\n' | python -m logredact --count
+-[EMAIL] [IP]
+-emails=1 ips=1 cards=0          # on standard error
++$ printf 'call +14155552671 now\n' | python -m logredact
++call [PHONE] now
++
++$ printf 'a@b.io +442071838750\n' | python -m logredact --count
++[EMAIL] [PHONE]
++emails=1 ips=0 cards=0 phones=1     # on standard error
+ ```
+ 
+-`--count` prints `emails=N ips=N cards=N` to standard error once all output
+-has been written.
++`--count` prints `emails=N ips=N cards=N phones=N` to standard error once
++all output has been written. The counts are totals over every `FILE`.
++
++## Writing to a folder
++
++`--out-dir DIR` sends the redacted lines of each `FILE` to a file of the
++same name in `DIR` instead of to standard output, and prints `wrote N files`
++to standard output once every `FILE` has been processed.
++
++```console
++$ python -m logredact --out-dir clean app.log web.log
++wrote 2 files
++
++$ cat clean/app.log
++user [EMAIL]
++```
++
++* Only the name of the `FILE` is used, so `logs/2026/app.log` becomes
++  `DIR/app.log`.
++* `DIR` is created if it does not exist, along with any missing parent
++  directories.
++* An existing file of that name in `DIR` is replaced.
++* `N` counts output files, so two `FILE`s with the same name (such as
++  `one/app.log two/app.log`) share one output file holding the second one's
++  lines, and `N` is 1. Both are still included in the `--count` totals.
++* `--count` is unaffected: `wrote N files` goes to standard output and the
++  summary to standard error.
++* Standard input has no name to write to, so `--out-dir` needs at least one
++  named `FILE` and rejects a `FILE` of `-`.
+ 
+ Requires Python 3.11 or newer and nothing outside the standard library.
+ `src/` must be on `PYTHONPATH`:
+@@ -45,8 +76,10 @@ $ PYTHONPATH=src python -m logredact app.log > app.redacted.log
+ * `0` — all input was read and redacted.
+ * `2` — a `FILE` could not be read. The name and the reason are reported on
+   standard error. Output already written for earlier files is flushed and
+-  kept, the remaining files are not read, and no `--count` summary is
+-  printed.
++  kept, the remaining files are not read, and neither `wrote N files` nor a
++  `--count` summary is printed.
++* `2` — `DIR` or an output file in it could not be written, or `--out-dir`
++  was given without a named `FILE`. Reported on standard error the same way.
+ 
+ ## What is deliberately left alone
+ 
+@@ -59,6 +92,11 @@ $ PYTHONPATH=src python -m logredact app.log > app.redacted.log
+ * Digit runs shorter than 13 or longer than 19 digits, and digits glued to
+   letters (`deadbeef4111111111111111`).
+ * `user=jane@example.com` keeps its `user=` prefix; only the address goes.
++* Phone numbers not written in international form: `14155552671`,
++  `0014155552671`, `(415) 555-2671`. Only a leading `+` marks a number.
++* `+1234567` (7 digits) and `+1234567890123456` (16 digits) are outside the
++  8-15 digit range, and the longer one is left whole rather than having its
++  first 15 digits redacted.
+ 
+ A card number may be written in groups (`4111 1111 1111 1111`,
+ `4111-1111-1111-1111`), but a doubled separator ends the number, so
+@@ -74,12 +112,19 @@ src/logredact/__main__.py    python -m logredact
+ tests/test_logredact.py      unit and end-to-end tests
+ ```
+ 
+-Replacements are applied e-mail, then IPv4, then card: the earlier
+-placeholders contain no digits, so a later pass cannot match inside them.
++Replacements are applied e-mail, then IPv4, then phone, then card: the
++earlier placeholders contain no digits, so a later pass cannot match inside
++them. Where two rules could claim the same digits the earlier one wins, so
++a `+`-tagged address such as `jane+14155552671@example.com` stays a single
++`[EMAIL]`, and a `+` followed by 13 to 15 digits that happens to pass the
++Luhn check is a `[PHONE]`. A 16-to-19-digit card is past the phone range, so
++`+4111111111111111` is still `+[CARD]`.
++
+ Lines are processed one at a time, so arbitrarily large files stream without
+-being held in memory. Input is decoded as UTF-8 with `surrogateescape`, and
+-line endings are preserved as-is, so undecodable bytes and CRLF files
+-survive the round trip.
++being held in memory, whether the destination is standard output or a file
++in `--out-dir`. Input is decoded as UTF-8 with `surrogateescape`, and line
++endings are preserved as-is, so undecodable bytes and CRLF files survive the
++round trip.
+ 
+ ## Tests
+ 
+diff --git a/src/logredact/__init__.py b/src/logredact/__init__.py
+index 9c7e0e3..98cd06c 100644
+--- a/src/logredact/__init__.py
++++ b/src/logredact/__init__.py
+@@ -8,7 +8,8 @@ interface (``python -m logredact``):
+ * :func:`luhn_ok` -- the Luhn checksum used to validate card numbers.
+ """
+ 
+-from .redact import CARD, EMAIL, IP, Counts, luhn_ok, redact_line
++from .redact import CARD, EMAIL, IP, PHONE, Counts, luhn_ok, redact_line
+ 
+-__all__ = ["CARD", "EMAIL", "IP", "Counts", "luhn_ok", "redact_line"]
+-__version__ = "1.0.0"
++__all__ = ["CARD", "EMAIL", "IP", "PHONE", "Counts", "luhn_ok",
++           "redact_line"]
++__version__ = "1.1.0"
+diff --git a/src/logredact/cli.py b/src/logredact/cli.py
+index 3804c1f..c86c0d5 100644
+--- a/src/logredact/cli.py
++++ b/src/logredact/cli.py
+@@ -1,4 +1,7 @@
+-"""Command-line interface: ``python -m logredact [--count] [FILE ...]``."""
++"""Command-line interface.
++
++``python -m logredact [--count] [--out-dir DIR] [FILE ...]``
++"""
+ 
+ from __future__ import annotations
+ 
+@@ -12,7 +15,9 @@ from .redact import Counts, redact_line
+ 
+ PROG = "python -m logredact"
+ EXIT_OK = 0
+-EXIT_UNREADABLE = 2
++# Anything that stops the run: a FILE that could not be read, an output file
++# or directory that could not be written, or options that cannot be honoured.
++EXIT_ERROR = 2
+ 
+ # Log files are not always clean UTF-8, and this tool must not corrupt the
+ # lines it passes through.  Undecodable bytes are kept as surrogates on input
+@@ -20,14 +25,17 @@ EXIT_UNREADABLE = 2
+ _ENCODING = "utf-8"
+ _ERRORS = "surrogateescape"
+ 
++# The FILE that means standard input.
++_STDIN = "-"
++
+ 
+ def _build_parser() -> argparse.ArgumentParser:
+     parser = argparse.ArgumentParser(
+         prog=PROG,
+         description=(
+             "Copy log lines to standard output with e-mail addresses, IPv4 "
+-            "addresses and payment card numbers replaced by [EMAIL], [IP] "
+-            "and [CARD]."
++            "addresses, international phone numbers and payment card "
++            "numbers replaced by [EMAIL], [IP], [PHONE] and [CARD]."
+         ),
+     )
+     parser.add_argument(
+@@ -35,7 +43,17 @@ def _build_parser() -> argparse.ArgumentParser:
+         action="store_true",
+         help=(
+             "after all output has been written, print "
+-            "'emails=N ips=N cards=N' to standard error"
++            "'emails=N ips=N cards=N phones=N' to standard error"
++        ),
++    )
++    parser.add_argument(
++        "--out-dir",
++        metavar="DIR",
++        dest="out_dir",
++        help=(
++            "write each FILE to a file of the same name in DIR instead of to "
++            "standard output, creating DIR if needed, and report "
++            "'wrote N files' at the end"
+         ),
+     )
+     parser.add_argument(
+@@ -68,6 +86,19 @@ def _redact_stream(lines: Iterable[str], out: IO[str], totals: Counts) -> None:
+         out.write(redacted)
+ 
+ 
++def _open_input(path: str) -> IO[str]:
++    return open(path, encoding=_ENCODING, errors=_ERRORS, newline="")
++
++
++def _reason(exc: OSError) -> str:
++    return exc.strerror or str(exc)
++
++
++def _fail(message: str) -> int:
++    print(f"{PROG}: {message}", file=sys.stderr)
++    return EXIT_ERROR
++
++
+ def _discard_stdout() -> None:
+     """Point stdout at /dev/null after a broken pipe, so exit stays quiet."""
+     try:
+@@ -77,37 +108,88 @@ def _discard_stdout() -> None:
+         pass
+ 
+ 
++def _run_to_stdout(files: Sequence[str], totals: Counts) -> int:
++    """Redact every file to standard output, as one continuous stream."""
++    out = _as_byte_safe(sys.stdout)
++
++    if not files:
++        _redact_stream(_as_byte_safe(sys.stdin), out, totals)
++        out.flush()
++        return EXIT_OK
++
++    for path in files:
++        try:
++            if path == _STDIN:
++                _redact_stream(_as_byte_safe(sys.stdin), out, totals)
++                continue
++            with _open_input(path) as handle:
++                _redact_stream(handle, out, totals)
++        except OSError as exc:
++            # Keep what earlier files produced, then stop.  A broken pipe
++            # surfaces here too; the flush re-raises it for the caller.
++            out.flush()
++            return _fail(f"cannot read {path}: {_reason(exc)}")
++    out.flush()
++    return EXIT_OK
++
++
++def _run_to_dir(files: Sequence[str], out_dir: str, totals: Counts) -> int:
++    """Redact every file to a file of the same name in ``out_dir``."""
++    if not files or _STDIN in files:
++        return _fail(
++            "--out-dir needs a named FILE for every output file; "
++            "standard input has no name to write to"
++        )
++
++    try:
++        os.makedirs(out_dir, exist_ok=True)
++    except OSError as exc:
++        return _fail(f"cannot create {out_dir}: {_reason(exc)}")
++
++    # Two FILEs with the same name share one output file, so count the
++    # destinations rather than the inputs.
++    written: set[str] = set()
++    for path in files:
++        try:
++            handle = _open_input(path)
++        except OSError as exc:
++            return _fail(f"cannot read {path}: {_reason(exc)}")
++
++        # Only the name of the file, so logs/app.log -> DIR/app.log.  An
++        # existing file is truncated, and a partly written one is kept.
++        destination = os.path.join(out_dir, os.path.basename(path))
++        try:
++            with handle, open(
++                destination, "w", encoding=_ENCODING, errors=_ERRORS,
++                newline="",
++            ) as out:
++                _redact_stream(handle, out, totals)
++        except OSError as exc:
++            return _fail(f"cannot write {destination}: {_reason(exc)}")
++        written.add(destination)
++
++    print(f"wrote {len(written)} files")
++    sys.stdout.flush()
++    return EXIT_OK
++
++
+ def main(argv: Sequence[str] | None = None) -> int:
+     args = _build_parser().parse_args(argv)
+-
+-    out = _as_byte_safe(sys.stdout)
+     totals = Counts()
+ 
+     try:
+-        if not args.files:
+-            _redact_stream(_as_byte_safe(sys.stdin), out, totals)
++        if args.out_dir is not None:
++            status = _run_to_dir(args.files, args.out_dir, totals)
+         else:
+-            for path in args.files:
+-                try:
+-                    if path == "-":
+-                        _redact_stream(_as_byte_safe(sys.stdin), out, totals)
+-                        continue
+-                    with open(
+-                        path, encoding=_ENCODING, errors=_ERRORS, newline=""
+-                    ) as handle:
+-                        _redact_stream(handle, out, totals)
+-                except OSError as exc:
+-                    out.flush()
+-                    reason = exc.strerror or str(exc)
+-                    print(f"{PROG}: cannot read {path}: {reason}",
+-                          file=sys.stderr)
+-                    return EXIT_UNREADABLE
+-        out.flush()
++            status = _run_to_stdout(args.files, totals)
+     except BrokenPipeError:
+         # The reader went away (e.g. `| head`); stop without a traceback.
+         _discard_stdout()
+         return EXIT_OK
+ 
++    if status != EXIT_OK:
++        return status
++
+     if args.count:
+         print(totals.summary(), file=sys.stderr)
+     return EXIT_OK
+diff --git a/src/logredact/redact.py b/src/logredact/redact.py
+index ee56113..8150f64 100644
+--- a/src/logredact/redact.py
++++ b/src/logredact/redact.py
+@@ -1,10 +1,14 @@
+ """Pattern matching and replacement rules for :mod:`logredact`.
+ 
+-Three kinds of personal data are recognised, and they are replaced in this
+-order: e-mail addresses, IPv4 addresses, then payment card numbers.  The
+-order matters only in that the placeholders inserted by an earlier step
+-(``[EMAIL]``, ``[IP]``) contain no digits and so cannot be re-matched by a
+-later one.
++Four kinds of personal data are recognised, and they are replaced in this
++order: e-mail addresses, IPv4 addresses, international phone numbers, then
++payment card numbers.  The order matters in two ways: the placeholders
++inserted by an earlier step (``[EMAIL]``, ``[IP]``, ``[PHONE]``) contain no
++digits and so cannot be re-matched by a later one, and a digit run that both
++rules could claim goes to the earlier rule -- an address with a ``+`` tag
++(``jane+14155552671@example.com``) stays one e-mail, and a ``+`` followed by
++13 to 15 digits that happens to pass the Luhn check is a phone number rather
++than a card.
+ """
+ 
+ from __future__ import annotations
+@@ -15,6 +19,7 @@ from dataclasses import dataclass
+ EMAIL = "[EMAIL]"
+ IP = "[IP]"
+ CARD = "[CARD]"
++PHONE = "[PHONE]"
+ 
+ # --------------------------------------------------------------------------
+ # e-mail addresses
+@@ -46,6 +51,20 @@ _IP_RE = re.compile(
+     rf"(?<![0-9.])(?:{_OCTET}\.){{3}}{_OCTET}(?!\.?[0-9])",
+ )
+ 
++# --------------------------------------------------------------------------
++# international phone numbers
++# --------------------------------------------------------------------------
++# A ``+`` followed by 8 to 15 digits (the E.164 maximum).  The trailing
++# assertion makes the upper bound bite: a longer digit run such as
++# ``+41111111111111111`` is left whole instead of having its first 15 digits
++# redacted.  Only the ``+`` form is recognised, so a local number keeps its
++# digits.
++_MIN_PHONE_DIGITS = 8
++_MAX_PHONE_DIGITS = 15
++_PHONE_RE = re.compile(
++    rf"\+[0-9]{{{_MIN_PHONE_DIGITS},{_MAX_PHONE_DIGITS}}}(?![0-9])",
++)
++
+ # --------------------------------------------------------------------------
+ # payment card numbers
+ # --------------------------------------------------------------------------
+@@ -65,15 +84,20 @@ class Counts:
+     emails: int = 0
+     ips: int = 0
+     cards: int = 0
++    phones: int = 0
+ 
+     def add(self, other: "Counts") -> None:
+         self.emails += other.emails
+         self.ips += other.ips
+         self.cards += other.cards
++        self.phones += other.phones
+ 
+     def summary(self) -> str:
+         """Render the ``--count`` summary line."""
+-        return f"emails={self.emails} ips={self.ips} cards={self.cards}"
++        return (
++            f"emails={self.emails} ips={self.ips} cards={self.cards} "
++            f"phones={self.phones}"
++        )
+ 
+ 
+ def luhn_ok(digits: str) -> bool:
+@@ -195,5 +219,8 @@ def redact_line(text: str) -> tuple[str, Counts]:
+     """
+     text, emails = _EMAIL_RE.subn(EMAIL, text)
+     text, ips = _IP_RE.subn(IP, text)
++    text, phones = _PHONE_RE.subn(PHONE, text)
+     text, cards = _redact_cards(text)
+-    return text, Counts(emails=emails, ips=ips, cards=cards)
++    return text, Counts(
++        emails=emails, ips=ips, cards=cards, phones=phones
++    )
+diff --git a/tests/test_logredact.py b/tests/test_logredact.py
+index 9fa2a52..f891765 100644
+--- a/tests/test_logredact.py
++++ b/tests/test_logredact.py
+@@ -20,9 +20,9 @@ def redact(text: str) -> str:
+     return redact_line(text)[0]
+ 
+ 
+-def counts(text: str) -> tuple[int, int, int]:
++def counts(text: str) -> tuple[int, int, int, int]:
+     tally = redact_line(text)[1]
+-    return tally.emails, tally.ips, tally.cards
++    return tally.emails, tally.ips, tally.cards, tally.phones
+ 
+ 
+ def run_cli(*args: str, stdin: bytes = b"") -> subprocess.CompletedProcess:
+@@ -62,7 +62,7 @@ class EmailTests(unittest.TestCase):
+ 
+     def test_several_addresses_on_one_line(self):
+         self.assertEqual(redact("a@b.io, c@d.org"), "[EMAIL], [EMAIL]")
+-        self.assertEqual(counts("a@b.io, c@d.org"), (2, 0, 0))
++        self.assertEqual(counts("a@b.io, c@d.org"), (2, 0, 0, 0))
+ 
+ 
+ class IpTests(unittest.TestCase):
+@@ -93,7 +93,7 @@ class IpTests(unittest.TestCase):
+ 
+     def test_several_addresses_on_one_line(self):
+         self.assertEqual(redact("1.2.3.4 -> 5.6.7.8"), "[IP] -> [IP]")
+-        self.assertEqual(counts("1.2.3.4 -> 5.6.7.8"), (0, 2, 0))
++        self.assertEqual(counts("1.2.3.4 -> 5.6.7.8"), (0, 2, 0, 0))
+ 
+ 
+ class CardTests(unittest.TestCase):
+@@ -145,7 +145,7 @@ class CardTests(unittest.TestCase):
+     def test_two_cards_on_one_line(self):
+         line = "4111111111111111 and 5500005555555559"
+         self.assertEqual(redact(line), "[CARD] and [CARD]")
+-        self.assertEqual(counts(line), (0, 0, 2))
++        self.assertEqual(counts(line), (0, 0, 2, 0))
+ 
+     def test_ip_is_not_a_card(self):
+         self.assertEqual(redact("192.168.0.10"), "[IP]")
+@@ -157,16 +157,71 @@ class CardTests(unittest.TestCase):
+         self.assertFalse(luhn_ok(""))
+ 
+ 
++class PhoneTests(unittest.TestCase):
++    def test_international_number(self):
++        self.assertEqual(redact("call +14155552671 now"),
++                         "call [PHONE] now")
++        self.assertEqual(redact("+442071838750"), "[PHONE]")
++
++    def test_length_bounds(self):
++        self.assertEqual(redact("+12345678"), "[PHONE]")         # 8
++        self.assertEqual(redact("+123456789012345"), "[PHONE]")  # 15
++        self.assertEqual(redact("+1234567"), "+1234567")         # 7
++        # 16 digits is too long, and no 8-15 digit slice of it may match.
++        sixteen = "+1234567890123456"
++        self.assertEqual(redact(sixteen), sixteen)
++
++    def test_numbers_without_a_plus_are_untouched(self):
++        for text in ("14155552671", "0014155552671", "(415) 555-2671",
++                     "415-555-2671"):
++            with self.subTest(text=text):
++                self.assertEqual(redact(text), text)
++
++    def test_adjacent_punctuation(self):
++        self.assertEqual(redact("tel=+14155552671, ok"), "tel=[PHONE], ok")
++        self.assertEqual(redact("(+14155552671)"), "([PHONE])")
++        self.assertEqual(redact("ring +14155552671."), "ring [PHONE].")
++
++    def test_several_numbers_on_one_line(self):
++        line = "+14155552671 -> +442071838750"
++        self.assertEqual(redact(line), "[PHONE] -> [PHONE]")
++        self.assertEqual(counts(line), (0, 0, 0, 2))
++
++    def test_phone_wins_over_card(self):
++        # 13 valid card digits, but written as an international number.
++        self.assertEqual(redact("+4222222222222"), "[PHONE]")
++        self.assertEqual(counts("+4222222222222"), (0, 0, 0, 1))
++
++    def test_card_after_a_plus_is_still_a_card(self):
++        # 16 digits is past the phone bound, so the card rule still applies.
++        self.assertEqual(redact("+4111111111111111"), "+[CARD]")
++        self.assertEqual(redact("+4111 1111 1111 1111"), "+[CARD]")
++
++    def test_plus_tagged_address_stays_one_email(self):
++        self.assertEqual(redact("jane+14155552671@example.com"), "[EMAIL]")
++        self.assertEqual(counts("jane+14155552671@example.com"),
++                         (1, 0, 0, 0))
++
++    def test_ip_after_a_plus_is_still_an_ip(self):
++        self.assertEqual(redact("+10.0.0.7"), "+[IP]")
++
++
+ class CombinedTests(unittest.TestCase):
+     def test_all_three_on_one_line(self):
+         line = "jane@example.com 10.0.0.7 4111 1111 1111 1111"
+         self.assertEqual(redact(line), "[EMAIL] [IP] [CARD]")
+-        self.assertEqual(counts(line), (1, 1, 1))
++        self.assertEqual(counts(line), (1, 1, 1, 0))
++
++    def test_all_four_on_one_line(self):
++        line = ("jane@example.com 10.0.0.7 4111 1111 1111 1111 "
++                "+14155552671")
++        self.assertEqual(redact(line), "[EMAIL] [IP] [CARD] [PHONE]")
++        self.assertEqual(counts(line), (1, 1, 1, 1))
+ 
+     def test_clean_line_is_unchanged(self):
+         line = "INFO  starting service, pid 4321, version 2.7"
+         self.assertEqual(redact(line), line)
+-        self.assertEqual(counts(line), (0, 0, 0))
++        self.assertEqual(counts(line), (0, 0, 0, 0))
+ 
+     def test_email_at_ip_literal(self):
+         self.assertEqual(redact("admin@192.168.1.1"), "admin@[IP]")
+@@ -186,18 +241,25 @@ class CliTests(unittest.TestCase):
+         result = run_cli("--count", stdin=b"a@b.io 1.2.3.4\n")
+         self.assertEqual(result.returncode, 0)
+         self.assertEqual(result.stdout, b"[EMAIL] [IP]\n")
+-        self.assertEqual(result.stderr, b"emails=1 ips=1 cards=0\n")
++        self.assertEqual(result.stderr, b"emails=1 ips=1 cards=0 phones=0\n")
++
++    def test_count_includes_phones(self):
++        result = run_cli("--count", stdin=b"a@b.io +442071838750\n")
++        self.assertEqual(result.returncode, 0)
++        self.assertEqual(result.stdout, b"[EMAIL] [PHONE]\n")
++        self.assertEqual(result.stderr, b"emails=1 ips=0 cards=0 phones=1\n")
+ 
+     def test_counts_accumulate_across_files(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             first = Path(tmp, "a.log")
+             second = Path(tmp, "b.log")
+             first.write_text("a@b.io\n4111111111111111\n")
+-            second.write_text("1.2.3.4 c@d.org\n")
++            second.write_text("1.2.3.4 c@d.org +14155552671\n")
+             result = run_cli("--count", str(first), str(second))
+         self.assertEqual(result.returncode, 0)
+-        self.assertEqual(result.stdout, b"[EMAIL]\n[CARD]\n[IP] [EMAIL]\n")
+-        self.assertEqual(result.stderr, b"emails=2 ips=1 cards=1\n")
++        self.assertEqual(result.stdout,
++                         b"[EMAIL]\n[CARD]\n[IP] [EMAIL] [PHONE]\n")
++        self.assertEqual(result.stderr, b"emails=2 ips=1 cards=1 phones=1\n")
+ 
+     def test_files_are_read_in_order(self):
+         with tempfile.TemporaryDirectory() as tmp:
+@@ -241,17 +303,157 @@ class CliTests(unittest.TestCase):
+         result = run_cli("--count", stdin=b"")
+         self.assertEqual(result.returncode, 0)
+         self.assertEqual(result.stdout, b"")
+-        self.assertEqual(result.stderr, b"emails=0 ips=0 cards=0\n")
++        self.assertEqual(result.stderr, b"emails=0 ips=0 cards=0 phones=0\n")
+ 
+     def test_large_input_is_streamed_correctly(self):
+-        line = b"session a@b.io at 10.0.0.7 card 4111111111111111\n"
++        line = (b"session a@b.io at 10.0.0.7 card 4111111111111111 "
++                b"tel +14155552671\n")
+         result = run_cli("--count", stdin=line * 500)
+         self.assertEqual(result.returncode, 0)
+         self.assertEqual(
+-            result.stdout, b"session [EMAIL] at [IP] card [CARD]\n" * 500
++            result.stdout,
++            b"session [EMAIL] at [IP] card [CARD] tel [PHONE]\n" * 500,
+         )
+         self.assertEqual(result.stderr,
+-                         b"emails=500 ips=500 cards=500\n")
++                         b"emails=500 ips=500 cards=500 phones=500\n")
++
++
++class OutDirTests(unittest.TestCase):
++    def test_one_file_per_input_and_report_on_stdout(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            app = Path(tmp, "app.log")
++            web = Path(tmp, "web.log")
++            app.write_text("user jane@example.com\n")
++            web.write_text("GET / from 10.0.0.7\n")
++            out = Path(tmp, "clean")
++            out.mkdir()
++            result = run_cli("--out-dir", str(out), str(app), str(web))
++            self.assertEqual(result.returncode, 0)
++            self.assertEqual(result.stdout, b"wrote 2 files\n")
++            self.assertEqual(result.stderr, b"")
++            self.assertEqual(Path(out, "app.log").read_text(),
++                             "user [EMAIL]\n")
++            self.assertEqual(Path(out, "web.log").read_text(),
++                             "GET / from [IP]\n")
++
++    def test_missing_directories_are_created(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            app = Path(tmp, "app.log")
++            app.write_text("a@b.io\n")
++            out = Path(tmp, "deep", "down", "clean")
++            result = run_cli("--out-dir", str(out), str(app))
++            self.assertEqual(result.returncode, 0)
++            self.assertEqual(result.stdout, b"wrote 1 files\n")
++            self.assertEqual(Path(out, "app.log").read_text(), "[EMAIL]\n")
++
++    def test_only_the_file_name_is_used(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            nested = Path(tmp, "logs", "deep")
++            nested.mkdir(parents=True)
++            app = Path(nested, "app.log")
++            app.write_text("a@b.io\n")
++            out = Path(tmp, "clean")
++            result = run_cli("--out-dir", str(out), str(app))
++            self.assertEqual(result.returncode, 0)
++            self.assertEqual(sorted(p.name for p in out.iterdir()),
++                             ["app.log"])
++
++    def test_existing_file_is_replaced(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            app = Path(tmp, "app.log")
++            app.write_text("a@b.io\n")
++            out = Path(tmp, "clean")
++            out.mkdir()
++            stale = Path(out, "app.log")
++            stale.write_text("a much longer stale line\nand another\n")
++            result = run_cli("--out-dir", str(out), str(app))
++            self.assertEqual(result.returncode, 0)
++            self.assertEqual(stale.read_text(), "[EMAIL]\n")
++
++    def test_count_still_goes_to_stderr(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            app = Path(tmp, "app.log")
++            web = Path(tmp, "web.log")
++            app.write_text("a@b.io +14155552671\n")
++            web.write_text("1.2.3.4 4111111111111111\n")
++            out = Path(tmp, "clean")
++            result = run_cli("--count", "--out-dir", str(out),
++                             str(app), str(web))
++            self.assertEqual(result.returncode, 0)
++            self.assertEqual(result.stdout, b"wrote 2 files\n")
++            self.assertEqual(result.stderr,
++                             b"emails=1 ips=1 cards=1 phones=1\n")
++
++    def test_bytes_and_line_endings_survive(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            app = Path(tmp, "app.log")
++            app.write_bytes(b"a@b.io\r\n\r\nbad \xff byte")
++            out = Path(tmp, "clean")
++            result = run_cli("--out-dir", str(out), str(app))
++            self.assertEqual(result.returncode, 0)
++            self.assertEqual(Path(out, "app.log").read_bytes(),
++                             b"[EMAIL]\r\n\r\nbad \xff byte")
++
++    def test_unreadable_file_stops_the_run(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            app = Path(tmp, "app.log")
++            app.write_text("a@b.io\n")
++            out = Path(tmp, "clean")
++            result = run_cli("--count", "--out-dir", str(out), str(app),
++                             "no_such_file.log")
++            self.assertEqual(result.returncode, 2)
++            self.assertIn(b"no_such_file.log", result.stderr)
++            self.assertNotIn(b"wrote", result.stdout)
++            self.assertNotIn(b"emails=", result.stderr)
++            # What the earlier file produced is kept.
++            self.assertEqual(Path(out, "app.log").read_text(), "[EMAIL]\n")
++
++    def test_same_name_twice_shares_one_output_file(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            first = Path(tmp, "one", "app.log")
++            second = Path(tmp, "two", "app.log")
++            for path, text in ((first, "a@b.io\n"), (second, "1.2.3.4\n")):
++                path.parent.mkdir()
++                path.write_text(text)
++            out = Path(tmp, "clean")
++            result = run_cli("--out-dir", str(out), str(first), str(second))
++            self.assertEqual(result.returncode, 0)
++            self.assertEqual(result.stdout, b"wrote 1 files\n")
++            self.assertEqual(Path(out, "app.log").read_text(), "[IP]\n")
++
++    def test_stdin_is_rejected(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            out = Path(tmp, "clean")
++            for args in ((), ("-",)):
++                with self.subTest(args=args):
++                    result = run_cli("--out-dir", str(out), *args,
++                                     stdin=b"a@b.io\n")
++                    self.assertEqual(result.returncode, 2)
++                    self.assertIn(b"--out-dir", result.stderr)
++                    self.assertEqual(result.stdout, b"")
++                    self.assertFalse(out.exists())
++
++    def test_out_dir_blocked_by_a_file(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            app = Path(tmp, "app.log")
++            app.write_text("a@b.io\n")
++            blocker = Path(tmp, "clean")
++            blocker.write_text("not a directory\n")
++            result = run_cli("--out-dir", str(blocker), str(app))
++            self.assertEqual(result.returncode, 2)
++            self.assertIn(b"clean", result.stderr)
++            self.assertEqual(result.stdout, b"")
++            self.assertEqual(blocker.read_text(), "not a directory\n")
++
++    def test_empty_input_file_gives_an_empty_output_file(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            app = Path(tmp, "app.log")
++            app.write_text("")
++            out = Path(tmp, "clean")
++            result = run_cli("--out-dir", str(out), str(app))
++            self.assertEqual(result.returncode, 0)
++            self.assertEqual(result.stdout, b"wrote 1 files\n")
++            self.assertEqual(Path(out, "app.log").read_bytes(), b"")
+ 
+ 
+ if __name__ == "__main__":
