@@ -1,0 +1,180 @@
+<!--
+SYNC IMPACT REPORT (temporary scratch material for amendment review; remove before commit)
+
+Version change: [CONSTITUTION_VERSION] (unfilled template) → 1.0.0
+Bump rationale: MAJOR (initial ratification). The previous file contained only unreplaced
+placeholder tokens, so no governance existed to amend; this establishes version 1.0.0.
+
+Modified principles (placeholder → ratified title):
+  [PRINCIPLE_1_NAME] → I. Standard Library Only
+  [PRINCIPLE_2_NAME] → II. Fail Loudly
+  [PRINCIPLE_3_NAME] → III. Every Requirement Is Testable
+  [PRINCIPLE_4_NAME] → IV. Simplicity
+  [PRINCIPLE_5_NAME] → V. Secure By Default (NON-NEGOTIABLE)
+
+Added sections (placeholder → ratified title):
+  [SECTION_2_NAME] → Security Requirements (mandatory baseline controls)
+  [SECTION_3_NAME] → Development Workflow & Quality Gates
+  Governance → populated with amendment procedure, versioning policy, compliance review
+
+Removed sections: none (all five template principle slots and both extra section slots used)
+
+Follow-up TODOs: none. RATIFICATION_DATE set to the date of this initial adoption
+(2026-11-20); no earlier adoption date existed.
+-->
+
+# Python Project Constitution
+
+## Core Principles
+
+### I. Standard Library Only
+
+The project MUST run on the Python standard library alone. It MUST declare zero third-party
+runtime dependencies; any import outside the standard library in shipped code is a violation.
+Development and test tooling MAY be third-party, but only `pytest` (plus its own
+dependencies) is assumed, and no test MAY require a third-party package to exercise a
+runtime code path. If a capability appears to need an external package, the feature MUST be
+redesigned, reduced in scope, or implemented against the standard library.
+
+Rationale: a standard-library-only program installs and runs anywhere `python3` exists, has
+no supply-chain surface, and cannot break because of an upstream release.
+
+### II. Fail Loudly
+
+Invalid, malformed, or unsupported input MUST produce a clear, actionable message and an
+explicit failure signal: a non-zero exit status for command-line entry points, or an error
+response for callable and service interfaces. Silent wrong answers are forbidden. Code MUST
+NOT swallow exceptions, substitute defaults for input it could not validate, or truncate,
+coerce, or guess at data it does not understand. Partial success MUST be reported as
+failure unless the specification explicitly defines partial-success semantics and its exit
+status or response. Error messages MUST say what was wrong and MUST obey the output
+restrictions in Principle V.
+
+Rationale: a loud failure costs one debugging session; a silent wrong answer corrupts every
+decision made downstream of it.
+
+### III. Every Requirement Is Testable
+
+Every functional requirement in a specification MUST be stated so that it can be verified
+mechanically, and MUST map to at least one automated `pytest` test. Specifications MUST NOT
+contain requirements that cannot be observed from outside the implementation. Each security
+requirement (Principle V) is a requirement under this principle and MUST be tested like any
+other. A feature is not complete until its tests exist, run in the automated suite, and
+pass; the full suite MUST pass before any change is merged.
+
+Rationale: an untested requirement is an intention, not a behaviour, and nothing prevents it
+from regressing.
+
+### IV. Simplicity
+
+Each feature MUST be implemented with the smallest design that satisfies its specification.
+Abstractions, configuration options, extension points, layers, and generality MUST NOT be
+added for anticipated future needs (YAGNI). Where two designs both meet the specification,
+the one with fewer moving parts MUST be chosen. Any complexity beyond the minimum MUST be
+justified in the plan against a specific stated requirement; unjustified complexity is
+grounds for rejecting a change.
+
+Rationale: every unnecessary component is code to read, test, secure, and maintain, and it
+buys nothing the specification asked for.
+
+### V. Secure By Default (NON-NEGOTIABLE)
+
+Every specification and every plan MUST state the security requirements of each feature,
+derived from the OWASP Top 10 and the OWASP Application Security Verification Standard
+(ASVS). Those requirements MUST be written in the same testable form as functional
+requirements (Principle III) and MUST each have at least one automated `pytest` test,
+including negative tests that assert the attack or misuse case is rejected. The mandatory
+baseline controls in the **Security Requirements** section below apply to every feature
+whether or not that feature's specification restates them; a feature's own requirements MAY
+add to the baseline but MUST NOT weaken it. A change that lacks stated and tested security
+requirements MUST NOT be merged.
+
+Rationale: security that is documented per feature and enforced by tests survives
+refactoring; security left to reviewer memory does not.
+
+## Security Requirements
+
+These controls are the non-negotiable baseline required by Principle V. Each one MUST hold
+for every feature and MUST be covered by automated tests where it is reachable from the
+feature's interfaces.
+
+- **Untrusted input.** All input MUST be treated as untrusted and validated before use:
+  command-line arguments, environment variables, standard input, files, archive members,
+  network requests and responses, and previously stored data. Validation MUST be
+  allow-list based (accept known-good shapes, types, ranges, and encodings) rather than
+  deny-list based.
+- **No string-built interpretation.** SQL, shell commands, file paths, and markup MUST NOT
+  be constructed from untrusted input by concatenation or interpolation. SQL MUST use
+  parameterised queries. Subprocesses, if any, MUST be invoked with an argument list and
+  without a shell. Output MUST be encoded for the context it is written into (HTML, URL,
+  shell, CSV, log, or terminal).
+- **Path containment.** File paths derived from input MUST be resolved and confirmed to lie
+  inside an explicitly allowed base directory, and MUST NOT escape it by traversal
+  sequences, absolute paths, or symbolic or hard links. Archive extraction MUST enforce the
+  same containment for every member.
+- **Credential storage.** Passwords MUST be stored only as salted hashes from a
+  deliberately slow, memory-hard or iterated algorithm with per-password random salts.
+  Passwords, tokens, keys, and other secrets MUST NOT be stored in plaintext anywhere,
+  including source code, configuration committed to the repository, temporary files, and
+  logs.
+- **Randomness and comparison.** Identifiers, tokens, salts, and keys MUST be generated
+  with a cryptographically secure random generator (`secrets` / `os.urandom`), never with
+  `random`. Secrets, tokens, and hashes MUST be compared in constant time
+  (`hmac.compare_digest`).
+- **Resource limits.** Every input MUST have an enforced maximum size, and every operation
+  MUST have an enforced bound on the time and memory any single input can consume,
+  including after decompression or parsing. Unbounded reads, unbounded recursion, and
+  unbounded expansion are violations.
+- **Access control.** Authorisation MUST be checked on every operation at the point the
+  operation is performed, not only at entry or in the interface that offers it. Checks MUST
+  remain correct under concurrent requests; time-of-check-to-time-of-use gaps and shared
+  mutable state that can be raced are violations.
+- **File permissions.** Files and directories MUST be created with the narrowest
+  permissions that allow the feature to work, set at creation time rather than afterwards.
+  Files holding secrets or personal data MUST be owner-readable only.
+- **Output hygiene.** Personal data, credentials, tokens, keys, and internal secrets MUST
+  NOT appear in program output, logs, error messages, stack traces, or diagnostics.
+  Failures MUST remain actionable (Principle II) while disclosing nothing sensitive.
+
+## Development Workflow & Quality Gates
+
+- **Specification first.** Work begins from a specification that states the functional
+  requirements and, per Principle V, the security requirements of the feature. Each
+  requirement MUST be individually identifiable so tests and review can cite it.
+- **Plan gate.** A plan MUST NOT be approved unless it names the standard-library-only
+  approach (I), the failure behaviour and exit status or error response for each invalid
+  input case (II), the test that will cover each requirement (III), a justification for any
+  complexity beyond the minimum (IV), and the feature's security requirements mapped to the
+  baseline controls above (V).
+- **Test gate.** Every requirement, functional and security, MUST have at least one
+  automated `pytest` test, including negative tests for rejected input and denied access.
+  The complete suite MUST pass before merge; a skipped or disabled test counts as a failing
+  requirement.
+- **Review gate.** Review MUST verify each of the five principles explicitly and MUST
+  reject changes that introduce a third-party runtime import, a silent fallback, an
+  untested requirement, unjustified complexity, or an unmet baseline security control.
+- **No merge on unknowns.** Where a requirement's correct behaviour is undetermined, the
+  change MUST NOT be merged with a guess; the specification MUST be amended first.
+
+## Governance
+
+This constitution supersedes all other development practices, conventions, and habits in
+this project. Where any other document, template, or tool conflicts with it, this document
+governs and the other artifact MUST be corrected.
+
+- **Amendment procedure.** Amendments MUST be proposed as a change to this file that
+  states the motivation, the principles or sections affected, and the migration or
+  remediation required for existing code and specifications. An amendment takes effect only
+  when merged with the version and dates below updated in the same change.
+- **Versioning policy.** This document is versioned as MAJOR.MINOR.PATCH.
+  MAJOR: a principle or governance rule is removed, or redefined in a way that makes
+  previously compliant work non-compliant.
+  MINOR: a principle or section is added, or existing guidance is materially expanded.
+  PATCH: clarification, wording, or typographical change with no change in obligation.
+- **Compliance review.** Every plan, pull request, and review MUST verify compliance with
+  each principle. Any complexity, exception, or deviation MUST be documented in the plan
+  with its justification and an expiry condition; undocumented deviations MUST be reverted
+  rather than grandfathered. Agent and contributor guidance files MUST be kept consistent
+  with this constitution whenever it is amended.
+
+**Version**: 1.0.0 | **Ratified**: 2026-11-20 | **Last Amended**: 2026-11-20

@@ -54,7 +54,7 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R037 | 2026-11-20 | T-PASTE-01 | sdd | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); implement resumed after a workspace restart; Claude Code cost $24.04 |
 | R037C | 2026-11-20 | T-PASTE-01-CR | sdd | OK | 0 | no | ok | change request on R037; operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $16.30 |
 | R038 | 2026-11-20 | T-BOOKMARKS-01 | sdd_secure | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); specify stopped at the usage limit and was resumed in the same session; the operator first re-attached it under the wrong phase label, stopped the tool before any phase closed, and re-attached under specify (operator note in the log); Claude Code cost $16.07 |
-| R038C | | T-BOOKMARKS-01-CR | sdd_secure | | | | | change request on R038 |
+| R038C | 2026-11-20 | T-BOOKMARKS-01-CR | sdd_secure | OK | 0 | no | ok | change request on R038; operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $22.27 |
 | R021 | | T-REDACT-01 | sdd_clarify | | | | | replication |
 | R021C | | T-REDACT-01-CR | sdd_clarify | | | | | change request on R021 |
 | R022 | | T-REDACT-01 | sdd | | | | | replication |
