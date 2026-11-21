@@ -1,0 +1,159 @@
+<!--
+SYNC IMPACT REPORT (temporary scratch material for amendment review; remove before commit)
+
+Version change: none (unfilled template) → 1.0.0
+Bump rationale: Initial ratification. The previous file contained only unreplaced template
+placeholders, so there was no prior governance to amend. First concrete constitution = 1.0.0.
+
+Modified principles:
+- [PRINCIPLE_1_NAME] (placeholder) → I. Standard Library Only
+- [PRINCIPLE_2_NAME] (placeholder) → II. Fail Loudly
+- [PRINCIPLE_3_NAME] (placeholder) → III. Every Requirement Is Testable
+- [PRINCIPLE_4_NAME] (placeholder) → IV. Simplicity
+- [PRINCIPLE_5_NAME] (placeholder) → REMOVED (user specified exactly four principles)
+
+Added sections:
+- Additional Constraints (was [SECTION_2_NAME])
+- Development Workflow & Quality Gates (was [SECTION_3_NAME])
+- Governance (populated from [GOVERNANCE_RULES])
+
+Removed sections:
+- Principle 5 slot and all template example comments
+
+Deferred items / follow-up TODOs:
+- TODO(PROJECT_NAME): No project name is established yet — the repository has no README,
+  package metadata, or pyproject.toml. The title uses the generic "Project Constitution".
+  Replace it (PATCH bump) once the first feature spec names the project.
+- RATIFICATION_DATE is set to 2026-11-20, the date of this initial adoption, not an earlier
+  unrecorded date.
+-->
+
+# Project Constitution
+
+## Core Principles
+
+### I. Standard Library Only
+
+The runtime MUST depend only on the Python standard library. No third-party package may be
+imported by shipped code, and no runtime dependency may be declared in packaging metadata.
+Test and development tooling (pytest, and formatters or linters if adopted) is exempt and MUST
+be declared separately from runtime dependencies so the exemption stays visible.
+
+If a capability appears to require a third-party library, the design MUST either be reduced to
+what the standard library supports or the requirement MUST be renegotiated in the
+specification. "Vendoring" a third-party library into the source tree is a violation of this
+principle, not a workaround for it.
+
+**Rationale**: A stdlib-only runtime installs and runs anywhere Python does, has no supply
+chain to audit, and cannot break from an upstream release. For a small project the cost of
+writing the few hundred lines a dependency would have provided is lower than the cost of
+carrying the dependency.
+
+### II. Fail Loudly
+
+Invalid input, unmet preconditions, and unexpected state MUST produce a clear, specific
+diagnostic message. A silent wrong answer is the worst possible outcome and is never
+acceptable.
+
+Concretely:
+
+- Command-line entry points MUST write diagnostics to stderr and exit with a non-zero status.
+- Library functions and API handlers MUST raise an exception or return an explicit error
+  result; they MUST NOT return a sentinel that a caller can mistake for success.
+- Diagnostics MUST name what was wrong and which input caused it. "Error" or "invalid input"
+  alone is insufficient.
+- Bare `except:` and `except Exception: pass` are prohibited. Exceptions may be caught only to
+  add context, translate to an error response, or handle a specific anticipated condition.
+- Fallback defaults MUST NOT be substituted for input that failed validation.
+
+**Rationale**: Errors that surface immediately are cheap to diagnose; errors that produce
+plausible-looking wrong output are discovered late, downstream, by someone who trusted the
+result.
+
+### III. Every Requirement Is Testable
+
+Every functional requirement in a specification MUST map to at least one automated pytest test,
+and that mapping MUST be explicit — the test name or a comment identifies the requirement it
+covers.
+
+Consequences that follow:
+
+- A requirement that cannot be expressed as a pass/fail test is not yet specified well enough
+  and MUST be rewritten before implementation begins.
+- Error behavior required by Principle II is itself a requirement: each specified failure mode
+  MUST have a test asserting the message and the exit status or raised exception.
+- The full test suite MUST pass before any feature is considered complete.
+- Tests MUST run with `pytest` and no additional plugins or services.
+
+**Rationale**: A requirement with no test is an intention, not a guarantee. An explicit
+requirement-to-test mapping makes coverage reviewable instead of a matter of opinion.
+
+### IV. Simplicity
+
+Implement the smallest design that satisfies the specification. Scope is set by the
+specification; anything beyond it MUST be left out.
+
+Prohibited without a written justification in the feature plan:
+
+- Abstractions (base classes, plugin layers, factories, configuration systems) introduced for
+  a single current caller or for anticipated future requirements.
+- Extra modules, packages, or indirection layers that do not correspond to a distinct
+  requirement.
+- Configurability, generality, or extensibility that no requirement asks for.
+
+When two designs both satisfy the specification, the one with fewer moving parts wins. Deleting
+code is a legitimate and preferred way to resolve a complexity finding.
+
+**Rationale**: Speculative structure must be read, tested, and maintained from the day it is
+written, while the future it anticipates may never arrive. YAGNI applies with full force at
+this project's size.
+
+## Additional Constraints
+
+- **Language**: Python 3.11 or newer. Version-specific syntax below that floor MUST NOT be used.
+- **Dependencies**: Runtime dependencies: none (Principle I). Development dependencies: pytest,
+  declared separately and used only by tests and tooling.
+- **Layout**: Source and tests live in distinct, predictable locations. Tests MUST be
+  discoverable by a bare `pytest` invocation from the repository root.
+- **Interfaces**: Command-line tools follow text in / text out — results to stdout, diagnostics
+  to stderr, exit status 0 on success and non-zero on failure.
+- **Validation boundary**: Input MUST be validated at the point where it enters the system, so
+  internal code may assume validated values.
+
+## Development Workflow & Quality Gates
+
+1. **Specification first**: Each feature begins with a specification whose functional
+   requirements are individually testable (Principle III).
+2. **Constitution check**: Feature plans MUST include a constitution check. Any deviation MUST
+   be recorded in the plan with its justification and the simpler alternative that was rejected.
+   An unrecorded deviation blocks the work.
+3. **Tests accompany requirements**: No requirement is implemented without its test. Tests
+   asserting failure modes are written alongside tests asserting success.
+4. **Merge gate**: Work merges only when the entire pytest suite passes, every functional
+   requirement maps to a passing test, and no runtime third-party import has been introduced.
+5. **Review focus**: Review verifies compliance with these four principles before it considers
+   style. Unjustified complexity is a valid reason to reject a change.
+
+## Governance
+
+This constitution supersedes other development practices and conventions in this project. Where
+a convention and this document conflict, this document governs.
+
+**Amendment procedure**: Amendments are made by updating this file. Each amendment MUST state
+the version change and rationale, and MUST be committed as its own change — not bundled with
+feature work. An amendment that invalidates existing code MUST name the files or behaviors
+requiring migration.
+
+**Versioning policy**: Semantic versioning applies to this document.
+
+- **MAJOR**: A principle is removed or redefined in a way that makes previously compliant work
+  non-compliant.
+- **MINOR**: A principle or section is added, or existing guidance is materially expanded.
+- **PATCH**: Clarifications, wording, and non-semantic refinements.
+
+**Compliance review**: Compliance is verified at the quality gates above — during planning via
+the constitution check, and at merge via the test suite and review. A deviation accepted under
+a plan's justification is scoped to that feature only; it does not establish precedent and does
+not amend this document.
+
+**Version**: 1.0.0 | **Ratified**: 2026-11-20 | **Last Amended**: 2026-11-20
