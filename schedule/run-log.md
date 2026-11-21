@@ -58,7 +58,7 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R021 | 2026-11-20 | T-REDACT-01 | sdd_clarify | OK | 0 | no | ok | replication; operated by Claude; replication; Claude Code 2.1.317 (pinned); specify resumed after a workspace restart and plan after the usage limit (same sessions); Claude Code cost $23.32 |
 | R021C | 2026-11-20 | T-REDACT-01-CR | sdd_clarify | OK | 0 | no | ok | change request on R021; operated by Claude; replication; Claude Code 2.1.317 (pinned); sddlog crashed at the implement phase end on a non-UTF-8 fixture (as R011C); patched copy applied and the capture finished by hand (operator note); Claude Code cost $28.62 |
 | R022 | 2026-11-21 | T-REDACT-01 | sdd | OK | 0 | no | ok | replication; operated by Claude; replication; Claude Code 2.1.317 (pinned); sddlog decode fix committed by the operator before run start; plan resumed after the usage limit; Claude Code cost $13.28 |
-| R022C | | T-REDACT-01-CR | sdd | | | | | change request on R022 |
+| R022C | 2026-11-21 | T-REDACT-01-CR | sdd | OK | 0 | no | ok | change request on R022; operated by Claude; replication; Claude Code 2.1.317 (pinned); Claude Code cost $14.79 |
 | R023 | | T-REDACT-01 | unstructured | | | | | replication |
 | R023C | | T-REDACT-01-CR | unstructured | | | | | change request on R023 |
 | R039 | | T-REDACT-01 | sdd_secure | | | | | replication |
