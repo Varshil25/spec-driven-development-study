@@ -61,3 +61,10 @@ These are **candidate reconciliations**, not authority to silently overwrite the
 8. Populate the 266-cell mapping with provenance to each score, coded sheet or audit, fill the other 25 narrative directives, remove the four warnings **only after** completing each affected validation, recompile LaTeX and visually verify all 40 pages.
 
 **Status:** no fabricated results and no encryption changes. The 46 archived logs' file presence is verified; the latest CI run on this draft PR is expected to rerun the frozen verifier against this updated snapshot (record that run separately after it finishes).
+
+## Independently executed checks completed 2026-11-21
+
+- **Part III read-only CI**: [run 44928326363](https://github.com/Varshil25/spec-driven-development-study/actions/runs/44928326363) completed successfully: **46/46 archived effective logs passed all six frozen sddlog invariants**, 27 synthetic fixture utility tests passed, **two runs (R039, R039C) remain missing**, scoring gate correctly **closed**.
+- **Part IV offline CI**: [run 44928583255](https://github.com/Varshil25/spec-driven-development-study/actions/runs/44928583255) completed successfully after installing the missing test dependency `scikit-learn==1.7.2`. **18/18 active-pipeline tests and 4/4 separate extractive-baseline tests passed**, corpus list contains **17 trusted + 3 rejected entries**. The earlier attempt [run 44928427622](https://github.com/Varshil25/spec-driven-development-study/actions/runs/44928427622) had one `ModuleNotFoundError: sklearn` and 17 other tests passing, establishing a dependency declaration gap rather than proven algorithmic failure.
+- **Release caution**: These pass results establish offline code functionality and log structure only. They cannot validate paper quality, all 17-source collection, LLM Oracle voice, actual OpenKB comparison, hidden-test security or requirement traceability.
+- **Layout QA**: PDF page 35 Table 14 text overflow was reproduced visually and by page-span coordinates (rightmost span ends at x=613.2pt on a 612.0pt-wide page). Re-typesetting required.
