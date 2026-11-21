@@ -1,0 +1,78 @@
+name: Comprehensive public test sweep
+
+# No model calls, no decryption, no authenticated secret access.
+# Kept separate from the 48 controlled study sessions and sealed scoring.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/comprehensive-public-tests.yml"
+      - "tests/**"
+      - "src/**"
+      - "tools/sddlog/**"
+      - "tools/study/**"
+      - "part-iv/**"
+      - "practice/T-LOGIN-01/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest-suites:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Main application
+            selector: tests
+            slug: application
+          - name: Study tools and frozen analyzer
+            selector: tools/sddlog/tests tools/study/tests
+            slug: study-tools
+          - name: Part IV knowledge base
+            selector: part-iv/tests
+            slug: knowledge-base
+          - name: Practice D001 (non-study)
+            selector: practice/T-LOGIN-01/runs/D001/tests
+            slug: practice-d001
+          - name: Practice D002 (non-study)
+            selector: practice/T-LOGIN-01/runs/D002/tests
+            slug: practice-d002
+          - name: Practice held-out vs D001 (non-study)
+            selector: practice/T-LOGIN-01/heldout/T-LOGIN-01
+            slug: practice-heldout-d001
+            sut_repo: practice/T-LOGIN-01/runs/D001
+          - name: Practice held-out vs D002 (non-study)
+            selector: practice/T-LOGIN-01/heldout/T-LOGIN-01
+            slug: practice-heldout-d002
+            sut_repo: practice/T-LOGIN-01/runs/D002
+
+    steps:
+      - name: Check out PR code without secrets
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install public/offline test dependencies
+        run: python -m pip install --disable-pip-version-check "pytest==9.1.1" "scikit-learn==1.7.2"
+      - name: Run selected tests (no study agent, no sealed study suites)
+        shell: bash
+        env:
+          SUT_REPO: ${{ matrix.sut_repo }}
+        run: |
+          mkdir -p test-results
+          python -m pytest -q ${{ matrix.selector }} --junitxml="test-results/${{ matrix.slug }}.xml" --durations=5
+      - name: Upload JUnit result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-tests-${{ matrix.slug }}
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 30
