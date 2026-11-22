@@ -533,7 +533,7 @@ GRID4
 
 \begingroup\small\setlength{\tabcolsep}{4pt}
 \begin{longtable}{@{}llccc@{}}
-\caption{Requirement traceability. All cells intentionally empty pending validation.}\label{tab:traceability}\\
+\caption{Requirement traceability. Coverage = mean score / 2; explicit-link rate = share of requirements whose code or tests cite a specification ID.}\label{tab:traceability}\\
 \toprule
 \textbf{Task} & \textbf{Condition} & \textbf{Requirements coded} & \textbf{Coverage} & \textbf{Explicit-link rate} \\
 \midrule
@@ -547,7 +547,7 @@ GRID3
 \end{longtable}
 \endgroup
 
-Traceability coding is not yet complete. The requirement register (245~rows) has been built, and coding sheets have been generated for all scored runs. The verdicts for P3 and Cohen's $\kappa$ from re-coding will be added once coding is finished.
+\textbf{Verdicts (P3).} Coverage was high in every condition (79--100\% per task). No pairwise comparison reached the consistency threshold (Friedman $p = 0.57$). The main contrast, \texttt{sdd} versus \texttt{unstructured}, showed no consistent difference (median $+0$~pp, same direction 2 of 5 tasks). The explicit-link rate was 0\% in every unstructured run and 94--100\% in every SDD run, confirming that SDD produces machine-traceable requirement citations. Cohen's $\kappa$ from re-coding will be added after the 30\% re-code pass.
 
 \subsection{Time and Effort}
 
@@ -625,7 +625,7 @@ Each validation item must be completed and evidenced before the report is submit
 \endhead
 Functional correctness & Held-out tests pass per pre-registered threshold & Test logs, pass/fail summary & Suites validated before freezing; study runs: 48 runs scored (73 score files) \\
 Security defects & Static analysis and manual review completed & SAST report, CWE mapping, review notes & Probes and Bandit validated on reference and naive code; study runs: Bandit run on all 48 builds \\
-Requirement traceability & Every acceptance criterion coded to code change or marked untraced & Traceability matrix & Requirement register built (245 rows); coding: \emptycell \\
+Requirement traceability & Every acceptance criterion coded to code change or marked untraced & Traceability matrix & Requirement register built (245 rows); coding complete (379 rows across 25 runs) \\
 Time and effort & Active time, turns and tokens logged consistently & Timestamped logs & Logging verified in R002 and R003; study runs: 48 runs logged, metrics extracted \\
 Output determinism & Replicated cells compared on every measure & Run-to-run variation table & Table~\ref{tab:determinism} filled \\
 Researcher bias & Rubrics and test suites pre-registered where feasible & Pre-registration record & Suites sealed 24 and 31 Oct 2026 with hashes; frozen 4 Nov 2026 (merge commit \texttt{5a58b4f}), hashes emailed to the advisor the same day; unsealing: suites unsealed 22 Nov 2026, hashes verified \\
@@ -1029,6 +1029,29 @@ GRID4_DATA = {
     ("T-PASTE-01", 3): [r"100\%", r"100\%", r"97\%", "--"],
 }
 
-tex = tex.replace("GRID5", grid(5, GRID5_DATA)).replace("GRID4", grid(4, GRID4_DATA)).replace("GRID3", grid(3)).replace("GRIDTIME", grid(4, TIME))
+GRID3_DATA = {
+    ("T-REDACT-01", 0): [r"30", r"80\%", r"0\%"],
+    ("T-REDACT-01", 1): [r"30", r"87\%", r"100\%"],
+    ("T-REDACT-01", 2): [r"45", r"87\%", r"100\%"],
+    ("T-REDACT-01", 3): [r"30", r"93\%", r"100\%"],
+    ("T-TARX-01", 0): [r"13", r"100\%", r"0\%"],
+    ("T-TARX-01", 1): [r"13", r"92\%", r"100\%"],
+    ("T-TARX-01", 2): [r"13", r"92\%", r"100\%"],
+    ("T-TARX-01", 3): [r"13", r"92\%", r"100\%"],
+    ("T-BOOKMARKS-01", 0): [r"14", r"79\%", r"0\%"],
+    ("T-BOOKMARKS-01", 1): [r"14", r"79\%", r"100\%"],
+    ("T-BOOKMARKS-01", 2): [r"14", r"86\%", r"100\%"],
+    ("T-BOOKMARKS-01", 3): [r"14", r"79\%", r"100\%"],
+    ("T-ACCOUNTS-01", 0): [r"18", r"86\%", r"0\%"],
+    ("T-ACCOUNTS-01", 1): [r"18", r"89\%", r"100\%"],
+    ("T-ACCOUNTS-01", 2): [r"18", r"89\%", r"100\%"],
+    ("T-ACCOUNTS-01", 3): [r"18", r"89\%", r"94\%"],
+    ("T-PASTE-01", 0): [r"16", r"88\%", r"0\%"],
+    ("T-PASTE-01", 1): [r"16", r"88\%", r"100\%"],
+    ("T-PASTE-01", 2): [r"16", r"94\%", r"100\%"],
+    ("T-PASTE-01", 3): [r"16", r"81\%", r"100\%"],
+}
+
+tex = tex.replace("GRID5", grid(5, GRID5_DATA)).replace("GRID4", grid(4, GRID4_DATA)).replace("GRID3", grid(3, GRID3_DATA)).replace("GRIDTIME", grid(4, TIME))
 (HERE / "final-report.tex").write_text(tex)
 print("wrote", HERE / "final-report.tex")
