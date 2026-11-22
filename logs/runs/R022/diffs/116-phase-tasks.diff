@@ -1,0 +1,296 @@
+diff --git a/specs/001-logredact-cli/tasks.md b/specs/001-logredact-cli/tasks.md
+new file mode 100644
+index 0000000..b51399d
+--- /dev/null
++++ b/specs/001-logredact-cli/tasks.md
+@@ -0,0 +1,290 @@
++---
++
++description: "Task list for Log Redaction CLI implementation"
++---
++
++# Tasks: Log Redaction CLI
++
++**Input**: Design documents from `/specs/001-logredact-cli/`
++
++**Prerequisites**: [plan.md](./plan.md), [spec.md](./spec.md), [research.md](./research.md),
++[data-model.md](./data-model.md), [contracts/cli.md](./contracts/cli.md),
++[quickstart.md](./quickstart.md)
++
++**Tests**: Test tasks ARE included and are mandatory for this feature. Constitution principle III
++("Every Requirement Is Testable") requires each FR to map to a named pytest test, SC-004 requires
++100% FR coverage by tests that name the requirement, and SC-005 requires every failure mode to
++assert both the diagnostic and the exit status. Test ids below are taken verbatim from the
++requirement→test map in [quickstart.md](./quickstart.md#requirement--test-map-sc-004) — do not
++rename them, because that map is the coverage artifact SC-004 is checked against.
++
++**Organization**: Tasks are grouped by user story to enable independent implementation and
++testing of each story.
++
++## Format: `[ID] [P?] [Story] Description`
++
++- **[P]**: Can run in parallel (different files, no dependencies)
++- **[Story]**: Which user story this task belongs to (US1, US2, US3, US4)
++- Include exact file paths in descriptions
++
++## Path Conventions
++
++Single project, `src/` layout, per [plan.md](./plan.md) "Project Structure". All paths are
++relative to the repository root.
++
++```text
++pyproject.toml
++src/logredact/{__init__.py,__main__.py,redact.py}
++tests/{conftest.py,test_redact.py,test_cli.py,test_corpus.py}
++```
++
++---
++
++## Phase 1: Setup (Shared Infrastructure)
++
++**Purpose**: Project skeleton and test discovery. Nothing exists yet — the repository root
++currently has no `pyproject.toml`, no `src/`, and no `tests/`.
++
++- [ ] T001 Create the directory skeleton `src/logredact/` and `tests/` at the repository root per plan.md "Project Structure"
++- [ ] T002 Create `pyproject.toml` at the repository root with `[project]` name `logredact`, `requires-python = ">=3.11"` (Constitution "Additional Constraints" floor), `dependencies = []` (Constitution principle I — no runtime dependency may be declared), `[project.optional-dependencies] dev = ["pytest>=7"]` (declared separately so the test-tooling exemption stays visible; `>=7` is required for the built-in `pythonpath` setting), and `[tool.pytest.ini_options]` with `pythonpath = ["src"]` and `testpaths = ["tests"]` so a bare `pytest` from the repository root discovers the suite with no plugins
++- [ ] T003 [P] Create `src/logredact/__init__.py` as an empty package marker with a one-line module docstring (re-exports are added in T017 once `redact.py` exists)
++
++---
++
++## Phase 2: Foundational (Blocking Prerequisites)
++
++**Purpose**: The two shared artifacts every user story needs — the tally type that all three
++rules and the CLI accumulate into, and the subprocess helper every CLI test calls.
++
++**⚠️ CRITICAL**: No user story work can begin until this phase is complete
++
++- [ ] T004 Create `src/logredact/redact.py` with its module docstring, the `import re` / `from dataclasses import dataclass` imports, and the tally type exactly as specified in data-model.md §4: `@dataclass(frozen=True, slots=True) class Counts` with fields `emails: int = 0`, `ips: int = 0`, `cards: int = 0` — all three default to `0`, never blank or omitted (R4.3). Add an `__add__` or module-level accumulate helper only if a later task proves it necessary; do not add one speculatively (Constitution principle IV)
++- [ ] T005 [P] Create `tests/conftest.py` with a `run_cli(*args, stdin="")` helper that spawns `sys.executable -m logredact` via `subprocess.run` with `env` carrying `PYTHONPATH=src`, `capture_output=True`, `text=True`, `encoding="utf-8"`, `newline=""` semantics preserved (pass `input=` as text), and returns the completed process so tests can assert `stdout`, `stderr`, and `returncode` separately. This helper is what makes real stream separation and exit status assertable (plan.md "Testing"); do not let tests call `main()` in-process for CLI-contract assertions
++
++**Checkpoint**: Foundation ready — `pytest` runs (collecting nothing yet) and `Counts` imports
++
++---
++
++## Phase 3: User Story 1 - Redact a piped log stream (Priority: P1) 🎯 MVP
++
++**Goal**: Arbitrary text in on stdin, sanitised text out on stdout — emails → `[EMAIL]`, IPv4
++addresses → `[IP]`, Luhn-valid 13-19 digit cards (including their separators) → `[CARD]`, with
++every other byte reproduced exactly. This is the whole redaction engine plus the simplest CLI
++that exercises it.
++
++**Independent Test**: Pipe a log excerpt containing each kind of sensitive value on stdin with no
++file arguments; confirm stdout contains `[EMAIL]`, `[IP]`, and `[CARD]` in place of those values,
++all other characters on each line unchanged, line order preserved, stderr empty, exit status 0
++(quickstart.md Scenario 1).
++
++### Tests for User Story 1 ⚠️
++
++> **NOTE: Write these tests FIRST and confirm they FAIL (import error or assertion) before
++> implementing T014-T018.** T006-T009 all edit `tests/test_redact.py`, so they are sequential;
++> T010 is in a different file and can run in parallel with all of them.
++
++- [ ] T006 [US1] Add email tests to `tests/test_redact.py`: `test_fr007_email_replaced_with_placeholder`, `test_fr008_email_grammar_accepts_dots_plus_and_subdomains` (must recognise `jane.doe+test@mail.example.com`; grammar is "a local part of one or more characters drawn from letters, digits, and the characters `.`, `_`, `%`, `+`, and `-`, followed by `@`, followed by one or more dot-separated labels of letters, digits, and `-`, ending in a final label of at least two letters"), and `test_fr009_non_email_text_left_unchanged` (a bare `@`, `jane@localhost`, and a domain whose final label is fewer than two letters must all pass through unchanged)
++- [ ] T007 [US1] Add IPv4 tests to `tests/test_redact.py`: `test_fr010_ipv4_replaced_with_placeholder`, `test_fr011_ipv4_octet_range_boundaries` (exactly four dot-separated decimal numbers "each in the range 0 to 255 inclusive, written without a leading `+` or `-`" — assert `0.0.0.0` and `255.255.255.255` redact), `test_fr012_out_of_range_or_wrong_part_count_left_unchanged` (`999.1.1.1`, `256.1.1.1`, `1.2.3` unchanged), and `test_fr013_ipv4_digit_boundary_and_trailing_period` (`1.2.3.4.5` wholly unchanged — not `1.[IP]`; `connect to 192.168.0.10.` → `connect to [IP].`; also cover the derived leading-zero decision from research D-002: `007.0.0.1` redacts, `0255.1.1.1` does not)
++- [ ] T008 [US1] Add card tests to `tests/test_redact.py`: `test_fr014_card_replaced_including_separators` (`4111 1111 1111 1111` becomes one `[CARD]`, not four — the internal separators are consumed), `test_fr015_card_length_separator_shapes_and_luhn` ("a run of 13 to 19 digits, whose digit groups may optionally be separated by single space or single hyphen characters, and whose digits taken in order pass the Luhn checksum"; cover `4111-1111-1111-1111`, mixed `4111-1111 1111-1111`, and bare `4111111111111111`), and `test_fr016_luhn_failure_length_and_digit_adjacency_left_unchanged` (`1234567890123` Luhn-invalid 13 digits, `123456789012` 12 digits, `11111111111111111111` 20 digits, `4111  1111 1111 1111` double space, `4111,1111,1111,1111` comma, `2026-11-20 10:00:00` — all unchanged; plus `x4111111111111111` → `x[CARD]` and the D-005 case `123 4111111111111111` → `123 [CARD]`)
++- [ ] T009 [US1] Add fidelity, overlap, and counting tests to `tests/test_redact.py`: `test_fr005_line_count_and_order_unchanged` (no line added, dropped, reordered, merged, or split), `test_fr017_leftmost_match_wins_and_email_beats_ipv4` (`user@1.2.3.4` → `user@[IP]`; each character redacted at most once; plus the research D-004 overlap case `card 4111111111111111 10.0.0.7` → `card [CARD] [IP]`), `test_fr018_placeholders_not_reexamined` (literal `[CARD]`, `[IP]`, `[EMAIL]` already in the input pass through unchanged and are not double-counted), and `test_fr020_counts_occurrences_not_distinct_values` (the same address three times counts 3; absent kinds report `0`)
++- [ ] T010 [P] [US1] Add stdin CLI tests to `tests/test_cli.py` using the `run_cli` helper: `test_fr002_reads_stdin_when_no_file_given` (asserts stdout, empty stderr, and exit 0 for `user jane@example.com from 10.0.0.7` → `user [EMAIL] from [IP]\n`), `test_fr025_exit_zero_when_all_inputs_read`, and an empty-stdin case asserting empty stdout with exit 0
++
++### Implementation for User Story 1
++
++- [ ] T011 [US1] Add the three rule patterns and their placeholder literals to `src/logredact/redact.py` per data-model.md §3 and research D-001/D-002/D-003, each compiled once at import (R3.5) and never per line: email source `[A-Za-z0-9._%+\-]+@(?:[A-Za-z0-9\-]+\.)+[A-Za-z]{2,}`; `OCTET = r"(?:25[0-5]|2[0-4]\d|[01]?\d?\d)"` and `IPV4 = rf"(?<!\d)(?<!\d\.){OCTET}(?:\.{OCTET}){{3}}(?!\d)(?!\.\d)"` (the `(?<!\d\.)` lookbehind is derived and load-bearing — without it `1.2.3.4.5` yields `1.[IP]`); card candidate `CARD = re.compile(r"(?<!\d)(?:\d[ \-]?){12,18}\d(?!\d)")`. Placeholders are the fixed literals `[EMAIL]`, `[IP]`, `[CARD]` — not configurable (R3.1)
++- [ ] T012 [US1] Implement `luhn(digits: str) -> bool` in `src/logredact/redact.py` per data-model.md §3 and research D-006: precondition is that `digits` contains only `0-9`; walking right to left, double every second digit, subtract 9 when the doubled value exceeds 9, sum, and return whether the total is divisible by 10. Length MUST NOT be checked here — the 13-19 digit bound is the pattern's job (R3.6)
++- [ ] T013 [US1] Implement the combined email+IPv4 pass A in `src/logredact/redact.py` as one `re.sub` over a `(?P<email>…)|(?P<ip>…)` alternation with **email written first**, per research D-004 — Python's leftmost-first alternation semantics are the entire implementation of FR-017's "leftmost wins, email before IPv4" clause, and `re.sub` not rescanning replacement text is FR-018 for free (R3.8, R3.9). Count each branch's substitutions as it fires
++- [ ] T014 [US1] Implement card pass B in `src/logredact/redact.py` as a `while` loop over `CARD.search(text, pos)` on pass A's output, per research D-005: on `luhn(digits)` (digits = the match with spaces and hyphens stripped) emit `[CARD]` and set `pos = m.end()`; otherwise emit one character and set `pos = m.start() + 1` so a Luhn-failing window is left unchanged and the scan re-enters one character later rather than consuming it (R3.11). Do NOT use `re.sub` here and do NOT search shorter sub-windows at the same start position — the accepted residual limitation is stated in research D-005
++- [ ] T015 [US1] Assemble `redact_text(text: str) -> tuple[str, Counts]` in `src/logredact/redact.py` from T013 and T014, returning the redacted text plus the `Counts` for that text. It performs no I/O and may assume a decoded `str` (Constitution "Validation boundary"); it runs IPv4 before cards per R3.10
++- [ ] T016 [US1] Add the `SIGPIPE` and broken-pipe handling to `src/logredact/__main__.py` per research D-010: call `signal.signal(signal.SIGPIPE, signal.SIG_DFL)` at startup guarded by `hasattr(signal, "SIGPIPE")` so Windows is unaffected, and wrap the final flush in a narrow `except BrokenPipeError` (a specific anticipated exception, permitted by Constitution principle II — no bare `except`). Expected result: `| head -2` gives empty stderr and exit 141, the way `cat` behaves
++- [ ] T017 [US1] Implement the stdin path in `src/logredact/__main__.py`: wrap `sys.stdin.buffer` and `sys.stdout.buffer` in `io.TextIOWrapper` with `encoding="utf-8"`, `newline=""`, `errors="strict"` per research D-008 (UTF-8 forced explicitly on **both** ends so an inherited `C` locale cannot crash on non-ASCII passthrough; `newline=""` keeps each terminator attached so `\r\n` and a missing final newline survive), iterate one line at a time calling `redact_text`, write each result immediately (one line resident in memory, per R2.5), and exit 0. Also add the `redact_text`/`Counts` re-exports to `src/logredact/__init__.py` as named in plan.md
++
++**Checkpoint**: User Story 1 is independently functional — quickstart.md Scenario 1 passes end to
++end, and `pytest tests/test_redact.py` is green. This is the MVP.
++
++---
++
++## Phase 4: User Story 2 - Redact one or more named log files (Priority: P2)
++
++**Goal**: One or more FILE paths are read in argument order into a single sanitised stream on
++stdout, with stdin never opened.
++
++**Independent Test**: Create two small files with known sensitive content, run the tool with both
++paths, and confirm stdout equals the redacted first file followed by the redacted second file
++with stdin ignored; reverse the arguments and confirm the output order reverses
++(quickstart.md Scenario 2).
++
++### Tests for User Story 2 ⚠️
++
++- [ ] T018 [US2] Add named-file CLI tests to `tests/test_cli.py`: `test_fr003_reads_files_in_order_and_ignores_stdin` (feed `LEAK x@y.io` on stdin alongside a file argument and assert `LEAK` appears nowhere in stdout), `test_fr004_output_concatenated_in_argument_order` (also assert the reversed-argument case and that the same path passed twice yields its content twice, per R1.1), and `test_fr006_byte_identical_passthrough_crlf_blank_and_no_final_newline` (a file whose last line has no trailing newline must emit no invented newline; `\r\n` terminators, blank lines, and leading/trailing whitespace must round-trip exactly)
++
++### Implementation for User Story 2
++
++- [ ] T019 [US2] Implement the hand-written argument scan in `src/logredact/__main__.py` per research D-007 — a ~15-line scan of `sys.argv[1:]` collecting FILE paths in order. `argparse` MUST NOT be used: with `nargs="*"` it provably rejects `logredact a.log --count b.log`, which FR-001 requires to work. A bare `-` is an ordinary path named `-`, not a stdin convention (contracts/cli.md "Argument grammar")
++- [ ] T020 [US2] Implement the named-file streaming path in `src/logredact/__main__.py`: when the FILE list is non-empty, open each path in argument order as `open(path, "r", encoding="utf-8", newline="", errors="strict")` (R1.3) and stream its lines through `redact_text` to stdout; when the list is non-empty, stdin MUST NOT be opened or read at all (R1.2). Duplicate paths are independent sources and are read once each (R1.1)
++
++**Checkpoint**: User Stories 1 and 2 both work independently — stdin mode and named-file mode
++
++---
++
++## Phase 5: User Story 3 - Report how much was redacted (Priority: P3)
++
++**Goal**: `--count`, accepted in any argument position, writes exactly one
++`emails=N ips=N cards=N` line to stderr after all stdout output.
++
++**Independent Test**: Run with `--count` on input with a known number of each kind of value,
++capture stderr separately from stdout, and confirm the tally matches while stdout is byte-identical
++to a run without the flag (quickstart.md Scenario 3).
++
++### Tests for User Story 3 ⚠️
++
++- [ ] T021 [US3] Add tally CLI tests to `tests/test_cli.py`: `test_fr001_count_flag_accepted_before_between_and_after_files` (all three positions, **including the interspersed `a.log --count b.log` form that plain `argparse` gets wrong**; a repeated `--count` is equivalent to one), `test_fr019_count_writes_single_tally_line_after_output` (exactly one line, in the form `emails=N ips=N cards=N`, written after all stdout output), `test_fr020_single_tally_across_all_files` (one tally covering all sources combined, not one per file), and `test_fr021_stderr_empty_without_count` (stderr is empty on a successful run with no flag)
++
++### Implementation for User Story 3
++
++- [ ] T022 [US3] Extend the argument scan in `src/logredact/__main__.py` so exactly the token `--count` sets the tally flag wherever it appears — before, between, or after FILE arguments (FR-001) — and repeating it is equivalent to giving it once. Tokens are classified in one pass, so position carries no meaning
++- [ ] T023 [US3] Accumulate the per-line `Counts` from `redact_text` into a single run tally in `src/logredact/__main__.py` as lines stream (R4.6 — not by a second pass over the data), and after all stdout output is written and flushed, emit exactly one line `emails=N ips=N cards=N` to stderr when the flag is set (R4.4). Each N counts replacement **occurrences**, not distinct values (R4.2), and is `0` when none occurred (R4.3)
++
++**Checkpoint**: User Stories 1, 2, and 3 all work independently
++
++---
++
++## Phase 6: User Story 4 - Learn immediately when a log file cannot be read (Priority: P3)
++
++**Goal**: An unreadable FILE, or an unrecognised option, is reported by name on stderr and exits
++2 — never a short result that looks successful.
++
++**Independent Test**: Run with a path that does not exist and confirm stderr names that exact
++path, stdout contains no fabricated content, and the exit status is 2; then run with a readable
++file followed by a missing one and confirm the first file's output is present, no tally is
++printed even with `--count`, and the status is 2 (quickstart.md Scenario 4).
++
++**Note**: the "no tally on failure" assertion depends on US3 being implemented; implement US4
++after US3, or stub the flag.
++
++### Tests for User Story 4 ⚠️
++
++- [ ] T024 [US4] Add failure-mode CLI tests to `tests/test_cli.py`, each asserting **both the diagnostic and the exit status** (SC-005): `test_fr022_diagnostic_names_path_for_missing_denied_directory_and_undecodable` — all four causes ("it does not exist, cannot be opened, names a directory, or contains undecodable bytes"), each asserting the message names the path and matching a stable substring of the reason rather than the full OS string per research D-009; `test_fr023_stops_at_first_failure_suppresses_tally_exits_2` — covering both orderings (readable-then-missing: the first file's redacted output is already on stdout and is not retracted; missing-then-readable: nothing from the second file appears), plus `--count` producing no tally line; and `test_fr024_unrecognized_option_usage_to_stderr_nothing_processed` — stdout empty, the named file never opened, exit non-zero
++
++### Implementation for User Story 4
++
++- [ ] T025 [US4] Add read-failure handling to `src/logredact/__main__.py` per research D-009: wrap each file's open-and-stream in `except (OSError, UnicodeDecodeError) as exc`, write `logredact: {path}: {reason}` to stderr using the reason the OS or decoder supplies, then stop — no further source is opened, no tally is printed (R4.5), and the exit status is 2. Detection MUST be by exception, never by an `os.access`/`Path.is_file` pre-flight check (TOCTOU race and a duplicate code path). Output already written to stdout stays written; it is already-sanitised data
++- [ ] T026 [US4] Add unrecognised-option rejection to the argument scan in `src/logredact/__main__.py`: any token beginning with `-` and longer than one character that is not exactly `--count` writes the two stderr lines from contracts/cli.md §C-3 — `usage: python -m logredact [--count] [FILE ...]` then `logredact: unrecognized option: {token}` — and exits 2 with nothing read and nothing written to stdout. `-h`/`--help` is deliberately **not** implemented and takes this same path (research D-007, Constitution principle IV)
++
++**Checkpoint**: All four user stories are independently functional
++
++---
++
++## Phase 7: Polish & Cross-Cutting Concerns
++
++**Purpose**: The success-criteria corpora and gates that span all four stories.
++
++- [ ] T027 [P] Add `tests/test_corpus.py::test_sc002_no_known_value_survives` — a review corpus of log lines carrying known emails, IPv4 addresses, and Luhn-valid card numbers, asserting that none of those known values (including each card's bare digit sequence, separators stripped) appears anywhere in the output: the leak rate must be 0%
++- [ ] T028 Add `tests/test_corpus.py::test_sc003_non_sensitive_corpus_byte_identical` — a corpus of lines with nothing redactable (Luhn-invalid digit runs, out-of-range dotted quads, dates, version strings, timestamps), asserting 100% are reproduced byte-identically: the false-positive rate on those lines must be 0%
++- [ ] T029 [P] Add `tests/test_cli.py::test_sc001_worked_examples_reproduce_exactly` — the normative E-1, E-2, and E-3 blocks from contracts/cli.md, asserting byte-for-byte output, which stream each byte goes to, and the exit status
++- [ ] T030 Add `tests/test_cli.py::test_sc006_streams_large_input_within_budget` — generate a 100,000-line file, assert it is sanitised in under 10 seconds (the Phase 0 probe measured 1.40 s, a ~7x margin) and that the tally is correct; include a very long single line (1 MB) passing through without truncation
++- [ ] T031 Run `pytest` from the repository root with no plugins and confirm it is green, then verify every row of the requirement→test map in `specs/001-logredact-cli/quickstart.md` (FR-001…FR-025) resolves to a test in `tests/` that exists and passes, and that each failure-mode row asserts both the diagnostic and the exit status (SC-004, SC-005)
++- [ ] T032 Run the five scenarios in `specs/001-logredact-cli/quickstart.md` by hand against the built tool, including the interspersed `python3 -m logredact /tmp/a.log --count /tmp/b.log` form and the `| head -2` broken-pipe check expecting empty stderr and `status=141`
++- [ ] T033 Verify the Constitution merge gate: no third-party import appears anywhere in `src/`, `pyproject.toml` still declares `dependencies = []`, no bare `except:` or `except Exception: pass` exists, and no module, class, abstraction, or configuration surface was added beyond what plan.md's Constitution Check assessed (principles I, II, IV)
++- [ ] T034 Verify SC-007 reproducibility: confirm no file in `src/logredact/` reads a configuration file, an environment variable, or the network, and that every test in `tests/` runs with no setup beyond `PYTHONPATH=src` — so a reviewer can confirm the tool's complete behaviour from its own output alone
++
++---
++
++## Dependencies & Execution Order
++
++### Phase Dependencies
++
++- **Setup (Phase 1)**: No dependencies — start immediately
++- **Foundational (Phase 2)**: Depends on Setup — BLOCKS all user stories
++- **User Story 1 (Phase 3)**: Depends on Foundational. No dependency on any other story
++- **User Story 2 (Phase 4)**: Depends on Foundational **and on US1's `redact_text`** — file
++  handling is a thin layer over the engine, as spec.md states in US2's "Why this priority"
++- **User Story 3 (Phase 5)**: Depends on Foundational and on US1 (needs `Counts` flowing out of
++  `redact_text`). Its `test_fr020_single_tally_across_all_files` test also needs US2's file mode
++- **User Story 4 (Phase 6)**: Depends on US2 (it only applies to the named-file mode US2
++  introduces) and, for its no-tally-on-failure assertion, on US3
++- **Polish (Phase 7)**: Depends on all four stories
++
++This feature's stories are genuinely layered rather than parallel: the spec itself orders them
++that way (US2 "the redaction engine from Story 1 is a prerequisite"; US4 "it only applies to the
++named-file mode introduced in Story 2"). Each story is still **independently testable** at its
++checkpoint, which is what the phase structure buys.
++
++### Within Each User Story
++
++- Tests are written first and MUST FAIL before the implementation tasks of that story
++- Patterns → `luhn()` → passes → `redact_text()` → CLI wiring
++- Tasks editing the same file are sequential and carry no `[P]`
++
++### File-Conflict Map (why most tasks are not `[P]`)
++
++| File | Tasks that edit it |
++|---|---|
++| `src/logredact/redact.py` | T004, T011, T012, T013, T014, T015 |
++| `src/logredact/__main__.py` | T016, T017, T019, T020, T022, T023, T025, T026 |
++| `tests/test_redact.py` | T006, T007, T008, T009 |
++| `tests/test_cli.py` | T010, T018, T021, T024, T029, T030 |
++| `tests/test_corpus.py` | T027, T028 |
++| `src/logredact/__init__.py` | T003, T017 |
++
++### Parallel Opportunities
++
++- **Phase 1**: T003 runs in parallel with T002
++- **Phase 2**: T005 (`tests/conftest.py`) runs in parallel with T004 (`redact.py`)
++- **Phase 3**: T010 (`test_cli.py`) runs in parallel with the whole T006→T009 chain
++  (`test_redact.py`); T016 can be written in parallel with T011-T015 only if a different person
++  owns `__main__.py`
++- **Phase 7**: T027 ∥ T029 (different files); T028 follows T027, T030 follows T029
++
++---
++
++## Parallel Example: User Story 1
++
++```bash
++# The two test files are independent — write them concurrently:
++Task: "T006-T009 engine tests in tests/test_redact.py"   # one owner, sequential within the file
++Task: "T010 stdin CLI tests in tests/test_cli.py"        # different file, truly parallel
++```
++
++```bash
++# Phase 2 foundation, two files, no shared symbols:
++Task: "T004 Counts dataclass in src/logredact/redact.py"
++Task: "T005 run_cli helper in tests/conftest.py"
++```
++
++---
++
++## Implementation Strategy
++
++### MVP First (User Story 1 Only)
++
++1. Phase 1: Setup (T001-T003)
++2. Phase 2: Foundational (T004-T005) — blocks everything
++3. Phase 3: User Story 1 (T006-T017)
++4. **STOP and VALIDATE**: run quickstart.md Scenario 1 and `pytest tests/test_redact.py`
++5. The tool is already useful for the most common case — ad-hoc piping
++
++### Incremental Delivery
++
++1. Setup + Foundational → foundation ready
++2. + US1 → pipe anything through it (**MVP**)
++3. + US2 → named files in argument order
++4. + US3 → the `--count` tally
++5. + US4 → loud failure on unreadable input
++6. + Polish → SC-002/SC-003 corpora, SC-001/SC-006 tests, merge gate
++
++Each increment leaves the suite green and adds no regression to earlier stories.
++
++---
++
++## Notes
++
++- `[P]` tasks = different files, no dependencies — see the file-conflict map above
++- Test ids are fixed by quickstart.md's requirement→test map; renaming one breaks the SC-004
++  coverage artifact
++- Every failure-mode test asserts the diagnostic **and** the exit status (SC-005) — asserting one
++  without the other does not satisfy the criterion
++- Commit after each task or logical group; stop at any checkpoint to validate a story
++  independently
++- Constraints quoted verbatim from spec.md and data-model.md inside task descriptions are
++  normative — do not re-derive them at implementation time

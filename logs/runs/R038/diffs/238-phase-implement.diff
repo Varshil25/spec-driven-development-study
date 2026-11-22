@@ -1,0 +1,2957 @@
+diff --git a/.gitignore b/.gitignore
+index 75c6182..8d04f75 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,3 +1,23 @@
+ __pycache__/
+ *.pyc
+ .pytest_cache/
++
++# Python (per plan.md tech stack)
++.venv/
++venv/
++build/
++dist/
++*.egg-info/
++.coverage
++
++# Local artifacts of the bookmarks CLI
++bookmarks.db
++bookmarks.db-journal
++
++# Universal
++.DS_Store
++Thumbs.db
++*.tmp
++*.swp
++.vscode/
++.idea/
+diff --git a/pytest.ini b/pytest.ini
+new file mode 100644
+index 0000000..6df7ec3
+--- /dev/null
++++ b/pytest.ini
+@@ -0,0 +1,5 @@
++[pytest]
++pythonpath = src
++testpaths = tests
++markers =
++    slow: scale cases (10,000 and 50,000 bookmarks) that are slower than the rest of the suite
+diff --git a/specs/001-bookmark-manager-cli/quickstart.md b/specs/001-bookmark-manager-cli/quickstart.md
+index 728fe69..441f949 100644
+--- a/specs/001-bookmark-manager-cli/quickstart.md
++++ b/specs/001-bookmark-manager-cli/quickstart.md
+@@ -173,11 +173,11 @@ constitution's Test gate.
+ 
+ ## Definition of done
+ 
+-- [ ] All four scenarios above behave exactly as described, run by hand from a clean directory.
+-- [ ] `pytest` passes with no failures and no unexpected skips.
+-- [ ] Every row of [the test matrix](./contracts/requirements-test-matrix.md) has a passing
++- [x] All four scenarios above behave exactly as described, run by hand from a clean directory.
++- [x] `pytest` passes with no failures and no unexpected skips.
++- [x] Every row of [the test matrix](./contracts/requirements-test-matrix.md) has a passing
+       test — 27 FR + 11 SR, including each SR's negative case.
+-- [ ] `stat -c '%a' bookmarks.db` is `600`, and no `-journal`/`-wal`/`-shm` file remains after
++- [x] `stat -c '%a' bookmarks.db` is `600`, and no `-journal`/`-wal`/`-shm` file remains after
+       any command.
+-- [ ] `pytest tests/security/test_security_stdlib_only.py` passes, proving the shipped package
++- [x] `pytest tests/security/test_security_stdlib_only.py` passes, proving the shipped package
+       imports nothing outside the standard library.
+diff --git a/specs/001-bookmark-manager-cli/tasks.md b/specs/001-bookmark-manager-cli/tasks.md
+index a72a607..910ac5c 100644
+--- a/specs/001-bookmark-manager-cli/tasks.md
++++ b/specs/001-bookmark-manager-cli/tasks.md
+@@ -38,9 +38,9 @@ deliberately **not** used — four shipped files only.
+ 
+ **Purpose**: Project skeleton and test-runner configuration — no behaviour yet
+ 
+-- [ ] T001 Create the single-project directory skeleton per plan.md: `src/bookmarks/` and `tests/contract/`, `tests/integration/`, `tests/security/`, `tests/unit/`
+-- [ ] T002 Create `pytest.ini` at the repository root with `pythonpath = src`, `testpaths = tests`, and a `markers` entry registering `slow` (so `pytest -m "not slow"` from quickstart.md works without a warning)
+-- [ ] T003 [P] Create `src/bookmarks/__init__.py` holding only a version constant (`__version__`) — package marker, no imports, no logic (plan.md Project Structure)
++- [X] T001 Create the single-project directory skeleton per plan.md: `src/bookmarks/` and `tests/contract/`, `tests/integration/`, `tests/security/`, `tests/unit/`
++- [X] T002 Create `pytest.ini` at the repository root with `pythonpath = src`, `testpaths = tests`, and a `markers` entry registering `slow` (so `pytest -m "not slow"` from quickstart.md works without a warning)
++- [X] T003 [P] Create `src/bookmarks/__init__.py` holding only a version constant (`__version__`) — package marker, no imports, no logic (plan.md Project Structure)
+ 
+ ---
+ 
+@@ -51,19 +51,19 @@ test harness that every user story needs
+ 
+ **⚠️ CRITICAL**: No user story work can begin until this phase is complete
+ 
+-- [ ] T004 Define `BookmarksError(Exception)` carrying a `message: str` and a `status: int` in `src/bookmarks/storage.py` — the single carrier for every non-argparse failure (exit 1 and exit 3), per research.md R5
+-- [ ] T005 Implement `connect(path)` in `src/bookmarks/storage.py`: when the file does not exist, create it with `os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)` and close the descriptor **before** calling `sqlite3.connect(path)`; leave an existing file's mode untouched; map `FileNotFoundError` (missing parent directory), `PermissionError`, `IsADirectoryError` and `sqlite3.DatabaseError` (corrupt file) to `BookmarksError(status=1)` — never a silent fallback to `bookmarks.db` and never an empty collection (FR-002, FR-003, SR-005, research.md R2)
+-- [ ] T006 Implement `init_schema(conn)` in `src/bookmarks/storage.py`: execute `PRAGMA foreign_keys = ON` on every connection, then in one transaction the exact DDL from data-model.md — `bookmarks(id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, title TEXT NOT NULL DEFAULT '')`, `bookmark_tags(bookmark_id INTEGER NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE, tag TEXT NOT NULL, PRIMARY KEY (bookmark_id, tag)) WITHOUT ROWID`, `CREATE INDEX IF NOT EXISTS idx_bookmark_tags_tag ON bookmark_tags(tag)` — all `IF NOT EXISTS`, and leave journal mode at SQLite's default `delete`, never WAL (FR-003, FR-007, SR-011, research.md R1/R7)
+-- [ ] T007 Implement the frozen dataclass `Bookmark(id: int, url: str, title: str, tags: tuple[str, ...])` and the grouping generator `iter_bookmarks(cursor)` in `src/bookmarks/storage.py`: iterate the cursor lazily and yield one `Bookmark` as soon as the `id` column changes, holding at most one bookmark's tags in memory; a row with `tag IS NULL` yields an empty tag set (FR-017, SR-007, research.md R4)
+-- [ ] T008 Create `src/bookmarks/cli.py` with the SR-006 limit constants quoted verbatim from the spec — URL **at most 8192 characters**, title **at most 4096 characters**, `--tags` string **at most 4096 characters** with **at most 64 tags** of **at most 128 characters each**, search text **at most 1024 characters** — plus the argparse `type=` validator `positive_id` accepting only a decimal positive integer in **1 … 2^63−1** (rejecting `abc`, `1.5`, `-1`, `0` with `argparse.ArgumentTypeError`), and a one-time `sys.stdout.reconfigure(encoding="utf-8", newline="\n")` at entry (FR-022, SR-003, SR-006, research.md R5/R6)
+-- [ ] T009 Build the argparse parser in `src/bookmarks/cli.py` per contracts/cli-contract.md: global `--db PATH` defaulting to `bookmarks.db` in the current working directory and required to precede the command, and five subparsers `add URL [--title TITLE] [--tags TAGS]`, `list [--tag TAG]`, `search TEXT`, `delete ID`, `export --format {csv,json}` with `required=True, choices=("csv", "json")`; rely on argparse's native usage-message-to-stderr and `SystemExit(2)` for unknown commands, unknown options and missing arguments (FR-001, FR-026, SR-003, research.md R5)
+-- [ ] T010 Implement `main(argv)` in `src/bookmarks/cli.py`: parse, dispatch through a plain dict of five command functions, and **return** an int status 0/1/2/3 without ever calling `sys.exit`; catch `BookmarksError` and `SystemExit` from argparse, writing one single-line message to stderr with no traceback, no `sqlite3` text and no SQL keywords, and keeping stdout free of it (FR-004, FR-005, SR-008)
+-- [ ] T011 [P] Create `src/bookmarks/__main__.py` whose only behaviour is `sys.exit(cli.main(sys.argv[1:]))` under an `if __name__ == "__main__"` guard, so `python -m bookmarks` works with `src/` on `PYTHONPATH` (FR-001)
+-- [ ] T012 [P] Create `src/bookmarks/output.py` with `join_tags(tags)` — ascending code-point sort of the tag text then comma-join, returning `""` for an empty set (so `{python, Docs}` renders `Docs,python`) — shared by the listing, CSV and JSON formats (FR-017, FR-023, FR-024)
+-- [ ] T013 Create `tests/conftest.py` with the in-process `run(*argv)` fixture that calls `bookmarks.cli.main(list(argv))` and returns `(status, stdout, stderr)` via `capsys`, and a `db` fixture giving a `tmp_path`-based database path; no `subprocess` anywhere in the suite (research.md R10)
+-- [ ] T014 [P] Write `tests/contract/test_cli_surface.py::test_five_subcommands_exist` and `::test_module_is_runnable` — each of `add`/`list`/`search`/`delete`/`export` parses, and a `runpy`-based check that `bookmarks.__main__` imports and exposes the entry call (FR-001)
+-- [ ] T015 [P] Write `tests/security/test_security_file_mode.py::test_file_mode_is_0600` — after first use `path.stat().st_mode & 0o777 == 0o600`, asserted immediately after creation (not re-chmodded), under a POSIX-only skip guard (SR-005)
+-- [ ] T016 [P] Write `tests/security/test_security_stdlib_only.py::test_no_network_or_subprocess_imports` and `::test_no_shell_subprocess_socket_or_env_config` — `ast.parse` every `.py` under `src/bookmarks/`, assert every imported top-level module name is in `sys.stdlib_module_names`, and assert `subprocess`, `socket`, `urllib.request`, `os.system`, `os.popen` and `os.environ` appear nowhere in shipped code (FR-011, SR-010, SC-007)
++- [X] T004 Define `BookmarksError(Exception)` carrying a `message: str` and a `status: int` in `src/bookmarks/storage.py` — the single carrier for every non-argparse failure (exit 1 and exit 3), per research.md R5
++- [X] T005 Implement `connect(path)` in `src/bookmarks/storage.py`: when the file does not exist, create it with `os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)` and close the descriptor **before** calling `sqlite3.connect(path)`; leave an existing file's mode untouched; map `FileNotFoundError` (missing parent directory), `PermissionError`, `IsADirectoryError` and `sqlite3.DatabaseError` (corrupt file) to `BookmarksError(status=1)` — never a silent fallback to `bookmarks.db` and never an empty collection (FR-002, FR-003, SR-005, research.md R2)
++- [X] T006 Implement `init_schema(conn)` in `src/bookmarks/storage.py`: execute `PRAGMA foreign_keys = ON` on every connection, then in one transaction the exact DDL from data-model.md — `bookmarks(id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, title TEXT NOT NULL DEFAULT '')`, `bookmark_tags(bookmark_id INTEGER NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE, tag TEXT NOT NULL, PRIMARY KEY (bookmark_id, tag)) WITHOUT ROWID`, `CREATE INDEX IF NOT EXISTS idx_bookmark_tags_tag ON bookmark_tags(tag)` — all `IF NOT EXISTS`, and leave journal mode at SQLite's default `delete`, never WAL (FR-003, FR-007, SR-011, research.md R1/R7)
++- [X] T007 Implement the frozen dataclass `Bookmark(id: int, url: str, title: str, tags: tuple[str, ...])` and the grouping generator `iter_bookmarks(cursor)` in `src/bookmarks/storage.py`: iterate the cursor lazily and yield one `Bookmark` as soon as the `id` column changes, holding at most one bookmark's tags in memory; a row with `tag IS NULL` yields an empty tag set (FR-017, SR-007, research.md R4)
++- [X] T008 Create `src/bookmarks/cli.py` with the SR-006 limit constants quoted verbatim from the spec — URL **at most 8192 characters**, title **at most 4096 characters**, `--tags` string **at most 4096 characters** with **at most 64 tags** of **at most 128 characters each**, search text **at most 1024 characters** — plus the argparse `type=` validator `positive_id` accepting only a decimal positive integer in **1 … 2^63−1** (rejecting `abc`, `1.5`, `-1`, `0` with `argparse.ArgumentTypeError`), and a one-time `sys.stdout.reconfigure(encoding="utf-8", newline="\n")` at entry (FR-022, SR-003, SR-006, research.md R5/R6)
++- [X] T009 Build the argparse parser in `src/bookmarks/cli.py` per contracts/cli-contract.md: global `--db PATH` defaulting to `bookmarks.db` in the current working directory and required to precede the command, and five subparsers `add URL [--title TITLE] [--tags TAGS]`, `list [--tag TAG]`, `search TEXT`, `delete ID`, `export --format {csv,json}` with `required=True, choices=("csv", "json")`; rely on argparse's native usage-message-to-stderr and `SystemExit(2)` for unknown commands, unknown options and missing arguments (FR-001, FR-026, SR-003, research.md R5)
++- [X] T010 Implement `main(argv)` in `src/bookmarks/cli.py`: parse, dispatch through a plain dict of five command functions, and **return** an int status 0/1/2/3 without ever calling `sys.exit`; catch `BookmarksError` and `SystemExit` from argparse, writing one single-line message to stderr with no traceback, no `sqlite3` text and no SQL keywords, and keeping stdout free of it (FR-004, FR-005, SR-008)
++- [X] T011 [P] Create `src/bookmarks/__main__.py` whose only behaviour is `sys.exit(cli.main(sys.argv[1:]))` under an `if __name__ == "__main__"` guard, so `python -m bookmarks` works with `src/` on `PYTHONPATH` (FR-001)
++- [X] T012 [P] Create `src/bookmarks/output.py` with `join_tags(tags)` — ascending code-point sort of the tag text then comma-join, returning `""` for an empty set (so `{python, Docs}` renders `Docs,python`) — shared by the listing, CSV and JSON formats (FR-017, FR-023, FR-024)
++- [X] T013 Create `tests/conftest.py` with the in-process `run(*argv)` fixture that calls `bookmarks.cli.main(list(argv))` and returns `(status, stdout, stderr)` via `capsys`, and a `db` fixture giving a `tmp_path`-based database path; no `subprocess` anywhere in the suite (research.md R10)
++- [X] T014 [P] Write `tests/contract/test_cli_surface.py::test_five_subcommands_exist` and `::test_module_is_runnable` — each of `add`/`list`/`search`/`delete`/`export` parses, and a `runpy`-based check that `bookmarks.__main__` imports and exposes the entry call (FR-001)
++- [X] T015 [P] Write `tests/security/test_security_file_mode.py::test_file_mode_is_0600` — after first use `path.stat().st_mode & 0o777 == 0o600`, asserted immediately after creation (not re-chmodded), under a POSIX-only skip guard (SR-005)
++- [X] T016 [P] Write `tests/security/test_security_stdlib_only.py::test_no_network_or_subprocess_imports` and `::test_no_shell_subprocess_socket_or_env_config` — `ast.parse` every `.py` under `src/bookmarks/`, assert every imported top-level module name is in `sys.stdlib_module_names`, and assert `subprocess`, `socket`, `urllib.request`, `os.system`, `os.popen` and `os.environ` appear nowhere in shipped code (FR-011, SR-010, SC-007)
+ 
+ **Checkpoint**: Database opens at mode `0600`, schema applies, `python -m bookmarks --help` lists five commands, the test harness runs. User story implementation can begin.
+ 
+@@ -79,21 +79,21 @@ test harness that every user story needs
+ 
+ > Write these first and confirm they FAIL before implementing T023–T028.
+ 
+-- [ ] T017 [P] [US1] Write `tests/unit/test_url_validation.py::test_only_lowercase_http_https_prefix_accepted` — parametrised accept/reject list; a rejected `add` creates no bookmark row and no tag row (FR-008)
+-- [ ] T018 [P] [US1] Write `tests/unit/test_tag_parsing.py::test_comma_list_parsed_and_absent_means_no_tags` and `::test_degenerate_tag_inputs` — `python,cli` → 2 tags, omitted → 0 tags, and the data-model.md cases `""` → `{}`, `","` → `{}`, `"a,,b"` → `{a,b}`, `" a , b "` → `{a,b}`, `"a,a"` → `{a}`, `"Python,python"` → `{Python, python}` (FR-010, FR-012)
+-- [ ] T019 [P] [US1] Write `tests/unit/test_formatting.py::test_absent_title_defaults_to_empty_string` plus tag-sort-order and empty-field rendering cases — stored title is `""` and renders as an empty field; `{python, Docs}` renders `Docs,python` (FR-009, FR-017)
+-- [ ] T020 [P] [US1] Write `tests/contract/test_output_formats.py::test_listing_is_four_tab_separated_fields`, `::test_tags_sorted_by_code_point` and `::test_listing_splits_into_four_fields` — `line.split("\t")` has length exactly 4, a titleless and tagless bookmark's line ends in two consecutive tabs, no header and no trailing blank line (FR-017, SC-006)
+-- [ ] T021 [P] [US1] Write `tests/integration/test_story1_add_and_list.py` covering US1 AS1–AS5: `test_add_prints_only_the_identifier` (stdout exactly `"1\n"`, stderr empty), `test_db_option_is_used`, `test_default_db_is_cwd_bookmarks_db` (via `monkeypatch.chdir(tmp_path)`), `test_list_prints_all_in_id_order`, `test_first_add_needs_no_setup` (FR-002, FR-006, FR-013, SC-001)
+-- [ ] T022 [P] [US1] Write `tests/security/test_security_urls.py::test_url_allowlist_rejects` — parametrised over `javascript:alert(1)`, `file:///etc/passwd`, `data:text/html,x`, `ftp://host/`, `HTTPS://host/`, `example.com`, `//example.com`, `http:/example.com`, `""`, `"   "` → status 2, nothing on stdout, collection unchanged (SR-002, US1 AS5)
++- [X] T017 [P] [US1] Write `tests/unit/test_url_validation.py::test_only_lowercase_http_https_prefix_accepted` — parametrised accept/reject list; a rejected `add` creates no bookmark row and no tag row (FR-008)
++- [X] T018 [P] [US1] Write `tests/unit/test_tag_parsing.py::test_comma_list_parsed_and_absent_means_no_tags` and `::test_degenerate_tag_inputs` — `python,cli` → 2 tags, omitted → 0 tags, and the data-model.md cases `""` → `{}`, `","` → `{}`, `"a,,b"` → `{a,b}`, `" a , b "` → `{a,b}`, `"a,a"` → `{a}`, `"Python,python"` → `{Python, python}` (FR-010, FR-012)
++- [X] T019 [P] [US1] Write `tests/unit/test_formatting.py::test_absent_title_defaults_to_empty_string` plus tag-sort-order and empty-field rendering cases — stored title is `""` and renders as an empty field; `{python, Docs}` renders `Docs,python` (FR-009, FR-017)
++- [X] T020 [P] [US1] Write `tests/contract/test_output_formats.py::test_listing_is_four_tab_separated_fields`, `::test_tags_sorted_by_code_point` and `::test_listing_splits_into_four_fields` — `line.split("\t")` has length exactly 4, a titleless and tagless bookmark's line ends in two consecutive tabs, no header and no trailing blank line (FR-017, SC-006)
++- [X] T021 [P] [US1] Write `tests/integration/test_story1_add_and_list.py` covering US1 AS1–AS5: `test_add_prints_only_the_identifier` (stdout exactly `"1\n"`, stderr empty), `test_db_option_is_used`, `test_default_db_is_cwd_bookmarks_db` (via `monkeypatch.chdir(tmp_path)`), `test_list_prints_all_in_id_order`, `test_first_add_needs_no_setup` (FR-002, FR-006, FR-013, SC-001)
++- [X] T022 [P] [US1] Write `tests/security/test_security_urls.py::test_url_allowlist_rejects` — parametrised over `javascript:alert(1)`, `file:///etc/passwd`, `data:text/html,x`, `ftp://host/`, `HTTPS://host/`, `example.com`, `//example.com`, `http:/example.com`, `""`, `"   "` → status 2, nothing on stdout, collection unchanged (SR-002, US1 AS5)
+ 
+ ### Implementation for User Story 1
+ 
+-- [ ] T023 [US1] Implement `validate_url(value)` in `src/bookmarks/cli.py` — allow-list: accept only a value beginning with the exact lowercase prefix `http://` or `https://` and **at most 8192 characters**; no reachability check, no DNS lookup, no network access; rejection returns status 2 **before** the database is opened (FR-008, FR-011, SR-002, SR-006)
+-- [ ] T024 [US1] Implement `parse_tags(raw)` in `src/bookmarks/cli.py` — split on `,`, strip leading/trailing whitespace from each entry, discard entries that are then empty, keep each distinct entry once; enforce raw string **at most 4096 characters**, **at most 64 tags**, each tag **at most 128 characters** (over-limit → status 2, nothing stored) (FR-010, FR-012, SR-006)
+-- [ ] T025 [US1] Implement `add_bookmark(conn, url, title, tags)` in `src/bookmarks/storage.py` — one `with conn:` transaction containing `INSERT INTO bookmarks(url, title) VALUES (?, ?)` followed by one `INSERT INTO bookmark_tags(bookmark_id, tag) VALUES (?, ?)` per tag, returning `cursor.lastrowid`; fixed statement strings with `?` placeholders only (FR-006, FR-007, SR-001, SR-009)
+-- [ ] T026 [US1] Implement the unfiltered read `list_bookmarks(conn)` in `src/bookmarks/storage.py` — the single statement `SELECT b.id, b.url, b.title, t.tag FROM bookmarks b LEFT JOIN bookmark_tags t ON t.bookmark_id = b.id ORDER BY b.id, t.tag`, returning the cursor for lazy iteration through `iter_bookmarks` (FR-013, FR-017, SR-007)
+-- [ ] T027 [US1] Implement `format_listing_line(bookmark)` in `src/bookmarks/output.py` — exactly `{id}\t{url}\t{title}\t{tags}` plus `\n`, using `join_tags`, with the title reproduced verbatim including tabs and newlines and `""` for an absent title (FR-009, FR-017)
+-- [ ] T028 [US1] Wire the `add` and `list` command functions in `src/bookmarks/cli.py` in the fixed validation order argparse → SR-006 size limits → URL shape → database access; `add` prints only the identifier and nothing else to stdout, `list` streams one formatted line per bookmark to stdout and exits 0 even when the collection is empty (FR-006, FR-013, FR-018, contracts/cli-contract.md validation order)
++- [X] T023 [US1] Implement `validate_url(value)` in `src/bookmarks/cli.py` — allow-list: accept only a value beginning with the exact lowercase prefix `http://` or `https://` and **at most 8192 characters**; no reachability check, no DNS lookup, no network access; rejection returns status 2 **before** the database is opened (FR-008, FR-011, SR-002, SR-006)
++- [X] T024 [US1] Implement `parse_tags(raw)` in `src/bookmarks/cli.py` — split on `,`, strip leading/trailing whitespace from each entry, discard entries that are then empty, keep each distinct entry once; enforce raw string **at most 4096 characters**, **at most 64 tags**, each tag **at most 128 characters** (over-limit → status 2, nothing stored) (FR-010, FR-012, SR-006)
++- [X] T025 [US1] Implement `add_bookmark(conn, url, title, tags)` in `src/bookmarks/storage.py` — one `with conn:` transaction containing `INSERT INTO bookmarks(url, title) VALUES (?, ?)` followed by one `INSERT INTO bookmark_tags(bookmark_id, tag) VALUES (?, ?)` per tag, returning `cursor.lastrowid`; fixed statement strings with `?` placeholders only (FR-006, FR-007, SR-001, SR-009)
++- [X] T026 [US1] Implement the unfiltered read `list_bookmarks(conn)` in `src/bookmarks/storage.py` — the single statement `SELECT b.id, b.url, b.title, t.tag FROM bookmarks b LEFT JOIN bookmark_tags t ON t.bookmark_id = b.id ORDER BY b.id, t.tag`, returning the cursor for lazy iteration through `iter_bookmarks` (FR-013, FR-017, SR-007)
++- [X] T027 [US1] Implement `format_listing_line(bookmark)` in `src/bookmarks/output.py` — exactly `{id}\t{url}\t{title}\t{tags}` plus `\n`, using `join_tags`, with the title reproduced verbatim including tabs and newlines and `""` for an absent title (FR-009, FR-017)
++- [X] T028 [US1] Wire the `add` and `list` command functions in `src/bookmarks/cli.py` in the fixed validation order argparse → SR-006 size limits → URL shape → database access; `add` prints only the identifier and nothing else to stdout, `list` streams one formatted line per bookmark to stdout and exits 0 even when the collection is empty (FR-006, FR-013, FR-018, contracts/cli-contract.md validation order)
+ 
+ **Checkpoint**: User Story 1 is fully functional and independently testable — a usable bookmark manager.
+ 
+@@ -107,15 +107,15 @@ test harness that every user story needs
+ 
+ ### Tests for User Story 2 ⚠️
+ 
+-- [ ] T029 [P] [US2] Write `tests/integration/test_story2_search_and_tag_filter.py::test_search_is_case_insensitive_substring` and `::test_tag_filter_is_exact_and_case_sensitive` — `PYTHON` matches mixed-case titles and URLs (US2 AS1); `--tag python` excludes a bookmark tagged `Python`, and a matched bookmark still displays **all** of its tags (US2 AS2) (FR-014, FR-015)
+-- [ ] T030 [P] [US2] Write `tests/security/test_security_search_literal.py::test_percent_and_underscore_are_literal` and `::test_search_for_percent_does_not_match_row_without_percent` — searching `%` returns only the row whose title literally contains `%`, and no rows when none does (FR-016, SR-004, US2 AS4)
+-- [ ] T031 [P] [US2] Write `tests/contract/test_exit_statuses.py::test_no_match_prints_nothing_and_exits_zero` — a `list`, `list --tag` and `search` that match nothing leave stdout and stderr both empty with status 0 (FR-018, US2 AS3)
++- [X] T029 [P] [US2] Write `tests/integration/test_story2_search_and_tag_filter.py::test_search_is_case_insensitive_substring` and `::test_tag_filter_is_exact_and_case_sensitive` — `PYTHON` matches mixed-case titles and URLs (US2 AS1); `--tag python` excludes a bookmark tagged `Python`, and a matched bookmark still displays **all** of its tags (US2 AS2) (FR-014, FR-015)
++- [X] T030 [P] [US2] Write `tests/security/test_security_search_literal.py::test_percent_and_underscore_are_literal` and `::test_search_for_percent_does_not_match_row_without_percent` — searching `%` returns only the row whose title literally contains `%`, and no rows when none does (FR-016, SR-004, US2 AS4)
++- [X] T031 [P] [US2] Write `tests/contract/test_exit_statuses.py::test_no_match_prints_nothing_and_exits_zero` — a `list`, `list --tag` and `search` that match nothing leave stdout and stderr both empty with status 0 (FR-018, US2 AS3)
+ 
+ ### Implementation for User Story 2
+ 
+-- [ ] T032 [US2] Add the tag-filter variant to the read in `src/bookmarks/storage.py` — the T026 statement plus `WHERE b.id IN (SELECT bookmark_id FROM bookmark_tags WHERE tag = ?)`, so the subquery selects the bookmarks while the `LEFT JOIN` still returns every tag of each matched bookmark for display (FR-014, FR-017)
+-- [ ] T033 [US2] Implement `search_bookmarks(conn, text)` in `src/bookmarks/storage.py` — the T026 statement plus `WHERE instr(lower(b.title), lower(:text)) > 0 OR instr(lower(b.url), lower(:text)) > 0` with `:text` bound as a parameter; never `LIKE`, so `%` and `_` are structurally literal (FR-015, FR-016, SR-004, research.md R3)
+-- [ ] T034 [US2] Wire `list --tag TAG` and the `search TEXT` command in `src/bookmarks/cli.py`, enforcing search text **at most 1024 characters** before the database is opened and streaming results through `format_listing_line` in ascending id order (FR-014, FR-015, FR-018, SR-006)
++- [X] T032 [US2] Add the tag-filter variant to the read in `src/bookmarks/storage.py` — the T026 statement plus `WHERE b.id IN (SELECT bookmark_id FROM bookmark_tags WHERE tag = ?)`, so the subquery selects the bookmarks while the `LEFT JOIN` still returns every tag of each matched bookmark for display (FR-014, FR-017)
++- [X] T033 [US2] Implement `search_bookmarks(conn, text)` in `src/bookmarks/storage.py` — the T026 statement plus `WHERE instr(lower(b.title), lower(:text)) > 0 OR instr(lower(b.url), lower(:text)) > 0` with `:text` bound as a parameter; never `LIKE`, so `%` and `_` are structurally literal (FR-015, FR-016, SR-004, research.md R3)
++- [X] T034 [US2] Wire `list --tag TAG` and the `search TEXT` command in `src/bookmarks/cli.py`, enforcing search text **at most 1024 characters** before the database is opened and streaming results through `format_listing_line` in ascending id order (FR-014, FR-015, FR-018, SR-006)
+ 
+ **Checkpoint**: User Stories 1 and 2 both work independently.
+ 
+@@ -129,13 +129,13 @@ test harness that every user story needs
+ 
+ ### Tests for User Story 3 ⚠️
+ 
+-- [ ] T035 [P] [US3] Write `tests/integration/test_story3_delete.py::test_delete_removes_bookmark_and_its_tags`, `::test_delete_leaves_others_unchanged`, `::test_delete_missing_id_exits_three` and `::test_ids_increase_and_are_never_reused` — covering US3 AS1–AS4: no `bookmark_tags` row survives for the deleted id, survivors are byte-identical, a repeat delete gives status 3 with a stderr message and an unchanged collection, and ids 1,2,3 → delete 3 → next add is 4 (FR-007, FR-019, FR-020, FR-021)
+-- [ ] T036 [P] [US3] Write `tests/security/test_security_args.py::test_malformed_delete_id_exits_two` and `::test_every_malformed_argument_exits_two_without_writing` (delete/unknown-command/unknown-option cases) — `abc`, `1.5`, `-1`, `0` and an absent argument give status 2, and the database file is untouched (same mtime and size, or still absent) (FR-022, SR-003)
++- [X] T035 [P] [US3] Write `tests/integration/test_story3_delete.py::test_delete_removes_bookmark_and_its_tags`, `::test_delete_leaves_others_unchanged`, `::test_delete_missing_id_exits_three` and `::test_ids_increase_and_are_never_reused` — covering US3 AS1–AS4: no `bookmark_tags` row survives for the deleted id, survivors are byte-identical, a repeat delete gives status 3 with a stderr message and an unchanged collection, and ids 1,2,3 → delete 3 → next add is 4 (FR-007, FR-019, FR-020, FR-021)
++- [X] T036 [P] [US3] Write `tests/security/test_security_args.py::test_malformed_delete_id_exits_two` and `::test_every_malformed_argument_exits_two_without_writing` (delete/unknown-command/unknown-option cases) — `abc`, `1.5`, `-1`, `0` and an absent argument give status 2, and the database file is untouched (same mtime and size, or still absent) (FR-022, SR-003)
+ 
+ ### Implementation for User Story 3
+ 
+-- [ ] T037 [US3] Implement `delete_bookmark(conn, bookmark_id)` in `src/bookmarks/storage.py` — one `with conn:` transaction executing `DELETE FROM bookmarks WHERE id = ?`, relying on the already-enabled `PRAGMA foreign_keys = ON` and `ON DELETE CASCADE` to remove the tag associations in the same statement; read `cursor.rowcount` inside the transaction and raise `BookmarksError(status=3)` when it is 0 so nothing commits; no prior `SELECT` existence check (FR-019, FR-020, FR-021, SR-009, research.md R7)
+-- [ ] T038 [US3] Wire the `delete` command in `src/bookmarks/cli.py` using the `positive_id` argparse `type=` validator from T008 for the status-2 path and mapping the storage not-found error to status 3, keeping stdout empty on success and the stderr message to one line (FR-005, FR-019, FR-021, FR-022)
++- [X] T037 [US3] Implement `delete_bookmark(conn, bookmark_id)` in `src/bookmarks/storage.py` — one `with conn:` transaction executing `DELETE FROM bookmarks WHERE id = ?`, relying on the already-enabled `PRAGMA foreign_keys = ON` and `ON DELETE CASCADE` to remove the tag associations in the same statement; read `cursor.rowcount` inside the transaction and raise `BookmarksError(status=3)` when it is 0 so nothing commits; no prior `SELECT` existence check (FR-019, FR-020, FR-021, SR-009, research.md R7)
++- [X] T038 [US3] Wire the `delete` command in `src/bookmarks/cli.py` using the `positive_id` argparse `type=` validator from T008 for the status-2 path and mapping the storage not-found error to status 3, keeping stdout empty on success and the stderr message to one line (FR-005, FR-019, FR-021, FR-022)
+ 
+ **Checkpoint**: User Stories 1, 2 and 3 all work independently.
+ 
+@@ -149,16 +149,16 @@ test harness that every user story needs
+ 
+ ### Tests for User Story 4 ⚠️
+ 
+-- [ ] T039 [P] [US4] Write `tests/integration/test_story4_export.py::test_csv_header_and_rows`, `::test_json_array_shape`, `::test_special_characters_round_trip` and `::test_empty_collection_exports` — covering US4 AS1–AS4: first CSV line exactly `id,url,title,tags` with rows in id order and tags comma-joined and sorted inside the single `tags` field; `json.loads` gives a list of dicts with `id` an `int` and `tags` a sorted `list[str]`; a title with `,`, `"`, `\n` and non-ASCII recovered unchanged; empty collection gives header-only CSV and `[]` with status 0 (FR-023, FR-024, FR-025, FR-027)
+-- [ ] T040 [P] [US4] Write `tests/contract/test_output_formats.py::test_export_parses_with_stdlib_parsers` — the CSV output parses with `csv.reader` and the JSON output with `json.loads` on the first attempt, with `\n` line terminators (SC-006)
+-- [ ] T041 [US4] Add `tests/security/test_security_args.py::test_export_format_required_and_restricted` to the file created in T036 — a missing `--format` exits 2, and `xml`, `CSV` and `""` each exit 2 with no database write (FR-026, SR-003)
+-- [ ] T042 [P] [US4] Write `tests/security/test_security_streaming.py::test_export_of_50k_bookmarks_is_memory_bounded`, marked `slow` — seed at least 50,000 bookmarks, export under `tracemalloc`, assert peak stays below a fixed ceiling independent of collection size and compare the peak at 5k versus 50k to show no proportional growth (SR-007)
++- [X] T039 [P] [US4] Write `tests/integration/test_story4_export.py::test_csv_header_and_rows`, `::test_json_array_shape`, `::test_special_characters_round_trip` and `::test_empty_collection_exports` — covering US4 AS1–AS4: first CSV line exactly `id,url,title,tags` with rows in id order and tags comma-joined and sorted inside the single `tags` field; `json.loads` gives a list of dicts with `id` an `int` and `tags` a sorted `list[str]`; a title with `,`, `"`, `\n` and non-ASCII recovered unchanged; empty collection gives header-only CSV and `[]` with status 0 (FR-023, FR-024, FR-025, FR-027)
++- [X] T040 [P] [US4] Write `tests/contract/test_output_formats.py::test_export_parses_with_stdlib_parsers` — the CSV output parses with `csv.reader` and the JSON output with `json.loads` on the first attempt, with `\n` line terminators (SC-006)
++- [X] T041 [US4] Add `tests/security/test_security_args.py::test_export_format_required_and_restricted` to the file created in T036 — a missing `--format` exits 2, and `xml`, `CSV` and `""` each exit 2 with no database write (FR-026, SR-003)
++- [X] T042 [P] [US4] Write `tests/security/test_security_streaming.py::test_export_of_50k_bookmarks_is_memory_bounded`, marked `slow` — seed at least 50,000 bookmarks, export under `tracemalloc`, assert peak stays below a fixed ceiling independent of collection size and compare the peak at 5k versus 50k to show no proportional growth (SR-007)
+ 
+ ### Implementation for User Story 4
+ 
+-- [ ] T043 [US4] Implement `write_csv(bookmarks, stream)` in `src/bookmarks/output.py` — `csv.writer(stream, lineterminator="\n")`, write the header row `id,url,title,tags` then one `writerow` per bookmark **as it arrives from the generator**, with the `tags` field from `join_tags`; RFC 4180 quoting is left entirely to the writer and fields are **not** spreadsheet-hardened (a leading `=`/`+`/`-`/`@` is emitted as-is — documented deviation in plan.md Complexity Tracking) (FR-023, FR-025, FR-027, SR-007, research.md R6)
+-- [ ] T044 [US4] Implement `write_json(bookmarks, stream)` in `src/bookmarks/output.py` — emit `[`, then one `json.dumps({"id": ..., "url": ..., "title": ..., "tags": [...]}, ensure_ascii=False)` per bookmark separated by `,`, then `]`; `id` a JSON number, `title` a string (`""` when absent), `tags` an array of strings in ascending code-point order (`[]` when none); never `json.dumps` over a materialised list (FR-024, FR-025, FR-027, SR-007, research.md R6)
+-- [ ] T045 [US4] Wire the `export` command in `src/bookmarks/cli.py` — reuse the unfiltered read from T026 and dispatch on the already-validated `--format` to `write_csv` or `write_json`, streaming from the one cursor to stdout and exiting 0 (FR-023, FR-024, FR-027)
++- [X] T043 [US4] Implement `write_csv(bookmarks, stream)` in `src/bookmarks/output.py` — `csv.writer(stream, lineterminator="\n")`, write the header row `id,url,title,tags` then one `writerow` per bookmark **as it arrives from the generator**, with the `tags` field from `join_tags`; RFC 4180 quoting is left entirely to the writer and fields are **not** spreadsheet-hardened (a leading `=`/`+`/`-`/`@` is emitted as-is — documented deviation in plan.md Complexity Tracking) (FR-023, FR-025, FR-027, SR-007, research.md R6)
++- [X] T044 [US4] Implement `write_json(bookmarks, stream)` in `src/bookmarks/output.py` — emit `[`, then one `json.dumps({"id": ..., "url": ..., "title": ..., "tags": [...]}, ensure_ascii=False)` per bookmark separated by `,`, then `]`; `id` a JSON number, `title` a string (`""` when absent), `tags` an array of strings in ascending code-point order (`[]` when none); never `json.dumps` over a materialised list (FR-024, FR-025, FR-027, SR-007, research.md R6)
++- [X] T045 [US4] Wire the `export` command in `src/bookmarks/cli.py` — reuse the unfiltered read from T026 and dispatch on the already-validated `--format` to `write_csv` or `write_json`, streaming from the one cursor to stdout and exiting 0 (FR-023, FR-024, FR-027)
+ 
+ **Checkpoint**: All four user stories are independently functional.
+ 
+@@ -169,19 +169,19 @@ test harness that every user story needs
+ **Purpose**: The requirements that span every command — the full exit-status mapping, the
+ remaining security requirements, persistence and performance, and the gate audits
+ 
+-- [ ] T046 [P] Write `tests/contract/test_exit_statuses.py::test_every_successful_command_exits_zero` and `::test_error_status_and_stream_mapping` in the file started at T031 — all five commands return 0 on valid input; a parametrisation over every documented failure asserts the message is on stderr, stdout is clean of it, and the status matches the contracts/cli-contract.md table (1 / 2 / 3), including `delete abc` → 2 versus `delete 999` → 3 (FR-004, FR-005, SC-005)
+-- [ ] T047 [P] Write `tests/security/test_security_injection.py::test_sql_metacharacters_are_literal_text` — add `'); DROP TABLE bookmarks;--` as URL suffix, as title and as a tag, then search for it; the text is stored and returned verbatim, the `bookmarks` table still exists, and all other rows are intact (SR-001)
+-- [ ] T048 [P] Write `tests/security/test_security_limits.py::test_one_char_over_each_limit_is_rejected` — URL at 8193, title at 4097, `--tags` string at 4097 characters, 65 tags, a 129-character tag and search text at 1025 each give status 2 with nothing stored, while the boundary-exact values 8192 / 4096 / 64 / 128 / 1024 are accepted (SR-006)
+-- [ ] T049 [P] Write `tests/security/test_security_no_traceback.py::test_expected_failures_are_single_line_and_disclose_nothing` — for each of invalid URL, missing identifier, bad argument and unusable database, stderr is exactly one line containing no `Traceback`, no `sqlite3` and no `SELECT`/`INSERT`/`DELETE` (SR-008)
+-- [ ] T050 [P] Write `tests/security/test_security_atomicity.py::test_failed_add_leaves_no_partial_row_or_orphan_tag` — an `add` that fails validation, and an `add` whose tag insert is monkeypatched to raise mid-transaction, both leave zero `bookmarks` rows and zero `bookmark_tags` rows; a `delete` of a missing id commits nothing (SR-009)
+-- [ ] T051 [P] Write `tests/security/test_security_no_residual_files.py::test_no_temp_or_journal_files_remain` — after each of the five commands, and after a failing one, the database directory contains exactly the database file: no `-journal`, `-wal`, `-shm` or temporary file (SR-011)
+-- [ ] T052 [P] Write `tests/security/test_security_db_path.py` — a `--db` whose parent directory does not exist, a `--db` pointing at a directory, and a `--db` naming a file that is not a valid SQLite database each exit 1 with a one-line stderr message, create no directory tree, and never fall back to `bookmarks.db` (FR-002, spec Edge Cases, plan.md path-containment deviation)
+-- [ ] T053 [P] Write `tests/integration/test_persistence.py::test_missing_file_is_created_with_schema`, `::test_existing_file_is_reused` and `::test_thousand_mixed_commands_leave_expected_collection` — first use creates the file and schema, a second invocation sees the prior rows, and 1,000 scripted add/delete operations match a Python-side model exactly with zero lost or altered entries (FR-003, SC-003)
+-- [ ] T054 [P] Write `tests/integration/test_performance.py::test_each_command_under_one_second_at_10k`, marked `slow` — seed 10,000 bookmarks and bound each of the five commands with `perf_counter` under one second (SC-004)
+-- [ ] T055 Run `pytest` from the repository root and confirm zero failures and zero skips other than the POSIX-only file-mode guard (Constitution Test gate, SC-002)
+-- [ ] T056 Audit every row of `specs/001-bookmark-manager-cli/contracts/requirements-test-matrix.md` against the implemented suite — 27 FR + 11 SR = 38 requirements mapped to a passing test, each SR with its negative case; record any gap as a new task rather than a note (Principle III, Principle V, SC-002)
+-- [ ] T057 Run the quickstart.md scenarios 1–4 and the error-path spot checks by hand from a clean directory with `PYTHONPATH=src`, including `stat -c '%a' bookmarks.db` → `600`, and tick off quickstart.md's Definition of done
+-- [ ] T058 [P] Review the four shipped files (`src/bookmarks/__init__.py`, `__main__.py`, `cli.py`, `storage.py`, `output.py`) against Constitution principles I–V — no third-party runtime import, no swallowed exception or silent fallback, no untested requirement, no layer or abstraction beyond the plan's design, every baseline control met — and confirm plan.md's Complexity Tracking still lists exactly the one documented CSV deviation
++- [X] T046 [P] Write `tests/contract/test_exit_statuses.py::test_every_successful_command_exits_zero` and `::test_error_status_and_stream_mapping` in the file started at T031 — all five commands return 0 on valid input; a parametrisation over every documented failure asserts the message is on stderr, stdout is clean of it, and the status matches the contracts/cli-contract.md table (1 / 2 / 3), including `delete abc` → 2 versus `delete 999` → 3 (FR-004, FR-005, SC-005)
++- [X] T047 [P] Write `tests/security/test_security_injection.py::test_sql_metacharacters_are_literal_text` — add `'); DROP TABLE bookmarks;--` as URL suffix, as title and as a tag, then search for it; the text is stored and returned verbatim, the `bookmarks` table still exists, and all other rows are intact (SR-001)
++- [X] T048 [P] Write `tests/security/test_security_limits.py::test_one_char_over_each_limit_is_rejected` — URL at 8193, title at 4097, `--tags` string at 4097 characters, 65 tags, a 129-character tag and search text at 1025 each give status 2 with nothing stored, while the boundary-exact values 8192 / 4096 / 64 / 128 / 1024 are accepted (SR-006)
++- [X] T049 [P] Write `tests/security/test_security_no_traceback.py::test_expected_failures_are_single_line_and_disclose_nothing` — for each of invalid URL, missing identifier, bad argument and unusable database, stderr is exactly one line containing no `Traceback`, no `sqlite3` and no `SELECT`/`INSERT`/`DELETE` (SR-008)
++- [X] T050 [P] Write `tests/security/test_security_atomicity.py::test_failed_add_leaves_no_partial_row_or_orphan_tag` — an `add` that fails validation, and an `add` whose tag insert is monkeypatched to raise mid-transaction, both leave zero `bookmarks` rows and zero `bookmark_tags` rows; a `delete` of a missing id commits nothing (SR-009)
++- [X] T051 [P] Write `tests/security/test_security_no_residual_files.py::test_no_temp_or_journal_files_remain` — after each of the five commands, and after a failing one, the database directory contains exactly the database file: no `-journal`, `-wal`, `-shm` or temporary file (SR-011)
++- [X] T052 [P] Write `tests/security/test_security_db_path.py` — a `--db` whose parent directory does not exist, a `--db` pointing at a directory, and a `--db` naming a file that is not a valid SQLite database each exit 1 with a one-line stderr message, create no directory tree, and never fall back to `bookmarks.db` (FR-002, spec Edge Cases, plan.md path-containment deviation)
++- [X] T053 [P] Write `tests/integration/test_persistence.py::test_missing_file_is_created_with_schema`, `::test_existing_file_is_reused` and `::test_thousand_mixed_commands_leave_expected_collection` — first use creates the file and schema, a second invocation sees the prior rows, and 1,000 scripted add/delete operations match a Python-side model exactly with zero lost or altered entries (FR-003, SC-003)
++- [X] T054 [P] Write `tests/integration/test_performance.py::test_each_command_under_one_second_at_10k`, marked `slow` — seed 10,000 bookmarks and bound each of the five commands with `perf_counter` under one second (SC-004)
++- [X] T055 Run `pytest` from the repository root and confirm zero failures and zero skips other than the POSIX-only file-mode guard (Constitution Test gate, SC-002)
++- [X] T056 Audit every row of `specs/001-bookmark-manager-cli/contracts/requirements-test-matrix.md` against the implemented suite — 27 FR + 11 SR = 38 requirements mapped to a passing test, each SR with its negative case; record any gap as a new task rather than a note (Principle III, Principle V, SC-002)
++- [X] T057 Run the quickstart.md scenarios 1–4 and the error-path spot checks by hand from a clean directory with `PYTHONPATH=src`, including `stat -c '%a' bookmarks.db` → `600`, and tick off quickstart.md's Definition of done
++- [X] T058 [P] Review the four shipped files (`src/bookmarks/__init__.py`, `__main__.py`, `cli.py`, `storage.py`, `output.py`) against Constitution principles I–V — no third-party runtime import, no swallowed exception or silent fallback, no untested requirement, no layer or abstraction beyond the plan's design, every baseline control met — and confirm plan.md's Complexity Tracking still lists exactly the one documented CSV deviation
+ 
+ ---
+ 
+diff --git a/src/bookmarks/__init__.py b/src/bookmarks/__init__.py
+new file mode 100644
+index 0000000..ff898e7
+--- /dev/null
++++ b/src/bookmarks/__init__.py
+@@ -0,0 +1,3 @@
++"""Command-line bookmark manager (standard library only)."""
++
++__version__ = "1.0.0"
+diff --git a/src/bookmarks/__main__.py b/src/bookmarks/__main__.py
+new file mode 100644
+index 0000000..ba855d5
+--- /dev/null
++++ b/src/bookmarks/__main__.py
+@@ -0,0 +1,10 @@
++"""``python -m bookmarks`` entry point -- the only place the process exits."""
++
++from __future__ import annotations
++
++import sys
++
++from . import cli
++
++if __name__ == "__main__":
++    sys.exit(cli.main(sys.argv[1:]))
+diff --git a/src/bookmarks/cli.py b/src/bookmarks/cli.py
+new file mode 100644
+index 0000000..f7f5006
+--- /dev/null
++++ b/src/bookmarks/cli.py
+@@ -0,0 +1,247 @@
++"""Argument parsing, input validation and the five commands.
++
++Validation order is fixed: argparse-level parsing, then the size limits below (SR-006), then
++the URL shape (FR-008), and only then is the database touched. Every status-2 case is
++therefore decided before the collection is opened, so a rejected command performs no read and
++no write (SR-009).
++"""
++
++from __future__ import annotations
++
++import argparse
++import contextlib
++import sys
++
++from . import output, storage
++from .storage import BookmarksError
++
++# --- limits (SR-006) ---------------------------------------------------------------------
++
++MAX_URL_LENGTH = 8192
++MAX_TITLE_LENGTH = 4096
++MAX_TAGS_LENGTH = 4096
++MAX_TAG_COUNT = 64
++MAX_TAG_LENGTH = 128
++MAX_SEARCH_LENGTH = 1024
++
++# Supported identifier range: a decimal positive integer up to SQLite's maximum (SR-003).
++MIN_ID = 1
++MAX_ID = 2**63 - 1
++
++DEFAULT_DB = "bookmarks.db"
++URL_PREFIXES = ("http://", "https://")
++
++
++# --- argparse-level validators -----------------------------------------------------------
++
++
++def positive_id(value: str) -> int:
++    """Accept only a decimal positive integer in 1 ... 2^63-1 (FR-022, SR-003)."""
++    if not (value.isascii() and value.isdigit()):
++        raise argparse.ArgumentTypeError(
++            "identifier must be a positive whole number written in decimal digits"
++        )
++    number = int(value)
++    if not MIN_ID <= number <= MAX_ID:
++        raise argparse.ArgumentTypeError(
++            f"identifier must be between {MIN_ID} and {MAX_ID}"
++        )
++    return number
++
++
++class _Parser(argparse.ArgumentParser):
++    """An argparse parser whose errors are a single line on standard error.
++
++    argparse's status 2 and its stderr destination are kept exactly; only the multi-line
++    usage block is dropped, because SR-008 requires every expected failure to be one line.
++    """
++
++    def error(self, message: str) -> None:
++        self.exit(2, f"{self.prog}: error: {message}\n")
++
++
++def build_parser() -> _Parser:
++    """Build the command surface described in contracts/cli-contract.md (FR-001)."""
++    parser = _Parser(
++        prog="bookmarks",
++        description="Save, find, remove and export bookmarks.",
++    )
++    parser.add_argument(
++        "--db",
++        metavar="PATH",
++        default=DEFAULT_DB,
++        help=f"database file to use (default: {DEFAULT_DB} in the current directory)",
++    )
++    commands = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
++
++    add = commands.add_parser("add", help="store a bookmark and print its identifier")
++    add.add_argument("url", metavar="URL")
++    add.add_argument("--title", default="", metavar="TITLE")
++    add.add_argument("--tags", default=None, metavar="TAGS")
++
++    listing = commands.add_parser("list", help="print stored bookmarks")
++    listing.add_argument("--tag", default=None, metavar="TAG")
++
++    search = commands.add_parser("search", help="print bookmarks matching a substring")
++    search.add_argument("text", metavar="TEXT")
++
++    remove = commands.add_parser("delete", help="remove a bookmark by identifier")
++    remove.add_argument("id", metavar="ID", type=positive_id)
++
++    export = commands.add_parser("export", help="print the whole collection")
++    export.add_argument("--format", required=True, choices=("csv", "json"), dest="fmt")
++
++    return parser
++
++
++# --- input validation (SR-006) -----------------------------------------------------------
++
++
++def _check_length(value: str, limit: int, what: str) -> None:
++    if len(value) > limit:
++        raise BookmarksError(
++            f"{what} is too long: {len(value)} characters, at most {limit} allowed", 2
++        )
++
++
++def validate_url(value: str) -> str:
++    """Accept a URL only on an exact lowercase ``http://``/``https://`` prefix.
++
++    Allow-list only: no reachability check, no name lookup, no network access of any kind
++    (FR-008, FR-011, SR-002). The size limit is checked first (SR-006), and the whole check
++    happens before the collection is opened, so a refusal stores nothing.
++    """
++    _check_length(value, MAX_URL_LENGTH, "URL")
++    if not value.startswith(URL_PREFIXES):
++        raise BookmarksError(
++            "invalid URL: it must begin with the lowercase prefix 'http://' or 'https://'", 2
++        )
++    return value
++
++
++def parse_tags(raw: str | None) -> tuple[str, ...]:
++    """Parse ``--tags`` into the bookmark's set of distinct tags (FR-010, FR-012).
++
++    Split on commas, trim each entry, drop entries that are then empty, keep each distinct
++    entry once. The size limits of SR-006 are enforced here, before anything is stored.
++    """
++    if raw is None:
++        return ()
++    _check_length(raw, MAX_TAGS_LENGTH, "tag list")
++
++    tags: list[str] = []
++    for entry in raw.split(","):
++        tag = entry.strip()
++        if tag and tag not in tags:
++            tags.append(tag)
++
++    if len(tags) > MAX_TAG_COUNT:
++        raise BookmarksError(
++            f"too many tags: {len(tags)}, at most {MAX_TAG_COUNT} allowed", 2
++        )
++    for tag in tags:
++        _check_length(tag, MAX_TAG_LENGTH, "tag")
++    return tuple(tags)
++
++
++# --- commands ----------------------------------------------------------------------------
++
++
++def _open_collection(path: str):
++    connection = storage.connect(path)
++    storage.init_schema(connection)
++    return contextlib.closing(connection)
++
++
++def _write_listing(cursor) -> None:
++    for bookmark in storage.iter_bookmarks(cursor):
++        sys.stdout.write(output.format_listing_line(bookmark))
++
++
++def cmd_add(args: argparse.Namespace) -> int:
++    """Store one bookmark and print its identifier, and nothing else (FR-006).
++
++    Validation runs in the fixed order -- size limits, then URL shape -- and completes before
++    the collection is opened.
++    """
++    _check_length(args.title, MAX_TITLE_LENGTH, "title")
++    tags = parse_tags(args.tags)
++    url = validate_url(args.url)
++
++    with _open_collection(args.db) as connection:
++        bookmark_id = storage.add_bookmark(connection, url, args.title, tags)
++    sys.stdout.write(f"{bookmark_id}\n")
++    return 0
++
++
++def cmd_list(args: argparse.Namespace) -> int:
++    """Print stored bookmarks, filtered by ``--tag`` if given (FR-013, FR-014, FR-018)."""
++    with _open_collection(args.db) as connection:
++        if args.tag is None:
++            cursor = storage.list_bookmarks(connection)
++        else:
++            cursor = storage.list_bookmarks_with_tag(connection, args.tag)
++        _write_listing(cursor)
++    return 0
++
++
++def cmd_search(args: argparse.Namespace) -> int:
++    """Print bookmarks whose title or URL contains TEXT, case-insensitively (FR-015)."""
++    _check_length(args.text, MAX_SEARCH_LENGTH, "search text")
++
++    with _open_collection(args.db) as connection:
++        _write_listing(storage.search_bookmarks(connection, args.text))
++    return 0
++
++
++def cmd_delete(args: argparse.Namespace) -> int:
++    """Remove one bookmark; the identifier was validated by argparse (FR-019, FR-022)."""
++    with _open_collection(args.db) as connection:
++        storage.delete_bookmark(connection, args.id)
++    return 0
++
++
++def cmd_export(args: argparse.Namespace) -> int:
++    """Print the whole collection in the chosen format (FR-023, FR-024, FR-027).
++
++    The format was already restricted to ``csv``/``json`` by argparse.
++    """
++    write = output.write_csv if args.fmt == "csv" else output.write_json
++    with _open_collection(args.db) as connection:
++        write(storage.iter_bookmarks(storage.list_bookmarks(connection)), sys.stdout)
++    return 0
++
++
++COMMANDS = {
++    "add": cmd_add,
++    "list": cmd_list,
++    "search": cmd_search,
++    "delete": cmd_delete,
++    "export": cmd_export,
++}
++
++
++# --- entry point -------------------------------------------------------------------------
++
++
++def _configure_stdout() -> None:
++    """Write UTF-8 with ``\\n`` line endings, whatever the platform default is."""
++    reconfigure = getattr(sys.stdout, "reconfigure", None)
++    if reconfigure is not None:
++        reconfigure(encoding="utf-8", newline="\n")
++
++
++def main(argv: list[str]) -> int:
++    """Run one command and return its exit status; never calls ``sys.exit`` (FR-004, FR-005)."""
++    _configure_stdout()
++    parser = build_parser()
++    try:
++        args = parser.parse_args(argv)
++    except SystemExit as exc:
++        return exc.code if isinstance(exc.code, int) else 2
++
++    try:
++        return COMMANDS[args.command](args)
++    except BookmarksError as exc:
++        sys.stderr.write(f"{exc.message}\n")
++        return exc.status
+diff --git a/src/bookmarks/output.py b/src/bookmarks/output.py
+new file mode 100644
+index 0000000..4b8381b
+--- /dev/null
++++ b/src/bookmarks/output.py
+@@ -0,0 +1,72 @@
++"""Rendering of bookmarks: listing lines, CSV rows and a streaming JSON array."""
++
++from __future__ import annotations
++
++import csv
++import json
++from typing import Iterable
++
++from .storage import Bookmark
++
++CSV_HEADER = ("id", "url", "title", "tags")
++
++
++def join_tags(tags: tuple[str, ...]) -> str:
++    """Join tags with commas in ascending code-point order (FR-017, FR-023, FR-024).
++
++    Code-point order rather than locale collation, so uppercase sorts before lowercase:
++    ``{python, Docs}`` renders as ``Docs,python``. An empty tag set renders as ``""``.
++    """
++    return ",".join(sorted(tags))
++
++
++def format_listing_line(bookmark: Bookmark) -> str:
++    """Render one listing line: exactly four tab-separated fields (FR-017).
++
++    The title is reproduced verbatim, tabs and newlines included, and an absent title or tag
++    set is an empty field -- so a bookmark with neither ends the line in two tabs.
++    """
++    return (
++        f"{bookmark.id}\t{bookmark.url}\t{bookmark.title}\t{join_tags(bookmark.tags)}\n"
++    )
++
++
++def write_csv(bookmarks: Iterable[Bookmark], stream) -> None:
++    """Write the header row then one row per bookmark, as each one arrives (FR-023, SR-007).
++
++    Quoting is left entirely to the csv writer, which is what makes a field containing a
++    comma, a double quote or a newline round-trip through any standard parser (FR-025).
++    Fields are deliberately not spreadsheet-hardened -- see plan.md Complexity Tracking.
++    """
++    writer = csv.writer(stream, lineterminator="\n")
++    writer.writerow(CSV_HEADER)
++    for bookmark in bookmarks:
++        writer.writerow(
++            (bookmark.id, bookmark.url, bookmark.title, join_tags(bookmark.tags))
++        )
++
++
++def write_json(bookmarks: Iterable[Bookmark], stream) -> None:
++    """Write one JSON array, encoding each bookmark as it arrives (FR-024, SR-007).
++
++    The array punctuation is emitted directly and each element is encoded on its own, so the
++    whole collection is never held in memory at once. Escaping is left to the JSON encoder
++    (FR-025); non-ASCII text is written literally, which is valid UTF-8 JSON.
++    """
++    stream.write("[")
++    separator = ""
++    for bookmark in bookmarks:
++        stream.write(separator)
++        stream.write(
++            json.dumps(
++                {
++                    "id": bookmark.id,
++                    "url": bookmark.url,
++                    "title": bookmark.title,
++                    "tags": sorted(bookmark.tags),
++                },
++                ensure_ascii=False,
++            )
++        )
++        separator = ","
++    stream.write("]\n")
+diff --git a/src/bookmarks/storage.py b/src/bookmarks/storage.py
+new file mode 100644
+index 0000000..c925a79
+--- /dev/null
++++ b/src/bookmarks/storage.py
+@@ -0,0 +1,242 @@
++"""SQLite storage for one bookmark collection.
++
++Every statement in this module is a fixed string with ``?``/``:name`` placeholders; no SQL is
++ever assembled from user-supplied text (SR-001). Reads return a cursor that is iterated
++lazily, so memory does not grow with the collection (SR-007).
++"""
++
++from __future__ import annotations
++
++import os
++import sqlite3
++from dataclasses import dataclass
++from typing import Iterator
++
++# --- error carrier -----------------------------------------------------------------------
++
++
++class BookmarksError(Exception):
++    """A failure that maps to one of the specified exit statuses.
++
++    ``status`` is 1 for an unusable database or other failure, 2 for invalid input and 3 for
++    a removal naming an identifier that does not exist (FR-005).
++    """
++
++    def __init__(self, message: str, status: int = 1) -> None:
++        super().__init__(message)
++        self.message = message
++        self.status = status
++
++
++# --- entity ------------------------------------------------------------------------------
++
++
++@dataclass(frozen=True)
++class Bookmark:
++    """One stored bookmark with its tag set already in display order."""
++
++    id: int
++    url: str
++    title: str
++    tags: tuple[str, ...]
++
++
++# --- schema ------------------------------------------------------------------------------
++
++SCHEMA_STATEMENTS: tuple[str, ...] = (
++    """
++    CREATE TABLE IF NOT EXISTS bookmarks (
++        id    INTEGER PRIMARY KEY AUTOINCREMENT,
++        url   TEXT NOT NULL,
++        title TEXT NOT NULL DEFAULT ''
++    )
++    """,
++    """
++    CREATE TABLE IF NOT EXISTS bookmark_tags (
++        bookmark_id INTEGER NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE,
++        tag         TEXT NOT NULL,
++        PRIMARY KEY (bookmark_id, tag)
++    ) WITHOUT ROWID
++    """,
++    "CREATE INDEX IF NOT EXISTS idx_bookmark_tags_tag ON bookmark_tags(tag)",
++)
++
++UNUSABLE_DATABASE = "cannot use the database file"
++
++
++def connect(path: str) -> sqlite3.Connection:
++    """Open (creating if absent) the collection at ``path``.
++
++    A file that does not exist yet is created with owner-only permissions *before* SQLite
++    first opens it, so the mode is set at creation time rather than by a later change
++    (SR-005). An existing file's mode is left untouched. Any path that cannot be used is an
++    error with status 1 -- never a silent fallback to the default path and never an empty
++    collection (FR-002, FR-003).
++    """
++    if not os.path.exists(path):
++        try:
++            handle = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
++        except FileExistsError:
++            pass  # appeared between the check and the create; its mode is left untouched
++        except (FileNotFoundError, NotADirectoryError) as exc:
++            raise BookmarksError(
++                f"cannot create the database file {path!r}: its directory does not exist",
++                1,
++            ) from exc
++        except IsADirectoryError as exc:
++            raise BookmarksError(
++                f"cannot use the database file {path!r}: it is a directory", 1
++            ) from exc
++        except PermissionError as exc:
++            raise BookmarksError(
++                f"cannot create the database file {path!r}: permission denied", 1
++            ) from exc
++        except OSError as exc:
++            raise BookmarksError(f"cannot create the database file {path!r}", 1) from exc
++        else:
++            os.close(handle)
++
++    try:
++        connection = sqlite3.connect(path)
++        # Forces the file header to be read, so a file that is not a database (or a path
++        # that cannot be opened at all) fails here rather than mid-command.
++        connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
++    except sqlite3.Error as exc:
++        raise BookmarksError(f"{UNUSABLE_DATABASE} {path!r}", 1) from exc
++    return connection
++
++
++def init_schema(connection: sqlite3.Connection) -> None:
++    """Enable foreign keys on this connection and apply the schema if it is absent."""
++    try:
++        connection.execute("PRAGMA foreign_keys = ON")
++        with connection:
++            for statement in SCHEMA_STATEMENTS:
++                connection.execute(statement)
++    except sqlite3.Error as exc:
++        raise BookmarksError(UNUSABLE_DATABASE, 1) from exc
++
++
++# --- statements --------------------------------------------------------------------------
++
++INSERT_BOOKMARK_SQL = "INSERT INTO bookmarks(url, title) VALUES (?, ?)"
++INSERT_TAG_SQL = "INSERT INTO bookmark_tags(bookmark_id, tag) VALUES (?, ?)"
++REMOVE_BOOKMARK_SQL = "DELETE FROM bookmarks WHERE id = ?"
++
++_READ_SELECT = (
++    "SELECT b.id, b.url, b.title, t.tag "
++    "FROM bookmarks b LEFT JOIN bookmark_tags t ON t.bookmark_id = b.id"
++)
++_READ_ORDER = " ORDER BY b.id, t.tag"
++
++LIST_SQL = _READ_SELECT + _READ_ORDER
++
++# The subquery selects which bookmarks match; the LEFT JOIN still returns every tag of each
++# matched bookmark, which is what FR-014 and FR-017 together require.
++LIST_BY_TAG_SQL = (
++    _READ_SELECT
++    + " WHERE b.id IN (SELECT bookmark_id FROM bookmark_tags WHERE tag = ?)"
++    + _READ_ORDER
++)
++
++# instr() has no pattern language, so '%' and '_' in the needle are literal by construction
++# (FR-016, SR-004); lower() on both sides gives the case-insensitive match of FR-015.
++SEARCH_SQL = (
++    _READ_SELECT
++    + " WHERE instr(lower(b.title), lower(:text)) > 0"
++    + " OR instr(lower(b.url), lower(:text)) > 0"
++    + _READ_ORDER
++)
++
++
++# --- writes ------------------------------------------------------------------------------
++
++
++def add_bookmark(
++    connection: sqlite3.Connection, url: str, title: str, tags: tuple[str, ...]
++) -> int:
++    """Store one bookmark and its tags in a single transaction, returning its identifier.
++
++    The bookmark row and every tag association commit together or not at all (SR-009). The
++    identifier comes from the engine's own monotonic sequence, so it is never reused after a
++    removal (FR-007).
++    """
++    try:
++        with connection:
++            cursor = connection.execute(INSERT_BOOKMARK_SQL, (url, title))
++            bookmark_id = cursor.lastrowid
++            for tag in tags:
++                connection.execute(INSERT_TAG_SQL, (bookmark_id, tag))
++    except sqlite3.Error as exc:
++        raise BookmarksError("could not store the bookmark; nothing was changed", 1) from exc
++    return int(bookmark_id)
++
++
++def delete_bookmark(connection: sqlite3.Connection, bookmark_id: int) -> None:
++    """Remove one bookmark and, by the declared cascade, its tag associations.
++
++    The affected-row count is read inside the transaction, so an identifier that no bookmark
++    holds raises before anything commits (FR-019, FR-021, SR-009).
++    """
++    try:
++        with connection:
++            cursor = connection.execute(REMOVE_BOOKMARK_SQL, (bookmark_id,))
++            if cursor.rowcount == 0:
++                raise BookmarksError(f"no bookmark has identifier {bookmark_id}", 3)
++    except BookmarksError:
++        raise
++    except sqlite3.Error as exc:
++        raise BookmarksError("could not change the collection; nothing was changed", 1) from exc
++
++
++# --- reads -------------------------------------------------------------------------------
++
++
++def list_bookmarks(connection: sqlite3.Connection) -> sqlite3.Cursor:
++    """Return a cursor over every bookmark's rows, ordered by identifier then tag."""
++    return _read(connection, LIST_SQL, ())
++
++
++def list_bookmarks_with_tag(connection: sqlite3.Connection, tag: str) -> sqlite3.Cursor:
++    """Return a cursor over the bookmarks carrying ``tag`` exactly (FR-014)."""
++    return _read(connection, LIST_BY_TAG_SQL, (tag,))
++
++
++def search_bookmarks(connection: sqlite3.Connection, text: str) -> sqlite3.Cursor:
++    """Return a cursor over the bookmarks whose title or URL contains ``text`` (FR-015)."""
++    return _read(connection, SEARCH_SQL, {"text": text})
++
++
++def _read(connection: sqlite3.Connection, statement: str, parameters) -> sqlite3.Cursor:
++    try:
++        return connection.execute(statement, parameters)
++    except sqlite3.Error as exc:
++        raise BookmarksError(UNUSABLE_DATABASE, 1) from exc
++
++
++# --- row streaming -----------------------------------------------------------------------
++
++
++def iter_bookmarks(cursor: sqlite3.Cursor) -> Iterator[Bookmark]:
++    """Group adjacent ``(id, url, title, tag)`` rows into bookmarks, lazily.
++
++    The engine supplies the rows ordered by ``(id, tag)``, so a bookmark is complete as soon
++    as the identifier changes and at most one bookmark's tags are held in memory (SR-007). A
++    bookmark with no tags arrives as one row whose ``tag`` is NULL and yields an empty tag
++    set, which renders as an empty fourth field (FR-017).
++    """
++    current_id: int | None = None
++    url = ""
++    title = ""
++    tags: list[str] = []
++
++    for row_id, row_url, row_title, tag in cursor:
++        if row_id != current_id:
++            if current_id is not None:
++                yield Bookmark(current_id, url, title, tuple(tags))
++            current_id, url, title, tags = row_id, row_url, row_title, []
++        if tag is not None:
++            tags.append(tag)
++
++    if current_id is not None:
++        yield Bookmark(current_id, url, title, tuple(tags))
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000..4199b2d
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,98 @@
++"""Shared fixtures: the in-process command runner and a temporary database path.
++
++Commands are invoked by calling ``bookmarks.cli.main(argv)`` directly, which returns an exit
++status instead of exiting, so a whole scenario costs microseconds. No test in this suite runs
++another process (research.md R10).
++"""
++
++from __future__ import annotations
++
++import os
++import sqlite3
++
++import pytest
++
++from bookmarks import cli, storage
++
++
++@pytest.fixture
++def run(capsys):
++    """Return ``run(*argv) -> (status, stdout, stderr)``."""
++
++    def _run(*argv: str) -> tuple[int, str, str]:
++        status = cli.main(list(argv))
++        captured = capsys.readouterr()
++        return status, captured.out, captured.err
++
++    return _run
++
++
++@pytest.fixture
++def db(tmp_path) -> str:
++    """A database path inside a fresh temporary directory; the file is not created yet."""
++    return str(tmp_path / "bookmarks.db")
++
++
++@pytest.fixture
++def bulk_seed():
++    """Return ``bulk_seed(path, count, tags_per=2)`` for the scale cases.
++
++    Seeding goes straight to SQL because the scale tests measure the read path, not the
++    cost of ``count`` separate invocations.
++    """
++
++    def _seed(path: str, count: int, tags_per: int = 2) -> None:
++        connection = storage.connect(path)
++        storage.init_schema(connection)
++        try:
++            with connection:
++                connection.executemany(
++                    storage.INSERT_BOOKMARK_SQL,
++                    ((f"https://example.com/{n}", f"Title {n}") for n in range(count)),
++                )
++                connection.executemany(
++                    storage.INSERT_TAG_SQL,
++                    (
++                        (bookmark_id, f"tag{index}")
++                        for bookmark_id in range(1, count + 1)
++                        for index in range(tags_per)
++                    ),
++                )
++        finally:
++            connection.close()
++
++    return _seed
++
++
++def _query(path: str, statement: str) -> list[tuple]:
++    if not os.path.exists(path):
++        return []
++    connection = sqlite3.connect(path)
++    try:
++        return connection.execute(statement).fetchall()
++    except sqlite3.DatabaseError:  # not a readable collection at all
++        return []
++    finally:
++        connection.close()
++
++
++@pytest.fixture
++def stored_bookmarks():
++    """Return ``stored_bookmarks(path) -> [(id, url, title), ...]`` read straight from SQL."""
++
++    def _stored(path: str) -> list[tuple]:
++        return _query(path, "SELECT id, url, title FROM bookmarks ORDER BY id")
++
++    return _stored
++
++
++@pytest.fixture
++def stored_tag_links():
++    """Return ``stored_tag_links(path) -> [(bookmark_id, tag), ...]`` read straight from SQL."""
++
++    def _stored(path: str) -> list[tuple]:
++        return _query(
++            path, "SELECT bookmark_id, tag FROM bookmark_tags ORDER BY bookmark_id, tag"
++        )
++
++    return _stored
+diff --git a/tests/contract/test_cli_surface.py b/tests/contract/test_cli_surface.py
+new file mode 100644
+index 0000000..367b777
+--- /dev/null
++++ b/tests/contract/test_cli_surface.py
+@@ -0,0 +1,43 @@
++"""FR-001: the command surface is exactly the five documented subcommands, run as a module."""
++
++from __future__ import annotations
++
++import pathlib
++import runpy
++
++import pytest
++
++from bookmarks import cli
++
++SOURCE_DIR = pathlib.Path(cli.__file__).parent
++
++INVOCATIONS = (
++    ("add", "https://example.com"),
++    ("list",),
++    ("search", "text"),
++    ("delete", "1"),
++    ("export", "--format", "csv"),
++)
++
++
++@pytest.mark.parametrize("argv", INVOCATIONS, ids=[argv[0] for argv in INVOCATIONS])
++def test_five_subcommands_exist(argv):
++    args = cli.build_parser().parse_args(list(argv))
++    assert args.command == argv[0]
++    assert args.db == "bookmarks.db"
++
++
++def test_no_sixth_subcommand():
++    with pytest.raises(SystemExit) as raised:
++        cli.build_parser().parse_args(["frobnicate"])
++    assert raised.value.code == 2
++
++
++def test_module_is_runnable():
++    # Executed under a name other than "__main__" so the guarded entry call does not run:
++    # this proves the module imports cleanly and holds the entry point.
++    namespace = runpy.run_module("bookmarks.__main__", run_name="not_main")
++    assert callable(namespace["cli"].main)
++    source = (SOURCE_DIR / "__main__.py").read_text(encoding="utf-8")
++    assert 'if __name__ == "__main__":' in source
++    assert "sys.exit(cli.main(sys.argv[1:]))" in source
+diff --git a/tests/contract/test_exit_statuses.py b/tests/contract/test_exit_statuses.py
+new file mode 100644
+index 0000000..bceed0c
+--- /dev/null
++++ b/tests/contract/test_exit_statuses.py
+@@ -0,0 +1,141 @@
++"""Contract: the exit-status and stream mapping of contracts/cli-contract.md.
++
++Started by User Story 2 with the empty-result rule (FR-018); the full mapping is appended in
++the Polish phase.
++"""
++
++from __future__ import annotations
++
++import os
++
++import pytest
++
++from bookmarks import cli
++
++NO_MATCH_COMMANDS = (
++    ("list",),
++    ("list", "--tag", "absent"),
++    ("search", "zzzznothing"),
++)
++
++
++@pytest.mark.parametrize(
++    "command", NO_MATCH_COMMANDS, ids=[" ".join(c) for c in NO_MATCH_COMMANDS]
++)
++def test_no_match_prints_nothing_and_exits_zero(command, run, db):
++    """US2 AS3 / FR-018: an empty collection, then a populated one that still matches none."""
++    status, out, err = run("--db", db, *command)
++    assert (status, out, err) == (0, "", "")
++
++    run("--db", db, "add", "https://a.example", "--title", "A", "--tags", "x")
++
++    status, out, err = run("--db", db, *command)
++    if command == ("list",):
++        assert (status, err) == (0, "")
++        assert out == "1\thttps://a.example\tA\tx\n"
++    else:
++        assert (status, out, err) == (0, "", "")
++
++
++SUCCESSFUL_COMMANDS = (
++    ("add", "https://new.example", "--title", "T", "--tags", "a,b"),
++    ("list",),
++    ("list", "--tag", "x"),
++    ("search", "a"),
++    ("delete", "1"),
++    ("export", "--format", "csv"),
++    ("export", "--format", "json"),
++)
++
++
++@pytest.mark.parametrize(
++    "command", SUCCESSFUL_COMMANDS, ids=[" ".join(c) for c in SUCCESSFUL_COMMANDS]
++)
++def test_every_successful_command_exits_zero(command, run, db):
++    """FR-004: all five commands return 0 on valid input."""
++    run("--db", db, "add", "https://a.example", "--title", "A", "--tags", "x")
++
++    status, out, err = run("--db", db, *command)
++
++    assert status == 0
++    assert err == ""
++
++
++# (database key, argv after the database option, expected status). The keys are resolved by
++# the `paths` fixture below; "db" is a usable collection holding one bookmark.
++ERROR_CASES = {
++    "unknown command": ("db", ("frobnicate",), 2),
++    "no command": ("db", (), 2),
++    "unknown option": ("db", ("list", "--nope"), 2),
++    "missing argument": ("db", ("add",), 2),
++    "invalid url": ("db", ("add", "ftp://example.com"), 2),
++    "malformed id": ("db", ("delete", "abc"), 2),
++    "zero id": ("db", ("delete", "0"), 2),
++    "missing format": ("db", ("export",), 2),
++    "unsupported format": ("db", ("export", "--format", "xml"), 2),
++    "oversized url": ("db", ("add", "https://a.example/" + "x" * 8192), 2),
++    "oversized title": ("db", ("add", "https://a.example", "--title", "t" * 4097), 2),
++    "oversized search": ("db", ("search", "s" * 1025), 2),
++    "absent id": ("db", ("delete", "999"), 3),
++    "missing parent directory": ("missing_parent", ("list",), 1),
++    "not a database": ("corrupt", ("list",), 1),
++    "database is a directory": ("directory", ("list",), 1),
++}
++
++
++@pytest.fixture
++def paths(tmp_path, run):
++    usable = str(tmp_path / "bookmarks.db")
++    run("--db", usable, "add", "https://a.example", "--title", "A", "--tags", "x")
++
++    corrupt = tmp_path / "corrupt.db"
++    corrupt.write_bytes(b"this file is not a database at all\n" * 32)
++
++    directory = tmp_path / "a-directory"
++    directory.mkdir()
++
++    return {
++        "db": usable,
++        "missing_parent": str(tmp_path / "no-such-directory" / "x.db"),
++        "corrupt": str(corrupt),
++        "directory": str(directory),
++    }
++
++
++@pytest.mark.parametrize("name", list(ERROR_CASES))
++def test_error_status_and_stream_mapping(name, run, paths):
++    """FR-005 / SC-005: the status, the stream and the single-line message of every failure."""
++    key, argv, expected = ERROR_CASES[name]
++
++    status, out, err = run("--db", paths[key], *argv)
++
++    assert status == expected
++    assert out == ""
++    assert len(err.splitlines()) == 1
++    assert err.endswith("\n")
++
++
++def test_malformed_id_is_two_and_absent_id_is_three(run, db):
++    """The status 2 versus status 3 distinction of the contract."""
++    run("--db", db, "add", "https://a.example")
++
++    assert run("--db", db, "delete", "abc")[0] == 2
++    assert run("--db", db, "delete", "999")[0] == 3
++    assert run("--db", db, "delete", "1")[0] == 0
++
++
++def test_statuses_are_only_zero_one_two_three(run, paths):
++    seen = {run("--db", paths["db"], "list")[0]}
++    for key, argv, _expected in ERROR_CASES.values():
++        seen.add(run("--db", paths[key], *argv)[0])
++
++    assert seen <= {0, 1, 2, 3}
++
++
++def test_main_returns_a_status_and_never_exits(db):
++    """The entry point returns; only __main__ exits (FR-004, research.md R5)."""
++    assert cli.main(["--db", db, "add", "https://a.example"]) == 0
++    assert cli.main(["--db", db, "list"]) == 0
++    assert cli.main(["--db", db, "delete", "999"]) == 3
++    assert cli.main(["--db", db, "add", "ftp://x"]) == 2
++    assert os.path.exists(db)
+diff --git a/tests/contract/test_output_formats.py b/tests/contract/test_output_formats.py
+new file mode 100644
+index 0000000..01cc0dc
+--- /dev/null
++++ b/tests/contract/test_output_formats.py
+@@ -0,0 +1,67 @@
++"""Contract: the listing format (FR-017, SC-006) and the export formats (SC-006).
++
++The export half of this module is appended by User Story 4.
++"""
++
++from __future__ import annotations
++
++import csv
++import io
++import json
++
++
++def test_listing_is_four_tab_separated_fields(run, db):
++    run("--db", db, "add", "https://docs.python.org", "--title", "Python docs",
++        "--tags", "python,docs")
++    run("--db", db, "add", "https://example.com")
++
++    status, out, err = run("--db", db, "list")
++
++    assert status == 0
++    assert err == ""
++    lines = out.split("\n")
++    assert lines[-1] == ""  # exactly one trailing newline, no blank final line
++    assert lines[:-1] == [
++        "1\thttps://docs.python.org\tPython docs\tdocs,python",
++        "2\thttps://example.com\t\t",
++    ]
++
++
++def test_listing_splits_into_four_fields(run, db):
++    run("--db", db, "add", "https://a.example", "--title", "A", "--tags", "x")
++    run("--db", db, "add", "https://b.example")
++
++    status, out, err = run("--db", db, "list")
++
++    assert status == 0
++    for line in out.splitlines():
++        assert len(line.split("\t")) == 4
++    assert out.splitlines()[1].endswith("\t\t")
++    assert "id\turl" not in out  # no header row
++
++
++def test_tags_sorted_by_code_point(run, db):
++    run("--db", db, "add", "https://a.example", "--tags", "python,Docs,zebra,Apple")
++
++    status, out, err = run("--db", db, "list")
++
++    assert status == 0
++    assert out.rstrip("\n").split("\t")[3] == "Apple,Docs,python,zebra"
++
++
++def test_export_parses_with_stdlib_parsers(run, db):
++    """SC-006: both formats parse with the standard parsers on the first attempt."""
++    run("--db", db, "add", "https://a.example", "--title", 'He said "hi", then\nleft',
++        "--tags", "b,a")
++    run("--db", db, "add", "https://b.example")
++
++    status, out, err = run("--db", db, "export", "--format", "csv")
++    assert status == 0
++    rows = list(csv.reader(io.StringIO(out)))
++    assert len(rows) == 3
++    assert all(len(row) == 4 for row in rows)
++    assert "\r" not in out  # \n line terminators, not the csv module's default \r\n
++
++    status, out, err = run("--db", db, "export", "--format", "json")
++    assert status == 0
++    assert len(json.loads(out)) == 2
+diff --git a/tests/integration/test_performance.py b/tests/integration/test_performance.py
+new file mode 100644
+index 0000000..0149684
+--- /dev/null
++++ b/tests/integration/test_performance.py
+@@ -0,0 +1,48 @@
++"""SC-004: every command on a 10,000-bookmark collection completes in under one second."""
++
++from __future__ import annotations
++
++import sys
++from time import perf_counter
++
++import pytest
++
++from bookmarks import cli
++
++COUNT = 10_000
++LIMIT_SECONDS = 1.0
++
++COMMANDS = (
++    ("add", "https://new.example", "--title", "T", "--tags", "a,b"),
++    ("list",),
++    ("list", "--tag", "tag0"),
++    ("search", "Title 9999"),
++    ("delete", "5000"),
++    ("export", "--format", "csv"),
++    ("export", "--format", "json"),
++)
++
++
++class _DiscardingStream:
++    """Output is discarded so the measurement is the command, not the capture buffer."""
++
++    def write(self, text: str) -> int:
++        return len(text)
++
++    def flush(self) -> None:
++        pass
++
++
++@pytest.mark.slow
++@pytest.mark.parametrize("command", COMMANDS, ids=[" ".join(c) for c in COMMANDS])
++def test_each_command_under_one_second_at_10k(command, tmp_path, bulk_seed, monkeypatch):
++    path = str(tmp_path / "big.db")
++    bulk_seed(path, COUNT)
++    monkeypatch.setattr(sys, "stdout", _DiscardingStream())
++
++    started = perf_counter()
++    status = cli.main(["--db", path, *command])
++    elapsed = perf_counter() - started
++
++    assert status == 0
++    assert elapsed < LIMIT_SECONDS, f"{' '.join(command)} took {elapsed:.3f}s"
+diff --git a/tests/integration/test_persistence.py b/tests/integration/test_persistence.py
+new file mode 100644
+index 0000000..4acbbcc
+--- /dev/null
++++ b/tests/integration/test_persistence.py
+@@ -0,0 +1,104 @@
++"""FR-003 and SC-003: the collection persists, and a long run of commands stays exact."""
++
++from __future__ import annotations
++
++import os
++import random
++import sqlite3
++
++
++def _schema_objects(path: str) -> set[str]:
++    connection = sqlite3.connect(path)
++    try:
++        rows = connection.execute("SELECT name FROM sqlite_master").fetchall()
++    finally:
++        connection.close()
++    return {row[0] for row in rows}
++
++
++def test_missing_file_is_created_with_schema(run, tmp_path):
++    path = str(tmp_path / "fresh.db")
++    assert not os.path.exists(path)
++
++    status, out, err = run("--db", path, "list")
++
++    assert (status, out, err) == (0, "", "")
++    assert os.path.exists(path)
++    objects = _schema_objects(path)
++    assert {"bookmarks", "bookmark_tags", "idx_bookmark_tags_tag"} <= objects
++
++
++def test_existing_file_is_reused(run, db):
++    run("--db", db, "add", "https://a.example", "--title", "A", "--tags", "x,y")
++    first = os.stat(db).st_ino
++
++    # A later, independent invocation sees the earlier one's rows ...
++    status, out, err = run("--db", db, "list")
++    assert out == "1\thttps://a.example\tA\tx,y\n"
++
++    # ... and adds to the same file rather than replacing it.
++    run("--db", db, "add", "https://b.example")
++    assert os.stat(db).st_ino == first
++    assert len(run("--db", db, "list")[1].splitlines()) == 2
++
++
++def test_two_paths_are_two_independent_collections(run, tmp_path):
++    one = str(tmp_path / "one.db")
++    two = str(tmp_path / "two.db")
++
++    run("--db", one, "add", "https://a.example")
++    run("--db", one, "add", "https://b.example")
++    run("--db", two, "add", "https://c.example")
++
++    assert run("--db", one, "list")[1].count("\n") == 2
++    assert run("--db", two, "list")[1] == "1\thttps://c.example\t\t\n"
++
++
++def test_thousand_mixed_commands_leave_expected_collection(run, db):
++    """SC-003: 1,000 scripted operations against a Python-side model of the collection."""
++    rng = random.Random(20261120)
++    model: dict[int, tuple[str, str, tuple[str, ...]]] = {}
++    next_id = 1
++    adds = deletes = misses = 0
++
++    for step in range(1000):
++        if not model or rng.random() < 0.7:
++            url = f"https://example.com/{step}"
++            title = f"Title {step}" if step % 3 else ""
++            tags = tuple(sorted({f"tag{rng.randrange(5)}" for _ in range(rng.randrange(4))}))
++            argv = ["--db", db, "add", url]
++            if title:
++                argv += ["--title", title]
++            if tags:
++                argv += ["--tags", ",".join(tags)]
++
++            status, out, err = run(*argv)
++            assert (status, err) == (0, ""), (step, err)
++            assert out == f"{next_id}\n", step
++            model[next_id] = (url, title, tags)
++            next_id += 1
++            adds += 1
++        elif rng.random() < 0.85:
++            identifier = rng.choice(sorted(model))
++            status, out, err = run("--db", db, "delete", str(identifier))
++            assert (status, out, err) == (0, "", ""), (step, err)
++            del model[identifier]
++            deletes += 1
++        else:
++            absent = next_id + rng.randrange(1, 100)
++            status, out, err = run("--db", db, "delete", str(absent))
++            assert status == 3, step
++            misses += 1
++
++    assert adds + deletes + misses == 1000
++    assert adds and deletes and misses  # all three kinds really occurred
++
++    expected = "".join(
++        f"{identifier}\t{url}\t{title}\t{','.join(sorted(tags))}\n"
++        for identifier, (url, title, tags) in sorted(model.items())
++    )
++    status, out, err = run("--db", db, "list")
++
++    assert (status, err) == (0, "")
++    assert out == expected
++    assert len(out.splitlines()) == len(model)
+diff --git a/tests/integration/test_story1_add_and_list.py b/tests/integration/test_story1_add_and_list.py
+new file mode 100644
+index 0000000..48b5977
+--- /dev/null
++++ b/tests/integration/test_story1_add_and_list.py
+@@ -0,0 +1,115 @@
++"""User Story 1 (P1) acceptance scenarios AS1-AS5: save a bookmark and see it again later."""
++
++from __future__ import annotations
++
++import os
++
++
++def test_add_prints_only_the_identifier(run, db):
++    """US1 AS1 / FR-006: stdout is exactly the identifier and a newline."""
++    status, out, err = run(
++        "--db", db, "add", "https://docs.python.org", "--title", "Python docs",
++        "--tags", "python,docs",
++    )
++
++    assert status == 0
++    assert out == "1\n"
++    assert err == ""
++
++    status, out, err = run("--db", db, "add", "https://example.com")
++    assert status == 0
++    assert out == "2\n"
++    assert err == ""
++
++
++def test_db_option_is_used(run, tmp_path):
++    """FR-002: the collection lives in the file named by --db."""
++    first = str(tmp_path / "one.db")
++    second = str(tmp_path / "two.db")
++
++    run("--db", first, "add", "https://a.example")
++    run("--db", second, "add", "https://b.example")
++
++    assert os.path.exists(first) and os.path.exists(second)
++
++    status, out, err = run("--db", first, "list")
++    assert out == "1\thttps://a.example\t\t\n"
++    status, out, err = run("--db", second, "list")
++    assert out == "1\thttps://b.example\t\t\n"
++
++
++def test_default_db_is_cwd_bookmarks_db(run, tmp_path, monkeypatch):
++    """FR-002: with no --db, the collection is bookmarks.db in the current directory."""
++    monkeypatch.chdir(tmp_path)
++
++    status, out, err = run("add", "https://a.example")
++
++    assert status == 0
++    assert (tmp_path / "bookmarks.db").exists()
++    assert not (tmp_path / "one.db").exists()
++
++    status, out, err = run("list")
++    assert out == "1\thttps://a.example\t\t\n"
++
++
++def test_list_prints_all_in_id_order(run, db):
++    """US1 AS3 / FR-013: every stored bookmark, ascending identifier order."""
++    for name in ("c", "a", "b"):
++        run("--db", db, "add", f"https://{name}.example", "--title", name.upper())
++
++    status, out, err = run("--db", db, "list")
++
++    assert status == 0
++    assert err == ""
++    assert out == (
++        "1\thttps://c.example\tC\t\n"
++        "2\thttps://a.example\tA\t\n"
++        "3\thttps://b.example\tB\t\n"
++    )
++
++
++def test_data_survives_process_exit(run, db):
++    """US1 AS2 / FR-003: a later invocation sees what an earlier one stored."""
++    run("--db", db, "add", "https://a.example", "--title", "A", "--tags", "x,y")
++    run("--db", db, "add", "https://b.example")
++
++    # Each run() is a complete, independent invocation of main(): nothing is carried in
++    # memory between them.
++    status, out, err = run("--db", db, "list")
++
++    assert status == 0
++    assert out == (
++        "1\thttps://a.example\tA\tx,y\n"
++        "2\thttps://b.example\t\t\n"
++    )
++
++
++def test_first_add_needs_no_setup(run, tmp_path):
++    """SC-001: a fresh directory, one command, no initialisation step."""
++    path = str(tmp_path / "fresh.db")
++
++    status, out, err = run("--db", path, "add", "https://a.example")
++
++    assert (status, out, err) == (0, "1\n", "")
++
++
++def test_rejected_add_leaves_the_collection_unchanged(run, db):
++    """US1 AS5 / FR-008: an unsupported scheme is refused with status 2 and stores nothing."""
++    run("--db", db, "add", "https://a.example")
++    run("--db", db, "add", "https://b.example")
++
++    status, out, err = run("--db", db, "add", "ftp://example.com")
++
++    assert status == 2
++    assert out == ""
++    assert len(err.splitlines()) == 1
++
++    status, out, err = run("--db", db, "list")
++    assert len(out.splitlines()) == 2
++
++
++def test_empty_collection_lists_nothing_and_succeeds(run, db):
++    """FR-018: nothing to show is a success, not an error."""
++    status, out, err = run("--db", db, "list")
++
++    assert (status, out, err) == (0, "", "")
+diff --git a/tests/integration/test_story2_search_and_tag_filter.py b/tests/integration/test_story2_search_and_tag_filter.py
+new file mode 100644
+index 0000000..27bb16c
+--- /dev/null
++++ b/tests/integration/test_story2_search_and_tag_filter.py
+@@ -0,0 +1,84 @@
++"""User Story 2 (P2) acceptance scenarios AS1-AS4: find a bookmark among many."""
++
++from __future__ import annotations
++
++import pytest
++
++
++@pytest.fixture
++def seeded(run, db):
++    """A collection with mixed-case titles, URLs and tags."""
++    run("--db", db, "add", "https://PYTHON.org/downloads", "--title", "Downloads",
++        "--tags", "python")
++    run("--db", db, "add", "https://example.org/x", "--title", "Python Tutorial",
++        "--tags", "Python,docs")
++    run("--db", db, "add", "https://example.org/y", "--title", "100% coverage",
++        "--tags", "Testing")
++    run("--db", db, "add", "https://example.org/z", "--title", "nothing relevant")
++    return db
++
++
++def test_search_is_case_insensitive_substring(seeded, run):
++    """US2 AS1 / FR-015: PYTHON matches mixed-case titles and URLs, in id order."""
++    status, out, err = run("--db", seeded, "search", "PYTHON")
++
++    assert status == 0
++    assert err == ""
++    assert [line.split("\t")[0] for line in out.splitlines()] == ["1", "2"]
++
++    # The same two rows whatever the case of the needle.
++    for needle in ("python", "Python", "pYtHoN"):
++        status, out, err = run("--db", seeded, "search", needle)
++        assert [line.split("\t")[0] for line in out.splitlines()] == ["1", "2"]
++
++
++def test_search_matches_url_only_rows(seeded, run):
++    status, out, err = run("--db", seeded, "search", "downloads")
++
++    assert status == 0
++    assert [line.split("\t")[0] for line in out.splitlines()] == ["1"]
++
++
++def test_tag_filter_is_exact_and_case_sensitive(seeded, run):
++    """US2 AS2 / FR-014: --tag python excludes the bookmark tagged Python."""
++    status, out, err = run("--db", seeded, "list", "--tag", "python")
++
++    assert status == 0
++    assert err == ""
++    assert out == "1\thttps://PYTHON.org/downloads\tDownloads\tpython\n"
++
++    status, out, err = run("--db", seeded, "list", "--tag", "Python")
++    assert out == "2\thttps://example.org/x\tPython Tutorial\tPython,docs\n"
++
++
++def test_tag_filtered_row_shows_all_of_its_tags(seeded, run):
++    """FR-014 + FR-017: filtering selects bookmarks, it does not hide their other tags."""
++    status, out, err = run("--db", seeded, "list", "--tag", "docs")
++
++    assert status == 0
++    assert out.rstrip("\n").split("\t")[3] == "Python,docs"
++
++
++def test_tag_filter_is_not_a_substring_match(seeded, run):
++    status, out, err = run("--db", seeded, "list", "--tag", "py")
++
++    assert (status, out, err) == (0, "", "")
++
++
++def test_search_and_filter_results_are_in_id_order(seeded, run):
++    run("--db", seeded, "add", "https://aaa.example/python", "--tags", "python")
++
++    status, out, err = run("--db", seeded, "search", "python")
++    assert [line.split("\t")[0] for line in out.splitlines()] == ["1", "2", "5"]
++
++    status, out, err = run("--db", seeded, "list", "--tag", "python")
++    assert [line.split("\t")[0] for line in out.splitlines()] == ["1", "5"]
++
++
++def test_no_match_is_a_success(seeded, run):
++    """US2 AS3 / FR-018."""
++    status, out, err = run("--db", seeded, "search", "zzzznothing")
++    assert (status, out, err) == (0, "", "")
++
++    status, out, err = run("--db", seeded, "list", "--tag", "zzzznothing")
++    assert (status, out, err) == (0, "", "")
+diff --git a/tests/integration/test_story3_delete.py b/tests/integration/test_story3_delete.py
+new file mode 100644
+index 0000000..5c22ec1
+--- /dev/null
++++ b/tests/integration/test_story3_delete.py
+@@ -0,0 +1,86 @@
++"""User Story 3 (P3) acceptance scenarios AS1-AS4: remove a bookmark."""
++
++from __future__ import annotations
++
++import pytest
++
++
++@pytest.fixture
++def three(run, db):
++    run("--db", db, "add", "https://a.example", "--title", "A", "--tags", "x,y")
++    run("--db", db, "add", "https://b.example", "--title", "B", "--tags", "y,z")
++    run("--db", db, "add", "https://c.example", "--title", "C")
++    return db
++
++
++def test_delete_removes_bookmark_and_its_tags(three, run, stored_bookmarks, stored_tag_links):
++    """US3 AS1 / FR-019: the bookmark and its tag associations go, and only those."""
++    status, out, err = run("--db", three, "delete", "2")
++
++    assert status == 0
++    assert out == ""
++    assert err == ""
++    assert [row[0] for row in stored_bookmarks(three)] == [1, 3]
++    assert stored_tag_links(three) == [(1, "x"), (1, "y")]
++    assert all(link[0] != 2 for link in stored_tag_links(three))
++
++
++def test_delete_leaves_others_unchanged(three, run):
++    """US3 AS1 / FR-020: survivors keep their identifiers, URLs, titles and tags."""
++    before = run("--db", three, "list")[1].splitlines()
++
++    status, out, err = run("--db", three, "delete", "2")
++    assert status == 0
++
++    after = run("--db", three, "list")[1].splitlines()
++    assert after == [line for line in before if not line.startswith("2\t")]
++    assert after == ["1\thttps://a.example\tA\tx,y", "3\thttps://c.example\tC\t"]
++
++
++def test_delete_missing_id_exits_three(three, run, stored_bookmarks, stored_tag_links):
++    """US3 AS2 / FR-021: a well-formed but absent identifier is status 3 and changes nothing."""
++    run("--db", three, "delete", "2")
++    before = stored_bookmarks(three)
++    before_tags = stored_tag_links(three)
++
++    status, out, err = run("--db", three, "delete", "2")
++
++    assert status == 3
++    assert out == ""
++    assert len(err.splitlines()) == 1
++    assert stored_bookmarks(three) == before
++    assert stored_tag_links(three) == before_tags
++
++    status, out, err = run("--db", three, "delete", "999")
++    assert status == 3
++    assert stored_bookmarks(three) == before
++
++
++def test_delete_on_empty_collection_exits_three(run, db):
++    status, out, err = run("--db", db, "delete", "1")
++
++    assert status == 3
++    assert out == ""
++    assert len(err.splitlines()) == 1
++
++
++def test_ids_increase_and_are_never_reused(three, run):
++    """US3 AS3 / FR-007: ids 1,2,3 -> delete 3 -> the next add is 4."""
++    status, out, err = run("--db", three, "delete", "3")
++    assert status == 0
++
++    status, out, err = run("--db", three, "add", "https://d.example")
++    assert (status, out) == (0, "4\n")
++
++    # And after removing every bookmark, allocation still moves forward.
++    for identifier in ("1", "2", "4"):
++        assert run("--db", three, "delete", identifier)[0] == 0
++    assert run("--db", three, "list")[1] == ""
++    assert run("--db", three, "add", "https://e.example")[1] == "5\n"
++
++
++def test_delete_of_each_id_in_turn_keeps_the_rest(three, run, stored_bookmarks):
++    assert run("--db", three, "delete", "1")[0] == 0
++    assert [row[0] for row in stored_bookmarks(three)] == [2, 3]
++    assert run("--db", three, "delete", "3")[0] == 0
++    assert [row[0] for row in stored_bookmarks(three)] == [2]
+diff --git a/tests/integration/test_story4_export.py b/tests/integration/test_story4_export.py
+new file mode 100644
+index 0000000..bc9f7ea
+--- /dev/null
++++ b/tests/integration/test_story4_export.py
+@@ -0,0 +1,105 @@
++"""User Story 4 (P4) acceptance scenarios AS1-AS4: hand the collection to another tool."""
++
++from __future__ import annotations
++
++import csv
++import io
++import json
++
++import pytest
++
++AWKWARD_TITLE = 'Comma, "quote" and\nnewline -- ünïcödé ✓'
++
++
++@pytest.fixture
++def seeded(run, db):
++    run("--db", db, "add", "https://docs.python.org", "--title", "Python docs",
++        "--tags", "python,docs")
++    run("--db", db, "add", "https://example.com")
++    run("--db", db, "add", "https://b.example", "--title", "B only tags",
++        "--tags", "zebra,Apple")
++    return db
++
++
++def test_csv_header_and_rows(seeded, run):
++    """US4 AS1 / FR-023."""
++    status, out, err = run("--db", seeded, "export", "--format", "csv")
++
++    assert status == 0
++    assert err == ""
++    assert out.splitlines()[0] == "id,url,title,tags"
++
++    rows = list(csv.reader(io.StringIO(out)))
++    assert rows[0] == ["id", "url", "title", "tags"]
++    assert rows[1] == ["1", "https://docs.python.org", "Python docs", "docs,python"]
++    assert rows[2] == ["2", "https://example.com", "", ""]
++    assert rows[3] == ["3", "https://b.example", "B only tags", "Apple,zebra"]
++    assert [row[0] for row in rows[1:]] == ["1", "2", "3"]
++
++
++def test_csv_tags_are_one_quoted_field(seeded, run):
++    status, out, err = run("--db", seeded, "export", "--format", "csv")
++
++    assert '"docs,python"' in out
++    assert len(list(csv.reader(io.StringIO(out)))[1]) == 4
++
++
++def test_json_array_shape(seeded, run):
++    """US4 AS2 / FR-024."""
++    status, out, err = run("--db", seeded, "export", "--format", "json")
++
++    assert status == 0
++    assert err == ""
++    parsed = json.loads(out)
++    assert isinstance(parsed, list)
++    assert [type(item) for item in parsed] == [dict, dict, dict]
++    assert [item["id"] for item in parsed] == [1, 2, 3]
++    for item in parsed:
++        assert set(item) == {"id", "url", "title", "tags"}
++        assert isinstance(item["id"], int) and not isinstance(item["id"], bool)
++        assert isinstance(item["url"], str)
++        assert isinstance(item["title"], str)
++        assert isinstance(item["tags"], list)
++        assert all(isinstance(tag, str) for tag in item["tags"])
++        assert item["tags"] == sorted(item["tags"])
++    assert parsed[0]["tags"] == ["docs", "python"]
++    assert parsed[1] == {"id": 2, "url": "https://example.com", "title": "", "tags": []}
++    assert parsed[2]["tags"] == ["Apple", "zebra"]
++
++
++def test_special_characters_round_trip(run, db):
++    """US4 AS3 / FR-025: a comma, a double quote, a newline and non-ASCII all survive."""
++    run("--db", db, "add", "https://x.example/a,b", "--title", AWKWARD_TITLE, "--tags", "b,a")
++
++    status, out, err = run("--db", db, "export", "--format", "csv")
++    assert status == 0
++    row = list(csv.reader(io.StringIO(out)))[1]
++    assert row == ["1", "https://x.example/a,b", AWKWARD_TITLE, "a,b"]
++
++    status, out, err = run("--db", db, "export", "--format", "json")
++    assert status == 0
++    item = json.loads(out)[0]
++    assert item["title"] == AWKWARD_TITLE
++    assert item["url"] == "https://x.example/a,b"
++    assert item["tags"] == ["a", "b"]
++
++
++def test_non_ascii_is_emitted_literally_in_json(run, db):
++    run("--db", db, "add", "https://x.example", "--title", "ünïcödé")
++
++    status, out, err = run("--db", db, "export", "--format", "json")
++
++    assert "ünïcödé" in out
++    assert "\\u00fc" not in out
++
++
++def test_empty_collection_exports(run, db):
++    """US4 AS4 / FR-027."""
++    status, out, err = run("--db", db, "export", "--format", "csv")
++    assert (status, err) == (0, "")
++    assert out == "id,url,title,tags\n"
++
++    status, out, err = run("--db", db, "export", "--format", "json")
++    assert (status, err) == (0, "")
++    assert out.strip() == "[]"
++    assert json.loads(out) == []
+diff --git a/tests/security/test_security_args.py b/tests/security/test_security_args.py
+new file mode 100644
+index 0000000..e3756b7
+--- /dev/null
++++ b/tests/security/test_security_args.py
+@@ -0,0 +1,115 @@
++"""SR-003 / FR-022: every argument is validated before use, and a refusal writes nothing.
++
++The export half of this module is appended by User Story 4.
++"""
++
++from __future__ import annotations
++
++import os
++
++import pytest
++
++MALFORMED_IDS = (
++    "abc",
++    "1.5",
++    "-1",
++    "0",
++    "",
++    " 1",
++    "+1",
++    "0x1",
++    "1e3",
++    "١٢",  # Arabic-Indic digits: not decimal ASCII
++    "9223372036854775808",  # 2**63, one past the supported range
++    "999999999999999999999999",
++)
++
++MALFORMED_COMMANDS = (
++    ("delete", "abc"),
++    ("delete",),
++    ("frobnicate",),
++    (),
++    ("list", "--nope"),
++    ("add",),
++    ("add", "https://a.example", "--nope", "x"),
++    ("search",),
++    ("list", "--tag"),
++)
++
++
++def _fingerprint(path: str):
++    if not os.path.exists(path):
++        return None
++    info = os.stat(path)
++    return (info.st_size, info.st_mtime_ns)
++
++
++@pytest.mark.parametrize("identifier", MALFORMED_IDS)
++def test_malformed_delete_id_exits_two(identifier, run, db, stored_bookmarks):
++    run("--db", db, "add", "https://a.example", "--title", "A", "--tags", "x")
++    before = _fingerprint(db)
++
++    status, out, err = run("--db", db, "delete", identifier)
++
++    assert status == 2
++    assert out == ""
++    assert len(err.splitlines()) == 1
++    assert _fingerprint(db) == before
++    assert [row[0] for row in stored_bookmarks(db)] == [1]
++
++
++@pytest.mark.parametrize(
++    "command", MALFORMED_COMMANDS, ids=[" ".join(c) or "(no command)" for c in MALFORMED_COMMANDS]
++)
++def test_every_malformed_argument_exits_two_without_writing(command, run, db):
++    """The refusal happens before the collection is opened, so the file is never created."""
++    status, out, err = run("--db", db, *command)
++
++    assert status == 2
++    assert out == ""
++    assert len(err.splitlines()) == 1
++    assert not os.path.exists(db)
++
++
++@pytest.mark.parametrize(
++    "command", MALFORMED_COMMANDS, ids=[" ".join(c) or "(no command)" for c in MALFORMED_COMMANDS]
++)
++def test_malformed_argument_leaves_an_existing_file_untouched(command, run, db):
++    run("--db", db, "add", "https://a.example")
++    before = _fingerprint(db)
++
++    status, out, err = run("--db", db, *command)
++
++    assert status == 2
++    assert _fingerprint(db) == before
++
++
++BAD_FORMATS = ("xml", "CSV", "JSON", "", "csv,json", "Csv", "yaml")
++
++
++@pytest.mark.parametrize("value", BAD_FORMATS, ids=[value or "(empty)" for value in BAD_FORMATS])
++def test_export_format_required_and_restricted(value, run, db):
++    """FR-026 / SR-003: --format is required and accepts only csv or json."""
++    status, out, err = run("--db", db, "export", "--format", value)
++
++    assert status == 2
++    assert out == ""
++    assert len(err.splitlines()) == 1
++    assert not os.path.exists(db)
++
++
++def test_export_without_format_exits_two(run, db):
++    status, out, err = run("--db", db, "export")
++
++    assert status == 2
++    assert out == ""
++    assert len(err.splitlines()) == 1
++    assert not os.path.exists(db)
++
++
++def test_db_option_must_precede_the_command(run, db):
++    status, out, err = run("add", "https://a.example", "--db", db)
++
++    assert status == 2
++    assert out == ""
++    assert not os.path.exists(db)
+diff --git a/tests/security/test_security_atomicity.py b/tests/security/test_security_atomicity.py
+new file mode 100644
+index 0000000..e6975d7
+--- /dev/null
++++ b/tests/security/test_security_atomicity.py
+@@ -0,0 +1,81 @@
++"""SR-009: a rejected or failed command leaves the collection exactly as it was."""
++
++from __future__ import annotations
++
++from bookmarks import storage
++
++
++def test_failed_add_leaves_no_partial_row_or_orphan_tag(
++    run, db, monkeypatch, stored_bookmarks, stored_tag_links
++):
++    # 1. A refusal during validation never reaches the collection at all.
++    status, out, err = run("--db", db, "add", "ftp://example.com", "--tags", "a,b")
++    assert status == 2
++    assert stored_bookmarks(db) == []
++    assert stored_tag_links(db) == []
++
++    # 2. A write that fails part-way through rolls the whole bookmark back: the tag insert
++    #    is pointed at a table that does not exist, so it raises after the bookmark row has
++    #    been inserted inside the same transaction.
++    monkeypatch.setattr(
++        storage,
++        "INSERT_TAG_SQL",
++        "INSERT INTO no_such_table(bookmark_id, tag) VALUES (?, ?)",
++    )
++
++    status, out, err = run("--db", db, "add", "https://a.example", "--tags", "a,b")
++
++    assert status == 1
++    assert out == ""
++    assert len(err.splitlines()) == 1
++    assert stored_bookmarks(db) == []
++    assert stored_tag_links(db) == []
++
++    monkeypatch.undo()
++
++    # 3. And the collection is still usable afterwards.
++    status, out, err = run("--db", db, "add", "https://a.example", "--tags", "a,b")
++    assert status == 0
++    assert len(stored_bookmarks(db)) == 1
++    assert len(stored_tag_links(db)) == 2
++
++
++def test_failed_add_after_existing_rows_keeps_them(
++    run, db, monkeypatch, stored_bookmarks, stored_tag_links
++):
++    run("--db", db, "add", "https://kept.example", "--title", "kept", "--tags", "keep")
++    before = stored_bookmarks(db)
++    before_tags = stored_tag_links(db)
++
++    monkeypatch.setattr(
++        storage,
++        "INSERT_TAG_SQL",
++        "INSERT INTO no_such_table(bookmark_id, tag) VALUES (?, ?)",
++    )
++
++    assert run("--db", db, "add", "https://b.example", "--tags", "a")[0] == 1
++
++    assert stored_bookmarks(db) == before
++    assert stored_tag_links(db) == before_tags
++
++
++def test_delete_of_a_missing_id_commits_nothing(run, db, stored_bookmarks, stored_tag_links):
++    run("--db", db, "add", "https://a.example", "--tags", "x")
++    before = stored_bookmarks(db)
++    before_tags = stored_tag_links(db)
++
++    status, out, err = run("--db", db, "delete", "999")
++
++    assert status == 3
++    assert stored_bookmarks(db) == before
++    assert stored_tag_links(db) == before_tags
++
++
++def test_tag_associations_never_outlive_their_bookmark(run, db, stored_tag_links):
++    """The declared cascade is live, so no orphan association can survive a removal."""
++    run("--db", db, "add", "https://a.example", "--tags", "x,y")
++    run("--db", db, "add", "https://b.example", "--tags", "y,z")
++
++    assert run("--db", db, "delete", "1")[0] == 0
++
++    assert stored_tag_links(db) == [(2, "y"), (2, "z")]
+diff --git a/tests/security/test_security_db_path.py b/tests/security/test_security_db_path.py
+new file mode 100644
+index 0000000..14fa3f3
+--- /dev/null
++++ b/tests/security/test_security_db_path.py
+@@ -0,0 +1,81 @@
++"""FR-002 and the spec's Edge Cases: an unusable --db path is an error, never a fallback.
++
++``--db`` is a first-party operator argument with no allowed base directory to confine it to
++(plan.md's documented path-containment deviation), so what is asserted here is that a path
++that cannot be used fails loudly: status 1, one line on standard error, no directory tree
++created, and never a quiet switch to the default collection.
++"""
++
++from __future__ import annotations
++
++import os
++
++import pytest
++
++
++def test_missing_parent_directory_is_an_error(run, tmp_path, monkeypatch):
++    monkeypatch.chdir(tmp_path)
++    target = tmp_path / "no-such-directory" / "x.db"
++
++    status, out, err = run("--db", str(target), "list")
++
++    assert status == 1
++    assert out == ""
++    assert len(err.splitlines()) == 1
++    assert not (tmp_path / "no-such-directory").exists()
++    assert not (tmp_path / "bookmarks.db").exists()  # no silent fallback
++    assert sorted(os.listdir(tmp_path)) == []
++
++
++def test_path_that_is_a_directory_is_an_error(run, tmp_path, monkeypatch):
++    monkeypatch.chdir(tmp_path)
++    target = tmp_path / "a-directory"
++    target.mkdir()
++
++    status, out, err = run("--db", str(target), "list")
++
++    assert status == 1
++    assert out == ""
++    assert len(err.splitlines()) == 1
++    assert target.is_dir()
++    assert sorted(os.listdir(target)) == []
++    assert not (tmp_path / "bookmarks.db").exists()
++
++
++def test_file_that_is_not_a_database_is_an_error(run, tmp_path, monkeypatch):
++    monkeypatch.chdir(tmp_path)
++    target = tmp_path / "not-a-db.txt"
++    original = b"just some text, definitely not a database\n" * 64
++    target.write_bytes(original)
++
++    status, out, err = run("--db", str(target), "list")
++
++    assert status == 1
++    assert out == ""
++    assert len(err.splitlines()) == 1
++    assert target.read_bytes() == original  # not rewritten, not truncated
++    assert not (tmp_path / "bookmarks.db").exists()  # never an empty collection instead
++
++
++@pytest.mark.parametrize(
++    "command",
++    (("list",), ("search", "x"), ("add", "https://a.example"), ("delete", "1"),
++     ("export", "--format", "csv")),
++    ids=lambda command: command[0],
++)
++def test_every_command_reports_an_unusable_path(command, run, tmp_path):
++    target = tmp_path / "no-such-directory" / "x.db"
++
++    status, out, err = run("--db", str(target), *command)
++
++    assert status == 1
++    assert out == ""
++    assert len(err.splitlines()) == 1
++
++
++def test_a_usable_path_still_works_after_a_failure(run, tmp_path):
++    """The error path leaves no state that would spoil the next, valid invocation."""
++    assert run("--db", str(tmp_path / "nope" / "x.db"), "list")[0] == 1
++
++    good = str(tmp_path / "good.db")
++    assert run("--db", good, "add", "https://a.example") == (0, "1\n", "")
+diff --git a/tests/security/test_security_file_mode.py b/tests/security/test_security_file_mode.py
+new file mode 100644
+index 0000000..0b57c9a
+--- /dev/null
++++ b/tests/security/test_security_file_mode.py
+@@ -0,0 +1,48 @@
++"""SR-005: the database file is owner-read/write only, set at creation time."""
++
++from __future__ import annotations
++
++import os
++
++import pytest
++
++from bookmarks import storage
++
++posix_only = pytest.mark.skipif(
++    os.name != "posix", reason="file mode bits are a POSIX concept (plan.md Target Platform)"
++)
++
++
++@posix_only
++def test_file_mode_is_0600(run, db, tmp_path):
++    status, out, err = run("--db", db, "list")
++
++    assert status == 0
++    path = tmp_path / "bookmarks.db"
++    assert path.exists()
++    assert path.stat().st_mode & 0o777 == 0o600
++
++
++@posix_only
++def test_mode_is_set_at_creation_and_not_rechmodded(tmp_path):
++    path = tmp_path / "fresh.db"
++
++    connection = storage.connect(str(path))
++    try:
++        # Asserted before any schema is written, i.e. at creation time, not afterwards.
++        assert path.stat().st_mode & 0o777 == 0o600
++        storage.init_schema(connection)
++        assert path.stat().st_mode & 0o777 == 0o600
++    finally:
++        connection.close()
++
++
++@posix_only
++def test_existing_file_mode_is_left_untouched(tmp_path):
++    path = tmp_path / "existing.db"
++    path.touch(mode=0o640)
++
++    connection = storage.connect(str(path))
++    connection.close()
++
++    assert path.stat().st_mode & 0o777 == 0o640
+diff --git a/tests/security/test_security_injection.py b/tests/security/test_security_injection.py
+new file mode 100644
+index 0000000..431a5e7
+--- /dev/null
++++ b/tests/security/test_security_injection.py
+@@ -0,0 +1,74 @@
++"""SR-001: user text is data, never SQL -- every statement is parameterised."""
++
++from __future__ import annotations
++
++import csv
++import io
++import json
++import sqlite3
++
++PAYLOAD = "'); DROP TABLE bookmarks;--"
++assert "," not in PAYLOAD  # so it survives tag parsing as one tag
++
++
++def _table_names(path: str) -> set[str]:
++    connection = sqlite3.connect(path)
++    try:
++        rows = connection.execute(
++            "SELECT name FROM sqlite_master WHERE type = 'table'"
++        ).fetchall()
++    finally:
++        connection.close()
++    return {row[0] for row in rows}
++
++
++def test_sql_metacharacters_are_literal_text(run, db, stored_bookmarks, stored_tag_links):
++    run("--db", db, "add", "https://kept.example", "--title", "kept", "--tags", "keep")
++
++    status, out, err = run(
++        "--db", db,
++        "add", f"https://a.example/{PAYLOAD}",
++        "--title", PAYLOAD,
++        "--tags", PAYLOAD,
++    )
++
++    assert status == 0
++    assert out == "2\n"
++
++    # The schema survived and the first bookmark is still there.
++    assert {"bookmarks", "bookmark_tags"} <= _table_names(db)
++    assert [row[0] for row in stored_bookmarks(db)] == [1, 2]
++    assert stored_bookmarks(db)[0] == (1, "https://kept.example", "kept")
++
++    # The payload came back verbatim, as data.
++    assert stored_bookmarks(db)[1] == (2, f"https://a.example/{PAYLOAD}", PAYLOAD)
++    assert (2, PAYLOAD) in stored_tag_links(db)
++
++    status, out, err = run("--db", db, "search", PAYLOAD)
++    assert status == 0
++    fields = out.rstrip("\n").split("\t")
++    assert fields[0] == "2"
++    assert fields[2] == PAYLOAD
++
++
++def test_payload_in_a_tag_filter_matches_nothing_and_breaks_nothing(run, db):
++    run("--db", db, "add", "https://kept.example", "--tags", "keep")
++
++    status, out, err = run("--db", db, "list", "--tag", PAYLOAD)
++
++    assert (status, out, err) == (0, "", "")
++    assert {"bookmarks", "bookmark_tags"} <= _table_names(db)
++    assert run("--db", db, "list")[1] == "1\thttps://kept.example\t\tkeep\n"
++
++
++def test_payload_exports_as_data(run, db):
++    run("--db", db, "add", "https://a.example", "--title", PAYLOAD)
++
++    status, out, err = run("--db", db, "export", "--format", "csv")
++    assert status == 0
++    assert list(csv.reader(io.StringIO(out)))[1][2] == PAYLOAD
++
++    status, out, err = run("--db", db, "export", "--format", "json")
++    assert status == 0
++    assert json.loads(out)[0]["title"] == PAYLOAD
++    assert {"bookmarks", "bookmark_tags"} <= _table_names(db)
+diff --git a/tests/security/test_security_limits.py b/tests/security/test_security_limits.py
+new file mode 100644
+index 0000000..a9bd0aa
+--- /dev/null
++++ b/tests/security/test_security_limits.py
+@@ -0,0 +1,106 @@
++"""SR-006: every input has an enforced maximum size, and one character over is refused.
++
++Each case violates exactly one limit, so the test names the control it exercises.
++"""
++
++from __future__ import annotations
++
++import os
++
++import pytest
++
++from bookmarks import cli
++
++URL_PREFIX = "https://a.example/"
++
++
++def _url_of_length(total: int) -> str:
++    return URL_PREFIX + "u" * (total - len(URL_PREFIX))
++
++
++def _tags_string_of_length(total: int) -> str:
++    """A ``--tags`` string of exactly ``total`` characters within every other limit."""
++    count = cli.MAX_TAG_COUNT
++    body = total - (count - 1)  # characters left for the tag text itself
++    base, extra = divmod(body, count)
++    tags = []
++    for index in range(count):
++        length = base + (1 if index < extra else 0)
++        label = f"{index:03d}"
++        tags.append(label + "t" * (length - len(label)))
++    raw = ",".join(tags)
++    assert len(raw) == total
++    assert len(set(tags)) == count
++    assert max(len(tag) for tag in tags) <= cli.MAX_TAG_LENGTH
++    return raw
++
++
++def _tag_list_of_count(count: int) -> str:
++    return ",".join(f"t{index}" for index in range(count))
++
++
++OVER_LIMIT = {
++    "url": ("add", _url_of_length(cli.MAX_URL_LENGTH + 1)),
++    "title": ("add", "https://a.example", "--title", "t" * (cli.MAX_TITLE_LENGTH + 1)),
++    "tag list": (
++        "add", "https://a.example", "--tags", _tags_string_of_length(cli.MAX_TAGS_LENGTH + 1)
++    ),
++    "tag count": (
++        "add", "https://a.example", "--tags", _tag_list_of_count(cli.MAX_TAG_COUNT + 1)
++    ),
++    "tag length": ("add", "https://a.example", "--tags", "t" * (cli.MAX_TAG_LENGTH + 1)),
++    "search text": ("search", "s" * (cli.MAX_SEARCH_LENGTH + 1)),
++}
++
++AT_LIMIT = {
++    "url": ("add", _url_of_length(cli.MAX_URL_LENGTH)),
++    "title": ("add", "https://a.example", "--title", "t" * cli.MAX_TITLE_LENGTH),
++    "tag list": (
++        "add", "https://a.example", "--tags", _tags_string_of_length(cli.MAX_TAGS_LENGTH)
++    ),
++    "tag count": ("add", "https://a.example", "--tags", _tag_list_of_count(cli.MAX_TAG_COUNT)),
++    "tag length": ("add", "https://a.example", "--tags", "t" * cli.MAX_TAG_LENGTH),
++    "search text": ("search", "s" * cli.MAX_SEARCH_LENGTH),
++}
++
++
++def test_the_limits_are_the_specified_numbers():
++    assert cli.MAX_URL_LENGTH == 8192
++    assert cli.MAX_TITLE_LENGTH == 4096
++    assert cli.MAX_TAGS_LENGTH == 4096
++    assert cli.MAX_TAG_COUNT == 64
++    assert cli.MAX_TAG_LENGTH == 128
++    assert cli.MAX_SEARCH_LENGTH == 1024
++
++
++@pytest.mark.parametrize("name", list(OVER_LIMIT))
++def test_one_char_over_each_limit_is_rejected(
++    name, run, db, stored_bookmarks, stored_tag_links
++):
++    status, out, err = run("--db", db, *OVER_LIMIT[name])
++
++    assert status == 2
++    assert out == ""
++    assert len(err.splitlines()) == 1
++    assert stored_bookmarks(db) == []
++    assert stored_tag_links(db) == []
++    # Refused before the collection was opened, so the file does not even exist.
++    assert not os.path.exists(db)
++
++
++@pytest.mark.parametrize("name", list(AT_LIMIT))
++def test_boundary_exact_values_are_accepted(name, run, db, stored_bookmarks):
++    status, out, err = run("--db", db, *AT_LIMIT[name])
++
++    assert status == 0, err
++    assert err == ""
++    if AT_LIMIT[name][0] == "add":
++        assert len(stored_bookmarks(db)) == 1
++
++
++def test_oversized_url_is_refused_before_the_shape_check(run, db):
++    """Validation order: the size limit decides first, and the collection stays unopened."""
++    status, out, err = run("--db", db, "add", "ftp://" + "x" * cli.MAX_URL_LENGTH)
++
++    assert status == 2
++    assert not os.path.exists(db)
+diff --git a/tests/security/test_security_no_residual_files.py b/tests/security/test_security_no_residual_files.py
+new file mode 100644
+index 0000000..4d276ea
+--- /dev/null
++++ b/tests/security/test_security_no_residual_files.py
+@@ -0,0 +1,63 @@
++"""SR-011: the database file is the only persistent state any command leaves behind."""
++
++from __future__ import annotations
++
++import os
++
++import pytest
++
++COMMANDS = (
++    ("add", "https://new.example", "--title", "T", "--tags", "a,b"),
++    ("list",),
++    ("list", "--tag", "x"),
++    ("search", "a"),
++    ("delete", "1"),
++    ("export", "--format", "csv"),
++    ("export", "--format", "json"),
++)
++
++FAILING_COMMANDS = (
++    ("add", "ftp://example.com"),
++    ("delete", "999"),
++    ("delete", "abc"),
++    ("export", "--format", "xml"),
++)
++
++
++@pytest.mark.parametrize("command", COMMANDS, ids=[" ".join(c) for c in COMMANDS])
++def test_no_temp_or_journal_files_remain(command, run, tmp_path):
++    db = str(tmp_path / "bookmarks.db")
++    run("--db", db, "add", "https://a.example", "--title", "A", "--tags", "x")
++
++    status, out, err = run("--db", db, *command)
++
++    assert status == 0
++    assert sorted(os.listdir(tmp_path)) == ["bookmarks.db"]
++
++
++@pytest.mark.parametrize("command", FAILING_COMMANDS, ids=[" ".join(c) for c in FAILING_COMMANDS])
++def test_a_failing_command_leaves_no_residue_either(command, run, tmp_path):
++    db = str(tmp_path / "bookmarks.db")
++    run("--db", db, "add", "https://a.example", "--title", "A", "--tags", "x")
++
++    status, out, err = run("--db", db, *command)
++
++    assert status != 0
++    assert sorted(os.listdir(tmp_path)) == ["bookmarks.db"]
++
++
++def test_journal_mode_is_not_wal(run, tmp_path):
++    """WAL would leave -wal and -shm files beside the collection (research.md R2)."""
++    import sqlite3
++
++    db = str(tmp_path / "bookmarks.db")
++    run("--db", db, "add", "https://a.example")
++
++    connection = sqlite3.connect(db)
++    try:
++        mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
++    finally:
++        connection.close()
++
++    assert mode == "delete"
++    assert sorted(os.listdir(tmp_path)) == ["bookmarks.db"]
+diff --git a/tests/security/test_security_no_traceback.py b/tests/security/test_security_no_traceback.py
+new file mode 100644
+index 0000000..7dc15a7
+--- /dev/null
++++ b/tests/security/test_security_no_traceback.py
+@@ -0,0 +1,68 @@
++"""SR-008: an expected failure is one informative line and discloses nothing internal."""
++
++from __future__ import annotations
++
++import pytest
++
++# Internal detail that must never reach the user. The SQL keywords are matched as written in
++# the source (upper case) so that the subcommand named "delete" appearing in an argparse
++# choice list is not mistaken for SQL text.
++SQL_TEXT = ("SELECT", "INSERT", "DELETE", "UPDATE", "PRAGMA", "FROM bookmarks", "VALUES (")
++INTERNALS = ("traceback", "sqlite", 'file "', "line ", ".py")
++
++
++@pytest.fixture
++def paths(tmp_path, run):
++    usable = str(tmp_path / "bookmarks.db")
++    run("--db", usable, "add", "https://a.example", "--title", "A")
++
++    corrupt = tmp_path / "corrupt.db"
++    corrupt.write_bytes(b"not a database\n" * 64)
++
++    return {
++        "db": usable,
++        "corrupt": str(corrupt),
++        "missing_parent": str(tmp_path / "no-such-directory" / "x.db"),
++    }
++
++
++FAILURE_PATHS = {
++    "invalid url": ("db", ("add", "ftp://example.com")),
++    "missing identifier": ("db", ("delete", "999")),
++    "bad argument": ("db", ("delete", "abc")),
++    "unknown command": ("db", ("frobnicate",)),
++    "unusable database": ("corrupt", ("list",)),
++    "missing parent directory": ("missing_parent", ("list",)),
++    "oversized input": ("db", ("search", "s" * 2000)),
++    "unsupported format": ("db", ("export", "--format", "xml")),
++}
++
++
++@pytest.mark.parametrize("name", list(FAILURE_PATHS))
++def test_expected_failures_are_single_line_and_disclose_nothing(name, run, paths):
++    key, argv = FAILURE_PATHS[name]
++
++    status, out, err = run("--db", paths[key], *argv)
++
++    assert status != 0
++    assert out == ""
++    assert len(err.splitlines()) == 1, err
++    assert err.endswith("\n")
++    assert err.strip() != ""
++
++    for keyword in SQL_TEXT:
++        assert keyword not in err, f"{name} message contains SQL text {keyword!r}: {err!r}"
++
++    lowered = err.lower()
++    for internal in INTERNALS:
++        assert internal not in lowered, f"{name} message discloses {internal!r}: {err!r}"
++
++
++@pytest.mark.parametrize("name", list(FAILURE_PATHS))
++def test_failure_messages_say_what_was_wrong(name, run, paths):
++    """Principle II: the one line has to be actionable, not just short."""
++    key, argv = FAILURE_PATHS[name]
++
++    status, out, err = run("--db", paths[key], *argv)
++
++    assert len(err.split()) >= 3, err
+diff --git a/tests/security/test_security_search_literal.py b/tests/security/test_security_search_literal.py
+new file mode 100644
+index 0000000..4591f70
+--- /dev/null
++++ b/tests/security/test_security_search_literal.py
+@@ -0,0 +1,42 @@
++"""SR-004 / FR-016: search text is literal -- pattern metacharacters match only themselves."""
++
++from __future__ import annotations
++
++import pytest
++
++
++def test_percent_and_underscore_are_literal(run, db):
++    """US2 AS4: searching % returns only the row whose title literally contains %."""
++    run("--db", db, "add", "https://a.example", "--title", "100% coverage")
++    run("--db", db, "add", "https://b.example", "--title", "plain title")
++    run("--db", db, "add", "https://c.example/a_b", "--title", "underscored")
++
++    status, out, err = run("--db", db, "search", "%")
++    assert status == 0
++    assert [line.split("\t")[0] for line in out.splitlines()] == ["1"]
++
++    status, out, err = run("--db", db, "search", "_")
++    assert status == 0
++    assert [line.split("\t")[0] for line in out.splitlines()] == ["3"]
++
++
++@pytest.mark.parametrize("needle", ("%", "_", "%%", "_%_", "%cover%", "a_b", "[a-z]", "*"))
++def test_search_for_percent_does_not_match_row_without_percent(needle, run, db):
++    """A pattern-looking needle must not match rows that do not literally contain it."""
++    run("--db", db, "add", "https://a.example", "--title", "plain title")
++    run("--db", db, "add", "https://b.example", "--title", "another one")
++
++    status, out, err = run("--db", db, "search", needle)
++
++    assert status == 0
++    assert out == ""
++    assert err == ""
++
++
++def test_literal_needle_still_matches_when_present(run, db):
++    run("--db", db, "add", "https://a.example", "--title", "50%_off [sale] *now*")
++
++    for needle in ("%_", "[sale]", "*now*", "50%"):
++        status, out, err = run("--db", db, "search", needle)
++        assert status == 0
++        assert out.split("\t")[0] == "1", needle
+diff --git a/tests/security/test_security_stdlib_only.py b/tests/security/test_security_stdlib_only.py
+new file mode 100644
+index 0000000..3cfa123
+--- /dev/null
++++ b/tests/security/test_security_stdlib_only.py
+@@ -0,0 +1,96 @@
++"""SR-010 / FR-011 / SC-007: the shipped package imports nothing outside the standard
++library, and never shells out, spawns a process, opens a network connection or reads
++environment-driven configuration.
++
++The check walks the abstract syntax tree of every shipped module, so comments and strings
++cannot create a false positive and unusual formatting cannot create a false negative
++(research.md R9).
++"""
++
++from __future__ import annotations
++
++import ast
++import pathlib
++import sys
++
++import pytest
++
++from bookmarks import cli
++
++SOURCE_DIR = pathlib.Path(cli.__file__).parent
++SOURCE_FILES = sorted(SOURCE_DIR.glob("*.py"))
++
++# Spelled in pieces so this test file's own text cannot be what the scan finds.
++FORBIDDEN_FRAGMENTS = (
++    "sub" + "process",
++    "soc" + "ket",
++    "urllib." + "request",
++    "os." + "system",
++    "os." + "popen",
++    "os." + "environ",
++    "eval(",
++    "exec(",
++)
++
++
++def test_shipped_files_are_the_five_planned_modules():
++    assert [path.name for path in SOURCE_FILES] == [
++        "__init__.py",
++        "__main__.py",
++        "cli.py",
++        "output.py",
++        "storage.py",
++    ]
++
++
++def _imported_top_level_names(path: pathlib.Path) -> set[str]:
++    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
++    names: set[str] = set()
++    for node in ast.walk(tree):
++        if isinstance(node, ast.Import):
++            for alias in node.names:
++                names.add(alias.name.split(".")[0])
++        elif isinstance(node, ast.ImportFrom):
++            if node.level:
++                continue  # a relative import of this package's own modules
++            assert node.module is not None
++            names.add(node.module.split(".")[0])
++    return names
++
++
++@pytest.mark.parametrize("path", SOURCE_FILES, ids=lambda path: path.name)
++def test_no_network_or_subprocess_imports(path):
++    imported = _imported_top_level_names(path)
++
++    outside_stdlib = sorted(imported - set(sys.stdlib_module_names))
++    assert outside_stdlib == [], f"{path.name} imports non-standard-library modules"
++
++    for module in ("sub" + "process", "soc" + "ket", "urllib"):
++        assert module not in imported, f"{path.name} imports {module}"
++
++
++@pytest.mark.parametrize("path", SOURCE_FILES, ids=lambda path: path.name)
++def test_no_shell_subprocess_socket_or_env_config(path):
++    text = path.read_text(encoding="utf-8")
++
++    for fragment in FORBIDDEN_FRAGMENTS:
++        assert fragment not in text, f"{path.name} mentions {fragment!r}"
++
++
++def test_whole_package_imports_only_these_standard_modules():
++    imported: set[str] = set()
++    for path in SOURCE_FILES:
++        imported |= _imported_top_level_names(path)
++
++    assert imported <= {
++        "__future__",
++        "argparse",
++        "contextlib",
++        "csv",
++        "dataclasses",
++        "json",
++        "os",
++        "sqlite3",
++        "sys",
++        "typing",
++    }
+diff --git a/tests/security/test_security_streaming.py b/tests/security/test_security_streaming.py
+new file mode 100644
+index 0000000..0d04c8b
+--- /dev/null
++++ b/tests/security/test_security_streaming.py
+@@ -0,0 +1,87 @@
++"""SR-007: reading the collection is bounded in memory, whatever the collection size.
++
++The export is run with a discarding output stream so what is measured is the program's own
++working set rather than the test's copy of the output.
++"""
++
++from __future__ import annotations
++
++import sys
++import tracemalloc
++
++import pytest
++
++from bookmarks import cli
++
++SMALL = 5_000
++LARGE = 50_000
++
++# Peak allocation ceiling for a 50,000-bookmark export. A design that materialised the
++# collection would need tens of megabytes here.
++PEAK_CEILING_BYTES = 2 * 1024 * 1024
++
++
++class _DiscardingStream:
++    """A write-only sink: no buffer grows as the export streams through it."""
++
++    def __init__(self) -> None:
++        self.written = 0
++
++    def write(self, text: str) -> int:
++        self.written += len(text)
++        return len(text)
++
++    def flush(self) -> None:
++        pass
++
++
++def _export_peak(path: str, fmt: str, monkeypatch) -> tuple[int, int]:
++    sink = _DiscardingStream()
++    monkeypatch.setattr(sys, "stdout", sink)
++    tracemalloc.start()
++    try:
++        status = cli.main(["--db", path, "export", "--format", fmt])
++        _, peak = tracemalloc.get_traced_memory()
++    finally:
++        tracemalloc.stop()
++    assert status == 0
++    assert sink.written > 0
++    return peak, sink.written
++
++
++@pytest.mark.slow
++@pytest.mark.parametrize("fmt", ("csv", "json"))
++def test_export_of_50k_bookmarks_is_memory_bounded(fmt, tmp_path, bulk_seed, monkeypatch):
++    small_path = str(tmp_path / "small.db")
++    large_path = str(tmp_path / "large.db")
++    bulk_seed(small_path, SMALL)
++    bulk_seed(large_path, LARGE)
++
++    small_peak, small_bytes = _export_peak(small_path, fmt, monkeypatch)
++    large_peak, large_bytes = _export_peak(large_path, fmt, monkeypatch)
++
++    # The output really did grow ten-fold ...
++    assert large_bytes > small_bytes * 8
++    # ... while the memory held to produce it did not grow with it.
++    assert large_peak < PEAK_CEILING_BYTES, f"{fmt}: peak {large_peak} bytes"
++    assert large_peak < small_peak * 2, f"{fmt}: {small_peak} -> {large_peak} bytes"
++
++
++@pytest.mark.slow
++def test_list_and_search_are_also_streamed(tmp_path, bulk_seed, monkeypatch):
++    path = str(tmp_path / "large.db")
++    bulk_seed(path, LARGE)
++
++    for argv in (["--db", path, "list"], ["--db", path, "search", "Title"]):
++        sink = _DiscardingStream()
++        monkeypatch.setattr(sys, "stdout", sink)
++        tracemalloc.start()
++        try:
++            status = cli.main(argv)
++            _, peak = tracemalloc.get_traced_memory()
++        finally:
++            tracemalloc.stop()
++
++        assert status == 0
++        assert sink.written > 0
++        assert peak < PEAK_CEILING_BYTES, f"{argv[-1]}: peak {peak} bytes"
+diff --git a/tests/security/test_security_urls.py b/tests/security/test_security_urls.py
+new file mode 100644
+index 0000000..40e5620
+--- /dev/null
++++ b/tests/security/test_security_urls.py
+@@ -0,0 +1,53 @@
++"""SR-002: URL acceptance is allow-list based; every other shape is refused.
++
++Negative cases are the exact list the specification names, plus the mixed-case prefixes.
++"""
++
++from __future__ import annotations
++
++import pytest
++
++ATTACK_URLS = (
++    "javascript:alert(1)",
++    "file:///etc/passwd",
++    "data:text/html,x",
++    "ftp://host/",
++    "HTTPS://host/",
++    "example.com",
++    "//example.com",
++    "http:/example.com",
++    "",
++    "   ",
++)
++
++
++@pytest.mark.parametrize("url", ATTACK_URLS)
++def test_url_allowlist_rejects(url, run, db, stored_bookmarks, stored_tag_links):
++    # A collection that already holds one bookmark, so "unchanged" is a real assertion.
++    run("--db", db, "add", "https://kept.example", "--title", "kept", "--tags", "keep")
++    before = stored_bookmarks(db)
++    before_tags = stored_tag_links(db)
++
++    status, out, err = run("--db", db, "add", url, "--tags", "attack")
++
++    assert status == 2
++    assert out == ""
++    assert len(err.splitlines()) == 1
++    assert stored_bookmarks(db) == before
++    assert stored_tag_links(db) == before_tags
++
++
++@pytest.mark.parametrize("url", ATTACK_URLS)
++def test_rejection_consumes_no_identifier(url, run, db):
++    status, out, err = run("--db", db, "add", url)
++    assert status == 2
++
++    status, out, err = run("--db", db, "add", "https://a.example")
++    assert (status, out) == (0, "1\n")
++
++
++def test_no_reachability_check_is_performed(run, db):
++    """FR-011: a syntactically acceptable but unresolvable host is still stored."""
++    status, out, err = run("--db", db, "add", "https://this-host-does-not-exist.invalid/x")
++
++    assert (status, out, err) == (0, "1\n", "")
+diff --git a/tests/unit/test_formatting.py b/tests/unit/test_formatting.py
+new file mode 100644
+index 0000000..d60a442
+--- /dev/null
++++ b/tests/unit/test_formatting.py
+@@ -0,0 +1,57 @@
++"""FR-009 / FR-017: titles default to empty, tags render in code-point order."""
++
++from __future__ import annotations
++
++import pytest
++
++from bookmarks import output
++from bookmarks.storage import Bookmark
++
++
++def test_absent_title_defaults_to_empty_string(run, db, stored_bookmarks):
++    status, out, err = run("--db", db, "add", "https://a.example")
++
++    assert status == 0
++    assert stored_bookmarks(db) == [(1, "https://a.example", "")]
++
++    status, out, err = run("--db", db, "list")
++    assert status == 0
++    assert out == "1\thttps://a.example\t\t\n"
++
++
++@pytest.mark.parametrize(
++    "tags,expected",
++    (
++        ((), ""),
++        (("python",), "python"),
++        (("python", "Docs"), "Docs,python"),
++        (("b", "a", "c"), "a,b,c"),
++        (("Z", "a", "B"), "B,Z,a"),
++        (("é", "a"), "a,é"),
++    ),
++)
++def test_tags_joined_in_code_point_order(tags, expected):
++    assert output.join_tags(tags) == expected
++
++
++def test_listing_line_is_four_fields_with_trailing_newline():
++    line = output.format_listing_line(
++        Bookmark(7, "https://a.example", "Title", ("python", "Docs"))
++    )
++
++    assert line == "7\thttps://a.example\tTitle\tDocs,python\n"
++    assert line.rstrip("\n").split("\t") == ["7", "https://a.example", "Title", "Docs,python"]
++
++
++def test_empty_title_and_tags_render_as_empty_fields():
++    line = output.format_listing_line(Bookmark(1, "https://a.example", "", ()))
++
++    assert line == "1\thttps://a.example\t\t\n"
++    assert line.endswith("\t\t\n")
++
++
++def test_title_is_reproduced_verbatim():
++    awkward = 'a\tb\nc "d" é'
++    line = output.format_listing_line(Bookmark(1, "https://a.example", awkward, ()))
++
++    assert awkward in line
+diff --git a/tests/unit/test_tag_parsing.py b/tests/unit/test_tag_parsing.py
+new file mode 100644
+index 0000000..e5b56bf
+--- /dev/null
++++ b/tests/unit/test_tag_parsing.py
+@@ -0,0 +1,44 @@
++"""FR-010 / FR-012: comma-separated tag parsing, including the degenerate inputs."""
++
++from __future__ import annotations
++
++import pytest
++
++from bookmarks import cli
++
++
++def test_comma_list_parsed_and_absent_means_no_tags(run, db, stored_tag_links):
++    assert cli.parse_tags("python,cli") == ("python", "cli")
++    assert cli.parse_tags(None) == ()
++
++    status, out, err = run("--db", db, "add", "https://a.example", "--tags", "python,cli")
++    assert status == 0
++    assert stored_tag_links(db) == [(1, "cli"), (1, "python")]
++
++    status, out, err = run("--db", db, "add", "https://b.example")
++    assert status == 0
++    assert [link for link in stored_tag_links(db) if link[0] == 2] == []
++
++
++DEGENERATE_CASES = (
++    ("", set()),
++    (",", set()),
++    (",,,", set()),
++    ("a,,b", {"a", "b"}),
++    (" a , b ", {"a", "b"}),
++    ("a,a", {"a"}),
++    ("a,b,a", {"a", "b"}),
++    ("Python,python", {"Python", "python"}),
++    ("  ", set()),
++    ("\ta\t,\tb", {"a", "b"}),
++)
++
++
++@pytest.mark.parametrize("raw,expected", DEGENERATE_CASES)
++def test_degenerate_tag_inputs(raw, expected, run, db, stored_tag_links):
++    assert set(cli.parse_tags(raw)) == expected
++
++    status, out, err = run("--db", db, "add", "https://a.example", "--tags", raw)
++
++    assert status == 0
++    assert {link[1] for link in stored_tag_links(db)} == expected
+diff --git a/tests/unit/test_url_validation.py b/tests/unit/test_url_validation.py
+new file mode 100644
+index 0000000..93450dd
+--- /dev/null
++++ b/tests/unit/test_url_validation.py
+@@ -0,0 +1,56 @@
++"""FR-008: a URL is accepted only on an exact lowercase http:// or https:// prefix."""
++
++from __future__ import annotations
++
++import pytest
++
++ACCEPTED = (
++    "http://example.com",
++    "https://example.com",
++    "https://example.com/path?query=1&x=2#fragment",
++    "http://localhost:8000/",
++    "https://xn--bcher-kva.example/",
++    "http://user:pass@example.com/",
++    "https://example.com/a,b;c'd\"e",
++)
++
++REJECTED = (
++    "ftp://example.com",
++    "HTTP://example.com",
++    "HTTPS://example.com",
++    "Http://example.com",
++    "hTTps://example.com",
++    "javascript:alert(1)",
++    "file:///etc/passwd",
++    "data:text/html,x",
++    "example.com",
++    "//example.com",
++    "http:/example.com",
++    "https:/example.com",
++    "http//example.com",
++    " http://example.com",
++    "",
++    "   ",
++)
++
++
++@pytest.mark.parametrize("url", ACCEPTED)
++def test_only_lowercase_http_https_prefix_accepted(url, run, db, stored_bookmarks):
++    status, out, err = run("--db", db, "add", url)
++
++    assert status == 0
++    assert err == ""
++    assert [row[1] for row in stored_bookmarks(db)] == [url]
++
++
++@pytest.mark.parametrize("url", REJECTED)
++def test_rejected_url_exits_two_and_stores_nothing(
++    url, run, db, stored_bookmarks, stored_tag_links
++):
++    status, out, err = run("--db", db, "add", url, "--title", "t", "--tags", "a,b")
++
++    assert status == 2
++    assert out == ""
++    assert err.strip() != ""
++    assert stored_bookmarks(db) == []
++    assert stored_tag_links(db) == []

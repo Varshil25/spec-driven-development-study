@@ -1,0 +1,1098 @@
+diff --git a/specs/001-logredact-cli/contracts/cli.md b/specs/001-logredact-cli/contracts/cli.md
+new file mode 100644
+index 0000000..d66069b
+--- /dev/null
++++ b/specs/001-logredact-cli/contracts/cli.md
+@@ -0,0 +1,177 @@
++# Phase 1 Contract: `logredact` Command-Line Interface
++
++**Feature**: [spec.md](../spec.md) | **Plan**: [plan.md](../plan.md) | **Data model**:
++[data-model.md](../data-model.md)
++
++The command line is this project's only external interface. There is no library API promised to
++third parties, no network surface, and no file output. This document is the contract a test can
++be written against directly; entity rules are referenced from
++[data-model.md](../data-model.md) rather than restated.
++
++## Invocation
++
++```text
++python -m logredact [--count] [FILE ...]
++```
++
++Requires `src/` on `PYTHONPATH` (spec Assumptions). No configuration file, environment variable,
++or network access affects behaviour (SC-007).
++
++## Argument grammar
++
++| Token | Meaning |
++|---|---|
++| `--count` | Enable the tally line. Accepted **in any position**, before, between, or after FILE arguments (FR-001). Repeating it is equivalent to giving it once. |
++| `-` | An ordinary file path named `-`. Not a stdin convention (spec Assumptions). |
++| any other token starting with `-` and longer than one character | Unrecognised option → usage error (FR-024). This includes `-h` and `--help`, which are deliberately not implemented (research D-007). |
++| anything else | A FILE path, consumed in the order given (FR-003). |
++
++Parsing is hand-written rather than `argparse`-based, because `argparse` cannot satisfy FR-001;
++see research D-007 for the evidence.
++
++## Streams
++
++| Stream | Content |
++|---|---|
++| **stdin** | Read **only** when no FILE argument is given (FR-002). With at least one FILE, stdin is never opened (FR-003). |
++| **stdout** | Every input line, redacted, concatenated in source order, line order preserved within each source (FR-004, FR-005). Nothing else — no banners, progress, or summaries. |
++| **stderr** | The `--count` tally line (FR-019), and diagnostics (FR-022, FR-024). Empty on a successful run without `--count` (FR-021). |
++
++Both text streams are UTF-8 with newline translation disabled, so terminators round-trip exactly
++(research D-008).
++
++## Exit statuses
++
++| Status | Condition |
++|---|---|
++| `0` | All requested input was read successfully (FR-025). |
++| `2` | A FILE could not be read (FR-023) **or** an unrecognised option was given (FR-024). The two are distinguished by the message, not the status. |
++| `141` (`128+SIGPIPE`) | stdout was closed early, e.g. `| head`. Terminates the way `cat` does, with no traceback and nothing on stderr (research D-010). |
++
++## Behavioural contract
++
++### C-1 — Redaction (FR-007…FR-018)
++
++Emails → `[EMAIL]`, IPv4 addresses → `[IP]`, Luhn-valid 13-19 digit card numbers (with their
++internal separators) → `[CARD]`. Recognition criteria, precedence, and the boundary rules are
++specified in [data-model.md §3](../data-model.md#3-redaction-rule). Everything else passes
++through unchanged, byte for byte (FR-006).
++
++### C-2 — Tally output (FR-019…FR-021)
++
++With `--count`, exactly one line is written to stderr **after all stdout output**:
++
++```text
++emails=N ips=N cards=N
++```
++
++One tally per run across all sources combined; occurrences, not distinct values; `0` when none
++(FR-020). Suppressed on the exit-2 path (FR-023).
++
++### C-3 — Diagnostics (FR-022, FR-024)
++
++Read failure, one line to stderr, naming the path and the reason:
++
++```text
++logredact: {path}: {reason}
++```
++
++e.g. `logredact: missing.log: No such file or directory`,
++`logredact: /tmp: Is a directory`, `logredact: secret.log: Permission denied`, and for
++undecodable bytes `logredact: binary.log: 'utf-8' codec can't decode byte 0xff in position 0:
++invalid start byte` (the reason text comes from the OS or the decoder, so tests assert the path
++and a stable substring rather than the full string — research D-009).
++
++Unrecognised option, to stderr, with nothing read and nothing written to stdout:
++
++```text
++usage: python -m logredact [--count] [FILE ...]
++logredact: unrecognized option: {token}
++```
++
++### C-4 — Failure sequencing (FR-023)
++
++Processing stops at the first unreadable FILE. Later FILE arguments are not opened. Output
++already written to stdout is left in place — it is already-sanitised data and is not retracted
++(spec Assumptions). No tally is printed. Exit status is 2.
++
++## Worked examples (normative — these are the SC-001 cases)
++
++Each block shows the exact streams and status. `$` lines are the command; `2>` marks stderr.
++
++**E-1 — stdin, mixed values**
++
++```console
++$ echo 'user jane@example.com from 10.0.0.7' | python -m logredact
++user [EMAIL] from [IP]
++$ echo $?
++0
++```
++
++**E-2 — grouped card redacted, Luhn-invalid run preserved**
++
++```console
++$ echo 'paid with 4111 1111 1111 1111, ref 1234567890123' | python -m logredact
++paid with [CARD], ref 1234567890123
++```
++
++**E-3 — tally on stderr, output unaffected**
++
++```console
++$ echo 'a@b.io 1.2.3.4' | python -m logredact --count
++[EMAIL] [IP]
++2> emails=1 ips=1 cards=0
++$ echo $?
++0
++```
++
++**E-4 — files in argument order, stdin ignored**
++
++```console
++$ python -m logredact a.log b.log < ignored.log
++<redacted a.log, then redacted b.log>
++$ echo $?
++0
++```
++
++**E-5 — unreadable file mid-list**
++
++```console
++$ python -m logredact a.log missing.log --count
++<redacted a.log — already written>
++2> logredact: missing.log: No such file or directory
++$ echo $?
++2
++```
++
++No tally line, and `--count` does not change that (FR-023).
++
++**E-6 — unrecognised option**
++
++```console
++$ python -m logredact --verbose a.log
++2> usage: python -m logredact [--count] [FILE ...]
++2> logredact: unrecognized option: --verbose
++$ echo $?
++2
++```
++
++stdout is empty; `a.log` is never opened (FR-024).
++
++**E-7 — closed output**
++
++```console
++$ python -m logredact big.log | head -2
++<first two redacted lines>
++$ echo ${PIPESTATUS[0]}
++141
++```
++
++stderr is empty — no traceback (research D-010).
++
++## Out of scope for this contract
++
++No `--help`, no in-place editing, no backups, no log file of its own, no configurable
++placeholders or patterns, no `-` stdin convention, no IPv6, phone number, name, URL, or API-key
++redaction, no structured-log awareness, no pseudonymisation, no allowlisting (spec Assumptions
++and "Out of scope").
+diff --git a/specs/001-logredact-cli/data-model.md b/specs/001-logredact-cli/data-model.md
+new file mode 100644
+index 0000000..b7d96c2
+--- /dev/null
++++ b/specs/001-logredact-cli/data-model.md
+@@ -0,0 +1,176 @@
++# Phase 1 Data Model: Log Redaction CLI
++
++**Feature**: [spec.md](./spec.md) | **Plan**: [plan.md](./plan.md) | **Research**:
++[research.md](./research.md)
++
++This tool has no persistent state, no storage, and no schema. "Data model" here means the four
++entities the spec names, the form each takes in code, and the validation rules attached to them.
++Pattern derivations and the reasoning behind them live in [research.md](./research.md) and are
++referenced, not repeated.
++
++## Entity map
++
++| Spec entity | Code form | Module |
++|---|---|---|
++| Input source | `str` path, or the stdin text stream | `__main__.py` |
++| Log line | `str`, terminator included | `redact.py` |
++| Redaction rule | Compiled `re.Pattern` + placeholder constant | `redact.py` |
++| Redaction tally | `Counts` frozen dataclass (3 × `int`) | `redact.py` |
++
++No other type is introduced. There is no rule base class, no registry, and no configuration
++object (Principle IV).
++
++---
++
++## 1. Input source
++
++An ordered sequence of places to read text from, derived from the command line.
++
++**Fields**
++
++| Field | Type | Notes |
++|---|---|---|
++| `path` | `str` | A FILE argument, verbatim as given. Used in diagnostics (FR-022). A bare `-` is an ordinary path, not a stdin convention (spec Assumptions). |
++| (stdin) | text stream | Used only when the FILE list is empty (FR-002). Has no path; it is never named in a diagnostic because it is never reported as unreadable. |
++
++**Rules**
++
++- **R1.1** Ordering is argument order and is significant: output concatenates sources in that
++  order (FR-003, FR-004). Duplicates are independent sources — the same path twice is read twice.
++- **R1.2** A non-empty FILE list suppresses stdin entirely; stdin is not opened or read (FR-003).
++- **R1.3** Each source opens as `encoding="utf-8", newline="", errors="strict"` (research D-008).
++- **R1.4** A source that cannot be opened or decoded is a **read failure** — missing path,
++  permission denied, directory, or undecodable bytes (FR-022). Detection is by exception
++  (`OSError`, `UnicodeDecodeError`), never by a pre-flight check (research D-009).
++
++**State transitions** — the only state machine in the feature, held in `__main__.py`:
++
++```text
++            ┌──────────── next source ────────────┐
++            ▼                                     │
++  [parsing] ──ok──> [streaming source] ──exhausted┘──all done──> [tally?] ──> exit 0
++      │                      │                                      │
++      │ bad option           │ read failure                         └─ --count: one line to stderr
++      ▼                      ▼                                         else:    stderr stays empty
++  usage → stderr      "logredact: path: reason" → stderr
++  exit 2 (FR-024)     exit 2, remaining sources unread,
++  nothing read        no tally printed (FR-023)
++```
++
++Once the failure state is entered it is terminal: no further source is opened (FR-023), and
++output already written to stdout stays written (spec Assumptions — it is already-sanitised data).
++
++## 2. Log line
++
++The unit of redaction.
++
++**Fields**
++
++| Field | Type | Notes |
++|---|---|---|
++| text | `str` | One line including its terminator (`\n`, `\r\n`, `\r`, or none at end of input). |
++
++**Rules**
++
++- **R2.1** A line carries no structure the tool interprets — no timestamp, level, or field
++  parsing (spec: "Carries no structure the tool depends on").
++- **R2.2** Redaction never crosses a line boundary: a sensitive value split by a line ending is
++  not recognised (spec Edge Cases).
++- **R2.3** Lines are neither added, dropped, reordered, merged, nor split (FR-005). Exactly one
++  output line per input line.
++- **R2.4** Apart from the three replacements, a line is reproduced byte-identically — whitespace,
++  blank lines, and the presence or absence of a trailing terminator all preserved (FR-006). The
++  terminator stays attached to the line and is never rewritten (research D-008).
++- **R2.5** Lines are processed and emitted one at a time; only one is resident in memory, so a
++  1 MB line works and a 1 GB file does not grow memory (SC-006).
++
++## 3. Redaction rule
++
++A named category of sensitive value with its recognition criteria and fixed placeholder. Three
++instances exist; they are module-level constants, not objects.
++
++| Rule | Placeholder | Recognition | Validation beyond the pattern | Requirements |
++|---|---|---|---|---|
++| `email` | `[EMAIL]` | `[A-Za-z0-9._%+\-]+@(?:[A-Za-z0-9\-]+\.)+[A-Za-z]{2,}` | none | FR-007…FR-009 |
++| `ipv4` | `[IP]` | range-checked octet quad with boundary guards (research D-002) | none — 0-255 is enforced inside the pattern | FR-010…FR-013 |
++| `card` | `[CARD]` | `(?<!\d)(?:\d[ \-]?){12,18}\d(?!\d)` | `luhn(digits)` must hold, where `digits` is the match with spaces and hyphens stripped | FR-014…FR-016 |
++
++**Rules**
++
++- **R3.1** Placeholders are fixed literals, not configurable (FR-007/010/014, spec Assumptions).
++- **R3.2** A card match is replaced **including its internal separators** by the single literal
++  `[CARD]` (FR-014) — `4111 1111 1111 1111` becomes one placeholder, not four.
++- **R3.3** Group separators may be single spaces or single hyphens and may be mixed within one
++  number; group sizes are not validated against card-brand formats (FR-015, spec Assumptions).
++- **R3.4** No issuer-prefix or BIN validation — any Luhn-valid 13-19 digit run qualifies
++  (spec Assumptions). Over-redaction of Luhn-passing identifiers is accepted.
++- **R3.5** Each pattern is compiled once at import, not per line (SC-006).
++
++### Luhn validation (`luhn(digits: str) -> bool`)
++
++Precondition: `digits` contains only `0-9`. Walking right to left, every second digit is doubled
++and reduced by 9 when it exceeds 9; the number is valid when the sum is divisible by 10
++(research D-006). Length is **not** checked here — the 13-19 digit bound is the pattern's job
++(R3.6).
++
++- **R3.6** Fewer than 13 or more than 19 digits is never a card, whatever Luhn says (FR-016,
++  spec Edge Cases).
++
++### Overlap and precedence
++
++- **R3.7** Each character is redacted at most once (FR-017).
++- **R3.8** Email and IPv4 are resolved in a single leftmost-first alternation, so the leftmost
++  match wins and email beats IPv4 at an equal start position (FR-017, research D-004).
++- **R3.9** Placeholders are never re-examined; the output of one rule cannot be altered by
++  another (FR-018). Guaranteed structurally — `re.sub` does not rescan replacements, and no
++  placeholder contains an `@`, a dot, or a digit.
++- **R3.10** Cards are resolved in a second pass over the email/IPv4-redacted text. Where a card
++  candidate overlaps an IPv4 address, this redacts both rather than letting the card consume part
++  of the address; see research D-004 for the full argument and the one divergence from a literal
++  single-pass reading of FR-017.
++- **R3.11** A candidate that fails Luhn is left unchanged and the scan resumes one character
++  later, not past the candidate (FR-016, research D-005).
++
++## 4. Redaction tally
++
++Three running totals over all inputs of a single run.
++
++```python
++@dataclass(frozen=True, slots=True)
++class Counts:
++    emails: int = 0
++    ips: int = 0
++    cards: int = 0
++```
++
++**Rules**
++
++- **R4.1** One tally per run, covering every source combined — not one per file (FR-020).
++- **R4.2** Each total counts **replacement occurrences**, not distinct values: the same address
++  three times counts 3 (FR-020, spec Assumptions).
++- **R4.3** Absent values give `0`, never a blank or omitted field (FR-020).
++- **R4.4** Rendered only with `--count`, as exactly one line `emails=N ips=N cards=N` on stderr,
++  after all stdout output (FR-019). Without `--count`, stderr stays empty on a successful run
++  (FR-021).
++- **R4.5** Suppressed entirely on the exit-2 read-failure path, so a printed tally always
++  describes a complete run (FR-023, spec Assumptions).
++- **R4.6** Totals accumulate as lines stream; the tally is not computed by a second pass over the
++  data.
++
++## Engine interface
++
++The two functions the CLI layer calls, and the boundary where validation happens (Constitution
++"Validation boundary" — input is validated where it enters the system, so `redact_text` may
++assume a decoded `str`):
++
++```python
++def luhn(digits: str) -> bool: ...
++
++def redact_text(text: str) -> tuple[str, Counts]: ...
++```
++
++`redact_text` takes one line (it does not require one, but R2.2 means callers pass lines) and
++returns the redacted text plus the counts for *that* text. The CLI sums the per-line `Counts`
++into the run tally. This keeps the engine free of I/O, which is what makes FR-005 through FR-018
++unit-testable without a subprocess (Principle III; see the FR→test map in
++[quickstart.md](./quickstart.md)).
+diff --git a/specs/001-logredact-cli/plan.md b/specs/001-logredact-cli/plan.md
+new file mode 100644
+index 0000000..d3e8f04
+--- /dev/null
++++ b/specs/001-logredact-cli/plan.md
+@@ -0,0 +1,156 @@
++# Implementation Plan: Log Redaction CLI
++
++**Branch**: `001-logredact-cli` | **Date**: 2026-11-21 | **Spec**: [spec.md](./spec.md)
++
++**Input**: Feature specification from `/specs/001-logredact-cli/spec.md`
++
++## Summary
++
++A stdlib-only Python CLI, `python -m logredact [--count] [FILE ...]`, that streams text line by
++line from named files (in argument order) or standard input, replaces email addresses with
++`[EMAIL]`, IPv4 addresses with `[IP]`, and Luhn-valid 13-19 digit payment card numbers with
++`[CARD]`, and writes everything else through byte-for-byte. `--count` adds one
++`emails=N ips=N cards=N` tally line on standard error after all output. An unreadable FILE
++(missing, permission-denied, directory, or undecodable bytes) is named on standard error and
++stops the run with exit status 2.
++
++Technical approach, validated by executable probes during Phase 0 (see
++[research.md](./research.md)):
++
++- **Two compiled-regex passes per line.** Pass A is one `re.sub` over an
++  `(?P<email>…)|(?P<ip>…)` alternation — Python's leftmost-first alternation semantics deliver
++  FR-017's "leftmost wins, email before IPv4" rule for free. Pass B scans the result for card
++  windows and applies the Luhn check in Python, because a checksum cannot be expressed as a
++  regex. Replacement text is never re-examined by either pass (FR-018).
++- **A hand-written 15-line argument parser**, not `argparse`: `argparse` with `nargs="*"`
++  provably rejects `logredact a.log --count b.log`, which FR-001 requires to work.
++- **`newline=""` text I/O on both ends** so line terminators (including `\r\n` and a missing
++  final newline) survive unchanged (FR-006), with UTF-8 forced explicitly rather than inherited
++  from the locale.
++- **`SIGPIPE` restored to `SIG_DFL`** so `| head` terminates the tool the way `cat` terminates,
++  with no traceback.
++- **Streaming, one line in memory at a time**, which satisfies SC-006 at ~1.4s per 100k lines
++  with memory flat in file size.
++
++## Technical Context
++
++**Language/Version**: Python 3.11+ (floor set by spec Assumptions and Constitution "Additional
++Constraints"; probes were run on the 3.13.17 interpreter present in this environment — no syntax
++below the 3.11 floor is used)
++
++**Primary Dependencies**: None at runtime — standard library only (`re`, `sys`, `os`, `signal`,
++`io`, `dataclasses`). Development-only: `pytest` (9.1.1 available here; `>=7` required for the
++built-in `pythonpath` setting)
++
++**Storage**: N/A — the tool reads inputs and writes streams; it never writes, modifies, or
++deletes a file
++
++**Testing**: `pytest`, no plugins, discoverable by a bare `pytest` from the repository root.
++Unit tests call the redaction functions directly; CLI tests spawn
++`sys.executable -m logredact` in a subprocess to assert real stdout/stderr separation and exit
++status
++
++**Target Platform**: POSIX (Linux/macOS) command line; Windows works apart from the
++`SIGPIPE` refinement, which is applied only where the signal exists
++
++**Project Type**: Single-project CLI tool with a `src/` package layout
++
++**Performance Goals**: 100,000-line file in under 10 seconds (SC-006). Measured during Phase 0:
++**1.40 s** for a 100,000-line / 10.3 MB log with a redactable email, IPv4, and card on every
++line — a ~7x margin
++
++**Constraints**: Memory bounded by the longest single line, not by input size (SC-006, 1 GB file
++must complete); output is byte-identical to input except for the three replacements (FR-005,
++FR-006, SC-003); no configuration file, environment variable, or network access (SC-007)
++
++**Scale/Scope**: ~200 lines of implementation across 3 source files; 25 functional requirements
++(FR-001…FR-025) each mapped to at least one named test (SC-004)
++
++## Constitution Check
++
++*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
++
++Constitution version 1.0.0 (ratified 2026-11-20).
++
++| Principle | Gate | Status |
++|-----------|------|--------|
++| **I. Standard Library Only** | No third-party runtime import; no runtime dependency in packaging metadata; no vendored code | **PASS** — design uses only `re`, `sys`, `os`, `signal`, `io`, `dataclasses`. `pyproject.toml` declares `dependencies = []`; `pytest` is isolated in `[project.optional-dependencies] dev` so the test-tooling exemption stays visible. Luhn is ~8 lines of arithmetic, which is exactly the "write it rather than carry a dependency" trade the principle calls for. |
++| **II. Fail Loudly** | Diagnostics name the offending input, go to stderr, exit non-zero; no bare `except`; no fallback default for invalid input | **PASS** — every read failure is reported as `logredact: <path>: <reason>` on stderr with exit 2 (FR-022/FR-023). Only four narrow exception types are caught (`OSError`, `UnicodeDecodeError`, `BrokenPipeError`, and `SystemExit` is not used for control flow); no bare `except` and no `except Exception: pass`. Undecodable bytes are refused rather than redacted approximately or passed through with `U+FFFD` replacement characters — a half-redacted file is precisely the "silent wrong answer" the principle forbids. The `--count` tally is suppressed on the failure path so a printed tally always describes a complete run. |
++| **III. Every Requirement Is Testable** | Each FR maps to ≥1 pytest test naming the requirement; each failure mode asserts message *and* exit status; bare `pytest` runs it | **PASS** — the FR→test map in [quickstart.md](./quickstart.md) covers FR-001…FR-025, and every test id carries its requirement (e.g. `test_fr013_ipv4_not_matched_inside_longer_dotted_run`). The three failure modes of SC-005 get subprocess tests asserting stderr content *and* exit status. No requirement in the spec resisted expression as a pass/fail test, so nothing needed rewriting. |
++| **IV. Simplicity** | Smallest design that satisfies the spec; no abstraction for a single caller; no unrequested configurability | **PASS** — 3 source files, no classes beyond one frozen `Counts` dataclass, no rule registry/plugin layer/base class (the three rules are three regexes in one module), no configuration of placeholders or patterns, no `--help`, no `-` stdin convention, no in-place editing. The one hand-written component (the argument parser) *removes* a dependency on `argparse` workarounds rather than adding structure; see research.md D-007. |
++
++**Gate result: PASS, no violations.** The Complexity Tracking table below is therefore empty.
++
++Two design choices deserve the plan-level visibility that Workflow Gate 2 demands, even though
++neither is a principle deviation — both are places where the spec's letter and its stated safety
++bias (SC-002, "the leak rate is 0%") pull in slightly different directions. Both are recorded in
++full, with the rejected alternative, as D-004 and D-005 in [research.md](./research.md):
++
++1. **Card-vs-IPv4 overlap resolution** runs IPv4 before cards, so a digit run that merges into an
++   IPv4 address (`4111111111111111 10.0.0.7`) yields `[CARD] [IP]` rather than letting the
++   leftmost card candidate swallow the first octet and emit `[CARD].0.0.7`. This redacts a
++   superset of what strict leftmost-wins would redact; it never leaks more.
++2. **A Luhn-failing card window is left unchanged (FR-016) and the scan restarts one character
++   later**, rather than searching every shorter sub-window at the same start. The surviving
++   limitation is stated precisely in research.md with the exact input shape that triggers it.
++
++### Post-Design Re-check (after Phase 1)
++
++Re-evaluated against the generated [data-model.md](./data-model.md),
++[contracts/cli.md](./contracts/cli.md), and [quickstart.md](./quickstart.md): **still PASS.**
++Phase 1 added no module, class, abstraction, dependency, or configuration surface beyond what the
++pre-Phase-0 check assessed. The entity set is three regex constants, one 8-line predicate, one
++3-field dataclass, and two I/O functions — the data model introduced no persistence layer and no
++new types.
++
++## Project Structure
++
++### Documentation (this feature)
++
++```text
++specs/001-logredact-cli/
++├── plan.md              # This file (/speckit-plan command output)
++├── research.md          # Phase 0 output: 10 decisions, each with a validated probe
++├── data-model.md        # Phase 1 output: entities, rules, state
++├── quickstart.md        # Phase 1 output: runnable validation + FR→test map
++├── contracts/
++│   └── cli.md           # Phase 1 output: the command-line contract
++├── checklists/
++│   └── requirements.md  # Pre-existing spec quality checklist
++└── tasks.md             # Phase 2 output (/speckit-tasks — NOT created by /speckit-plan)
++```
++
++### Source Code (repository root)
++
++```text
++pyproject.toml           # Project metadata; dependencies = [] ; pytest config (pythonpath=src)
++
++src/
++└── logredact/
++    ├── __init__.py      # Package marker; re-exports redact_text and Counts
++    ├── __main__.py      # CLI: argument parsing, input selection, stream I/O, exit status
++    └── redact.py        # Redaction engine: patterns, luhn(), redact_text(), Counts
++
++tests/
++├── conftest.py          # run_cli() helper: subprocess with PYTHONPATH=src
++├── test_redact.py       # Unit: FR-005…FR-018, FR-020 (engine-level, per requirement)
++├── test_cli.py          # Integration: FR-001…FR-004, FR-019, FR-021…FR-025
++└── test_corpus.py       # SC-002 leak corpus and SC-003 false-positive corpus
++```
++
++**Structure Decision**: Single project, `src/` layout, as fixed by the spec's carried-over
++constraints ("code in a package named `logredact` under `src/`, runnable as `python -m logredact`
++when `src/` is on `PYTHONPATH`"). The web/mobile template options do not apply. The engine
++(`redact.py`) is separated from the CLI (`__main__.py`) for one concrete, non-speculative reason:
++Principle III requires each redaction requirement to be testable, and testing FR-007 through
++FR-018 through a subprocess would be slow and would conflate redaction defects with I/O defects.
++There is no third layer — no `models/`, `services/`, or `lib/` directory — because no requirement
++corresponds to one. Tests sit in three files split by what they assert (engine, CLI contract,
++corpora), discoverable by a bare `pytest` from the repository root as the Constitution's layout
++constraint requires.
++
++## Complexity Tracking
++
++> **Fill ONLY if Constitution Check has violations that must be justified**
++
++No violations. No entries.
+diff --git a/specs/001-logredact-cli/quickstart.md b/specs/001-logredact-cli/quickstart.md
+new file mode 100644
+index 0000000..307052f
+--- /dev/null
++++ b/specs/001-logredact-cli/quickstart.md
+@@ -0,0 +1,258 @@
++# Phase 1 Quickstart: Validating the Log Redaction CLI
++
++**Feature**: [spec.md](./spec.md) | **Plan**: [plan.md](./plan.md) | **Contract**:
++[contracts/cli.md](./contracts/cli.md)
++
++How to run the tool and prove it works end to end. This is a validation guide, not an
++implementation guide — it contains no module bodies or test suites; those belong to
++`/speckit-tasks` and the implementation phase.
++
++## Prerequisites
++
++- Python **3.11 or newer** (`python3 -VV`). This environment has 3.13.17.
++- `pytest` **7 or newer**, for the built-in `pythonpath` setting. This environment has 9.1.1.
++- No other installation step: the tool has no runtime dependencies (Constitution principle I), so
++  there is nothing to `pip install` for running it.
++
++## Run it
++
++`src/` must be on `PYTHONPATH`, which is what makes `python -m logredact` resolve:
++
++```bash
++cd <repo root>
++export PYTHONPATH=src
++```
++
++Then any of:
++
++```bash
++# stdin
++echo 'user jane@example.com from 10.0.0.7' | python3 -m logredact
++
++# named files, in order, one sanitised stream out
++python3 -m logredact a.log b.log > safe-to-attach.log
++
++# with the tally, captured separately from the data
++python3 -m logredact --count a.log > safe.log 2> tally.txt
++```
++
++## Run the tests
++
++From the repository root, with no plugins or services (Constitution principle III):
++
++```bash
++python3 -m pytest          # or: pytest
++```
++
++`pyproject.toml` sets `pythonpath = ["src"]` under `[tool.pytest.ini_options]`, so tests import
++`logredact` without an install step or a `conftest.py` path hack.
++
++---
++
++## Scenario 1 — Core redaction on a piped stream (User Story 1, P1)
++
++Proves the three rules fire together and everything else survives untouched.
++
++```bash
++printf 'user jane@example.com from 10.0.0.7\npaid with 4111 1111 1111 1111, ref 1234567890123\nGET /health 200 in 4ms\n' \
++  | python3 -m logredact
++```
++
++**Expected** — exit status `0`, stderr empty, stdout exactly:
++
++```text
++user [EMAIL] from [IP]
++paid with [CARD], ref 1234567890123
++GET /health 200 in 4ms
++```
++
++Line 2 is the discriminating one: the grouped Luhn-valid number is replaced by a single
++`[CARD]` including its spaces, while the Luhn-invalid 13-digit `1234567890123` is left alone.
++
++**Also check** (one line each, all must come back unchanged): `999.1.1.1`, `1.2.3.4.5`,
++`jane@localhost`, `4111  1111 1111 1111` (double space), `11111111111111111111` (20 digits). And
++`connect to 192.168.0.10.` → `connect to [IP].`, keeping the sentence period.
++
++**Empty input**: `printf '' | python3 -m logredact` → empty stdout, exit `0`.
++
++## Scenario 2 — Named files in argument order (User Story 2, P2)
++
++```bash
++printf 'first a@b.io\n'  > /tmp/a.log
++printf 'second 1.2.3.4'  > /tmp/b.log     # note: no trailing newline
++python3 -m logredact /tmp/a.log /tmp/b.log | od -c | tail -3
++```
++
++**Expected** — `first [EMAIL]\nsecond [IP]` with **no** newline after `[IP]`: the missing
++terminator is preserved, not invented (FR-006). Reverse the two arguments and the output order
++reverses with them. Pass `/tmp/a.log` twice and its content appears twice.
++
++**Stdin is ignored when files are given**:
++
++```bash
++echo 'LEAK x@y.io' | python3 -m logredact /tmp/a.log
++```
++
++**Expected** — `first [EMAIL]` only. The string `LEAK` must not appear anywhere in stdout.
++
++## Scenario 3 — The tally (User Story 3, P3)
++
++```bash
++echo 'a@b.io 1.2.3.4' | python3 -m logredact --count > /tmp/out.txt 2> /tmp/err.txt
++cat /tmp/out.txt   # [EMAIL] [IP]
++cat /tmp/err.txt   # emails=1 ips=1 cards=0
++```
++
++**Expected** — exit `0`; the tally is on stderr only, so redirecting stdout alone never
++contaminates the sanitised data.
++
++**Occurrences, not distinct values**:
++
++```bash
++echo 'a@b.io a@b.io a@b.io' | python3 -m logredact --count 2>&1 >/dev/null
++# emails=3 ips=0 cards=0
++```
++
++**One tally for all files combined**, and `--count` works in any position (FR-001):
++
++```bash
++python3 -m logredact /tmp/a.log --count /tmp/b.log 2>&1 >/dev/null
++# emails=1 ips=1 cards=0   — a single line, after all output
++```
++
++That interspersed form is the case plain `argparse` gets wrong (research D-007), so it is worth
++running by hand even once the suite is green.
++
++**No flag, no stderr**: `echo 'a@b.io' | python3 -m logredact 2>/tmp/err.txt` leaves
++`/tmp/err.txt` empty (FR-021).
++
++## Scenario 4 — Unreadable input fails loudly (User Story 4, P3)
++
++```bash
++python3 -m logredact /tmp/nope.log; echo "status=$?"
++```
++
++**Expected** — stdout empty; stderr names the path, e.g.
++`logredact: /tmp/nope.log: No such file or directory`; `status=2`.
++
++**Mid-list failure, with `--count`** — the case that must not look like success:
++
++```bash
++python3 -m logredact /tmp/a.log /tmp/nope.log --count > /tmp/out.txt 2> /tmp/err.txt
++echo "status=$?"
++```
++
++**Expected** — `/tmp/out.txt` holds the redacted `/tmp/a.log` (already written, not retracted);
++`/tmp/err.txt` names `/tmp/nope.log` and contains **no** tally line; `status=2`.
++
++**Failure before a readable file** — processing stops at the first failure:
++
++```bash
++python3 -m logredact /tmp/nope.log /tmp/b.log; echo "status=$?"
++```
++
++**Expected** — nothing from `/tmp/b.log` on stdout; `status=2`.
++
++**Directory, permission denied, undecodable bytes** — all three are read failures:
++
++```bash
++python3 -m logredact /tmp; echo "status=$?"                      # Is a directory
++printf 'x' > /tmp/no.log && chmod 000 /tmp/no.log
++python3 -m logredact /tmp/no.log; echo "status=$?"               # Permission denied
++printf '\xff\xfe\x00bad' > /tmp/bin.log
++python3 -m logredact /tmp/bin.log; echo "status=$?"              # invalid start byte
++```
++
++Each names the path on stderr and exits `2`.
++
++**Unrecognised option**:
++
++```bash
++python3 -m logredact --verbose /tmp/a.log; echo "status=$?"
++```
++
++**Expected** — usage line plus `logredact: unrecognized option: --verbose` on stderr, stdout
++empty, `status=2`, and `/tmp/a.log` never opened.
++
++## Scenario 5 — Streaming limits (SC-006) and a closed pipe
++
++```bash
++python3 -c "
++open('/tmp/big.log','w').write(''.join(
++  f'{i} user{i}@ex.com 10.0.{i%256}.1 card 4111 1111 1111 1111\n' for i in range(100000)))"
++
++time python3 -m logredact /tmp/big.log --count > /dev/null
++```
++
++**Expected** — `emails=100000 ips=100000 cards=100000` and well under 10 seconds (the Phase 0
++probe measured 1.40 s on this shape of input; see research.md).
++
++```bash
++python3 -m logredact /tmp/big.log | head -2; echo "status=${PIPESTATUS[0]}"
++```
++
++**Expected** — two lines, empty stderr, `status=141`. Any traceback here is a defect
++(research D-010).
++
++**Very long line** — a 1 MB single line passes through without truncation and memory stays flat:
++
++```bash
++python3 -c "print('x'*1000000 + ' a@b.io')" | python3 -m logredact | wc -c
++# 1000009  (1000000 x's + ' ' + '[EMAIL]' + '\n')
++```
++
++---
++
++## Requirement → test map (SC-004)
++
++Every FR maps to at least one named test, and each test id carries the requirement it verifies,
++as Constitution principle III requires. `test_redact.py` exercises the engine directly;
++`test_cli.py` runs the real command in a subprocess via the `run_cli()` helper in `conftest.py`.
++
++| Requirement | Test file | Test id |
++|---|---|---|
++| FR-001 | `test_cli.py` | `test_fr001_count_flag_accepted_before_between_and_after_files` |
++| FR-002 | `test_cli.py` | `test_fr002_reads_stdin_when_no_file_given` |
++| FR-003 | `test_cli.py` | `test_fr003_reads_files_in_order_and_ignores_stdin` |
++| FR-004 | `test_cli.py` | `test_fr004_output_concatenated_in_argument_order` |
++| FR-005 | `test_redact.py` | `test_fr005_line_count_and_order_unchanged` |
++| FR-006 | `test_cli.py` | `test_fr006_byte_identical_passthrough_crlf_blank_and_no_final_newline` |
++| FR-007 | `test_redact.py` | `test_fr007_email_replaced_with_placeholder` |
++| FR-008 | `test_redact.py` | `test_fr008_email_grammar_accepts_dots_plus_and_subdomains` |
++| FR-009 | `test_redact.py` | `test_fr009_non_email_text_left_unchanged` |
++| FR-010 | `test_redact.py` | `test_fr010_ipv4_replaced_with_placeholder` |
++| FR-011 | `test_redact.py` | `test_fr011_ipv4_octet_range_boundaries` |
++| FR-012 | `test_redact.py` | `test_fr012_out_of_range_or_wrong_part_count_left_unchanged` |
++| FR-013 | `test_redact.py` | `test_fr013_ipv4_digit_boundary_and_trailing_period` |
++| FR-014 | `test_redact.py` | `test_fr014_card_replaced_including_separators` |
++| FR-015 | `test_redact.py` | `test_fr015_card_length_separator_shapes_and_luhn` |
++| FR-016 | `test_redact.py` | `test_fr016_luhn_failure_length_and_digit_adjacency_left_unchanged` |
++| FR-017 | `test_redact.py` | `test_fr017_leftmost_match_wins_and_email_beats_ipv4` |
++| FR-018 | `test_redact.py` | `test_fr018_placeholders_not_reexamined` |
++| FR-019 | `test_cli.py` | `test_fr019_count_writes_single_tally_line_after_output` |
++| FR-020 | `test_redact.py`, `test_cli.py` | `test_fr020_counts_occurrences_not_distinct_values`, `test_fr020_single_tally_across_all_files` |
++| FR-021 | `test_cli.py` | `test_fr021_stderr_empty_without_count` |
++| FR-022 | `test_cli.py` | `test_fr022_diagnostic_names_path_for_missing_denied_directory_and_undecodable` |
++| FR-023 | `test_cli.py` | `test_fr023_stops_at_first_failure_suppresses_tally_exits_2` |
++| FR-024 | `test_cli.py` | `test_fr024_unrecognized_option_usage_to_stderr_nothing_processed` |
++| FR-025 | `test_cli.py` | `test_fr025_exit_zero_when_all_inputs_read` |
++
++### Success-criteria coverage
++
++| Criterion | Where it is proven |
++|---|---|
++| SC-001 (worked examples byte-for-byte) | `test_cli.py::test_sc001_worked_examples_reproduce_exactly` — the E-1…E-3 blocks in [contracts/cli.md](./contracts/cli.md) |
++| SC-002 (0% leak rate) | `test_corpus.py::test_sc002_no_known_value_survives` — asserts no known email, address, or card digit sequence appears in the output |
++| SC-003 (0% false positives) | `test_corpus.py::test_sc003_non_sensitive_corpus_byte_identical` — Luhn-invalid runs, out-of-range quads, dates, versions, timestamps |
++| SC-004 (every FR tested, suite green) | the map above; `pytest` exits 0 |
++| SC-005 (failure modes assert message *and* status) | the FR-022/FR-023/FR-024 rows |
++| SC-006 (100k lines <10 s, flat memory) | `test_cli.py::test_sc006_streams_large_input_within_budget` plus Scenario 5 by hand |
++| SC-007 (reproducible from the tool alone) | every test runs with no config, env var, or network — only `PYTHONPATH=src` |
++
++## Definition of done for this feature
++
++- `pytest` passes from the repository root with no plugins.
++- Every FR row above has a passing test, and the failure-mode rows assert both the diagnostic and
++  the exit status.
++- No third-party import appears in `src/` (Constitution merge gate).
++- Scenarios 1-5 behave as written when run by hand.
+diff --git a/specs/001-logredact-cli/research.md b/specs/001-logredact-cli/research.md
+new file mode 100644
+index 0000000..e5be330
+--- /dev/null
++++ b/specs/001-logredact-cli/research.md
+@@ -0,0 +1,301 @@
++# Phase 0 Research: Log Redaction CLI
++
++**Feature**: [spec.md](./spec.md) | **Plan**: [plan.md](./plan.md) | **Date**: 2026-11-21
++
++## Status of unknowns
++
++The Technical Context in [plan.md](./plan.md) contains **no NEEDS CLARIFICATION markers**. The
++requester supplied the language, dependency policy, layout, and test framework; the spec's
++Assumptions section had already resolved the behavioural ambiguities. Phase 0 therefore did not
++need to resolve open questions about *what* to build.
++
++What it did instead was verify that the stated interface is actually achievable with the
++standard library, because three of the spec's requirements are the kind that look trivial and
++are not:
++
++- FR-001 ("`--count` accepted in any position") — **`argparse` cannot do this** (D-007).
++- FR-017 (leftmost-wins precedence across three overlapping rule families) — resolvable, but
++  only after deciding how cards interact with the other two rules (D-004).
++- FR-006 ("exactly as read, including … the presence or absence of a trailing line ending") —
++  requires opting out of universal-newline translation (D-008).
++
++Every decision below was checked by running code, not by recall. The probe suite covered 36
++input/output pairs drawn from the spec's acceptance scenarios and edge-case list; all 36 produced
++the specified output. Three additional probes covered argument parsing, I/O fidelity, and
++throughput.
++
++---
++
++## D-001: Email recognition — one regex, anchored on the final label
++
++**Decision**: `[A-Za-z0-9._%+\-]+@(?:[A-Za-z0-9\-]+\.)+[A-Za-z]{2,}`
++
++**Rationale**: Transcribes FR-008 literally. The `(?:label\.)+` repetition requires at least one
++dot, which is what makes FR-009 reject `jane@localhost`; `[A-Za-z]{2,}` is the "final label of at
++least two letters" clause, which rejects `x@y.c`. No `\b` is needed — the character classes are
++their own boundaries.
++
++**Verified**: `jane.doe+test@mail.example.com` → `[EMAIL]`; `jane@localhost`, `bare @ sign`,
++`x@y.c` → unchanged; `12345678901234-user@x.com` → `[EMAIL]` (digits and hyphens are legal local
++part characters, so this is one email, not a card followed by text).
++
++**Alternatives considered**: RFC 5322-conformant matching (rejected — vastly larger, and FR-008
++defines a narrower grammar that the tests will assert); `email.utils.parseaddr` from the stdlib
++(rejected — it parses a header field, does not *find* addresses inside arbitrary text, and
++accepts things FR-009 requires rejecting).
++
++## D-002: IPv4 recognition — range-checked in the pattern, with mirrored boundary guards
++
++**Decision**:
++
++```python
++OCTET = r"(?:25[0-5]|2[0-4]\d|[01]?\d?\d)"
++IPV4  = rf"(?<!\d)(?<!\d\.){OCTET}(?:\.{OCTET}){{3}}(?!\d)(?!\.\d)"
++```
++
++**Rationale**: The alternation enforces 0-255 (FR-011) without a Python-side check, so no
++candidate needs a callback. The two lookaheads are FR-013 verbatim: not followed by a digit, and
++not followed by `.`+digit — the pair that makes `192.168.0.10.` redact while `1.2.3.4.5` does
++not.
++
++The `(?<!\d\.)` lookbehind is **derived, not stated in FR-013**, and it is required for
++correctness. FR-013's forward guard alone leaves `1.2.3.4.5` partially matched: the candidate at
++offset 0 is correctly rejected, but the scan then reaches offset 2, where `2.3.4.5` is preceded
++by `.` (not a digit) and followed by end-of-string — so it would match, producing `1.[IP]` and
++contradicting the spec's own edge case ("`1.2.3.4.5` is left unchanged"). Mirroring the forward
++`(?!\.\d)` guard backwards resolves the spec's internal tension in favour of the explicitly
++stated outcome.
++
++**Verified**: `10.0.0.7`, `0.0.0.0`, `255.255.255.255` → `[IP]`; `999.1.1.1`, `256.1.1.1`,
++`1.2.3`, `1.2.3.4.5`, `v1.2.3` → unchanged; `connect to 192.168.0.10.` → `connect to [IP].`;
++`user@1.2.3.4` → `user@[IP]`.
++
++**Alternatives considered**: `\d{1,3}` parts plus a Python range check in the callback (rejected —
++moves work out of the compiled pattern for no behavioural gain and adds a branch per candidate);
++`ipaddress.IPv4Address` validation (rejected — it validates a complete string, so it still needs
++a finder regex, and it accepts forms FR-011 excludes).
++
++### Derived sub-decision: leading zeros are accepted
++
++`[01]?\d?\d` matches `01`, `007`, and `000`, so `007.0.0.1` and `01.2.3.4` redact to `[IP]`.
++FR-011 says each part is "a decimal number in the range 0 to 255" and is silent on zero padding;
++`007` reads as 7, which is in range. The tie-break is the spec's stated bias — over-redaction is
++the safe direction for a privacy tool — so padded quads are redacted rather than leaked.
++Four-digit parts are still rejected (`0255.1.1.1` is unchanged) because the digit-boundary guards
++apply. Flag for `/speckit-clarify` if canonical-form-only matching is wanted.
++
++## D-003: Card recognition — bounded-window regex plus a Python Luhn check
++
++**Decision**: candidate pattern `(?<!\d)(?:\d[ \-]?){12,18}\d(?!\d)`, then validate with an
++8-line `luhn()` over the separator-stripped digits.
++
++**Rationale**: A checksum is not expressible as a regular expression, so the split is forced:
++regex finds *shaped* candidates, Python decides. The unit `(?:\d[ \-]?)` makes the digit count —
++not the character count — the thing being bounded, giving exactly 13 to 19 digits (FR-015/FR-016)
++however the groups are separated. Because every unit's separator *follows* a digit, double
++separators, leading separators, and trailing separators are all structurally impossible, which is
++what makes `4111  1111 1111 1111` (double space) fail as required. The `{12,18}` cap is load
++bearing in a non-obvious way: an uncapped "maximal run" pattern would consume short digit runs,
++and a run ending adjacent to an address (`1234 10.0.0.7`) would swallow the first octet and hide
++an IPv4 address from the scan. The cap plus the `(?!\d)` lookahead guarantees a match always ends
++on a group boundary.
++
++**Verified**: `4111 1111 1111 1111`, `4111-1111-1111-1111`, `4111-1111 1111-1111` (mixed
++separators, per the spec's Assumptions), and bare `4111111111111111` → `[CARD]`;
++`1234567890123` (Luhn-invalid 13 digits), `123456789012` (12 digits), `11111111111111111111`
++(20 digits), `4111  1111 1111 1111` (double space), `4111,1111,1111,1111` (comma),
++`2026-11-20 10:00:00` → unchanged; `x4111111111111111` → `x[CARD]`.
++
++**Alternatives considered**: brand/BIN prefix validation (rejected — the spec's Assumptions
++explicitly exclude it); `{13,19}` on a character count (rejected — wrong unit; it miscounts any
++separated number).
++
++## D-004: Overlap resolution — email+IPv4 in one alternation pass, cards in a second pass
++
++**Decision**: Pass A is `re.sub` over `(?P<email>…)|(?P<ip>…)`. Pass B scans pass A's output for
++card candidates. Counts accumulate across both.
++
++**Rationale**: Python's alternation is leftmost-first — it takes the earliest start position, and
++among alternatives at that position it prefers the earlier branch — which *is* FR-017 ("the match
++starting at the leftmost position MUST win; where candidates start at the same position, email
++MUST take precedence over IPv4"). Writing email before IPv4 in the pattern is the whole
++implementation of that clause. `re.sub` never rescans replacement text, which is FR-018 for free.
++Cards cannot join that alternation, because a Luhn-failing branch cannot "give the match back" to
++a later alternative in a single `re.sub`.
++
++Running cards second is safe in the ordinary case and strictly safer in the overlapping case.
++Placeholders contain no digits, dots, or `@`, so pass B cannot match inside pass A's output
++(FR-018 holds), and card text (digits, single spaces, single hyphens) contains no `@` or `.`, so
++pass B never has an email or IPv4 hidden inside a candidate.
++
++**The one divergence from a literal single-pass reading of FR-017**, recorded here because the
++Constitution's Workflow Gate 2 requires design choices to be visible in the plan: when a card
++candidate *overlaps* an IPv4 address — possible only when a 13-19 digit run is joined to an
++address by a single space, as in `4111111111111111 10.0.0.7` — strict leftmost-wins would let the
++card candidate (starting further left) consume the address's first octet and emit
++`[CARD].0.0.7`, leaving `.0.0.7` in the output. Worse, if that merged 18-digit window fails Luhn,
++the single-pass scan consumes it, leaves it unchanged, and resumes *past* the address — leaking
++the whole IPv4 address. IPv4-before-cards produces `card [CARD] [IP]` (**verified**) in the first
++case and `1111111111111 [IP]` in the second. It redacts a superset of what strict leftmost-wins
++redacts and never a subset, which is the direction SC-002 ("the leak rate is 0%") demands.
++
++**Alternatives considered**: a single three-branch alternation whose callback returns
++`match.group(0)` unchanged on Luhn failure (rejected — the leak just described, demonstrated by
++probe on `card 4111111111111111 10.0.0.7`); a maximal-run card pattern with a recursive callback
++that re-scans leftover text for addresses (rejected — restores correctness at the cost of
++re-entrant scanning, which Principle IV rules out when a two-line pass ordering achieves the same
++result).
++
++## D-005: A Luhn-failing window is left unchanged, and the scan restarts one character later
++
++**Decision**: Pass B is a `while` loop over `CARD.search(text, pos)` rather than `re.sub`:
++
++```python
++if luhn(digits):   emit "[CARD]";  pos = m.end()
++else:              emit one char;  pos = m.start() + 1
++```
++
++**Rationale**: FR-016 requires a Luhn-failing candidate to be left unchanged. `re.sub` would also
++*consume* it, skipping any valid card nested behind it: in `123 4111111111111111` the leftmost
++window is all 19 digits, which fails Luhn, and consuming it would hide the valid 16-digit card
++that follows the space. Advancing by one character instead lets the scan re-enter at the next
++legal start — the `(?<!\d)` lookbehind still works when `search` is given a `pos`, because `pos`
++is not a slice and lookbehind can see behind it. **Verified**: `123 4111111111111111` →
++`123 [CARD]`.
++
++**Residual limitation, accepted and stated precisely**: if the longest window at a start position
++fails Luhn but a *shorter* window at the **same** start would pass, the shorter one is not tried.
++Concretely: a digit run of 3+ separated groups totalling more than 19 digits, where a valid card
++occupies the leading groups and the trailing digits begin at a position preceded by a digit. This
++is the same class of false negative the spec already accepts in its edge-case list ("a 20+ digit
++run … is left unchanged, even if some substring of it would pass the Luhn check") and follows
++directly from FR-016's wording.
++
++**Alternatives considered**: exhaustive sub-window search (longest-first at each group start,
++retrying all shorter windows). Rejected: it contradicts FR-016's plain reading, costs an inner
++loop over up to 7 windows per candidate, and increases over-redaction of long correlation ids —
++and the spec already treats this exact trade as settled. `/speckit-clarify` can reverse it; doing
++so changes only `redact_text`'s inner loop.
++
++## D-006: Luhn implementation
++
++**Decision**: double every second digit from the right, subtract 9 when the doubled value exceeds
++9, sum, accept when the total is divisible by 10.
++
++**Verified**: `4111111111111111` → valid; `1234567890123` → invalid (the spec's two worked
++examples).
++
++**Alternatives considered**: a lookup table for doubled digits (rejected — a micro-optimisation
++invisible against regex cost; the probe already runs 7x inside the SC-006 budget).
++
++## D-007: Argument parsing — hand-written, because `argparse` cannot satisfy FR-001
++
++**Decision**: a ~15-line scan of `sys.argv[1:]`: exactly `--count` sets the flag; any other token
++beginning with `-` and longer than one character is an unrecognised option (usage to stderr, exit
++2); every remaining token, including a bare `-`, is a FILE path in order.
++
++**Rationale**: this is the one place where the obvious stdlib answer is wrong, and it was caught
++by probing rather than assumed. FR-001 requires `--count` "in any position relative to file
++arguments". `argparse` with `positional nargs="*"` **fails** on an interspersed flag — a
++documented consequence of how it splits argument groups:
++
++| `argv` | `argparse` result |
++|---|---|
++| `['--count', 'a.log', 'b.log']` | `count=True files=['a.log','b.log']` ✓ |
++| `['a.log', '--count']` | `count=True files=['a.log']` ✓ |
++| **`['a.log', '--count', 'b.log']`** | **`error: unrecognized arguments: b.log`, exit 2** ✗ |
++
++Any `argparse`-based fix (pre-filtering `--count` out of `argv`, or `parse_known_args`, which
++would silently accept unknown options and violate FR-024) requires hand-writing part of the
++parse anyway, so hand-writing all 15 lines is both smaller and the only version that meets
++FR-001. Exit status 2 is kept for the usage error — it matches `argparse`'s own convention and
++satisfies FR-024's "non-zero". It coincides with the unreadable-file status, which FR-023/FR-024
++permit, and the two cases are distinguished by their messages.
++
++**Derived sub-decision**: `-h`/`--help` is **not** implemented; like any other unrecognised
++option it yields the usage message and exit 2. No requirement asks for a help flag, and Principle
++IV prohibits unrequested surface. The usage string exists regardless, since FR-024 requires it.
++Flag for `/speckit-clarify` if a help flag is wanted.
++
++## D-008: Stream I/O — explicit UTF-8, `newline=""`, strict decoding
++
++**Decision**: open files as `open(path, "r", encoding="utf-8", newline="", errors="strict")`;
++wrap `sys.stdin.buffer` and `sys.stdout.buffer` in `io.TextIOWrapper` with the same settings.
++
++**Rationale**: FR-006 requires a line to come out "exactly as read, including … the presence or
++absence of a trailing line ending". Default universal-newline mode rewrites `\r\n` to `\n`,
++breaking that; `newline=""` keeps each terminator attached to its line while still splitting on
++all three conventions. **Verified**: `'a@b.io line1\r\nno newline at end 1.2.3.4'` reads back as
++`['a@b.io line1\r\n', 'no newline at end 1.2.3.4']` — CRLF intact, no newline invented for the
++final line. Forcing `encoding="utf-8"` on *output* as well matters because an inherited `C`
++locale would otherwise pick ASCII and crash on non-ASCII passthrough text; re-encoding
++UTF-8-decoded text as UTF-8 cannot fail. `errors="strict"` is what turns undecodable bytes into
++the exit-2 path the spec's Assumptions require, rather than `U+FFFD`-mangled output.
++
++**Alternatives considered**: byte-level processing with `bytes` patterns (rejected — the spec's
++Assumptions fix UTF-8 text semantics, and byte mode would redefine "line" and "letter");
++`errors="replace"` (rejected — explicitly contrary to the "decode failures are read failures"
++assumption and to Principle II).
++
++## D-009: Read-failure detection — catch `OSError` and `UnicodeDecodeError` per file
++
++**Decision**: wrap each file's open-and-stream in `except (OSError, UnicodeDecodeError) as exc`,
++report `logredact: {path}: {reason}`, stop, exit 2.
++
++**Rationale**: one `OSError` base covers every variant FR-022 lists with the *reason already
++filled in by the OS*, so the diagnostic names both the path and what went wrong, as Principle II
++demands. **Verified**: a missing path raises `FileNotFoundError` with `strerror='No such file or
++directory'`; a directory raises `IsADirectoryError` ('Is a directory'); permission denial raises
++`PermissionError`; undecodable bytes raise `UnicodeDecodeError` ('invalid start byte'). Note that
++`UnicodeDecodeError` surfaces *during* iteration, after earlier lines of that file have already
++been written — consistent with the spec's "output already written is left in place" assumption.
++
++**Alternatives considered**: pre-flighting every path with `os.access`/`Path.is_file` before
++reading (rejected — a TOCTOU race and a second code path for the same failure, where the
++exception already carries a better message).
++
++## D-010: Broken pipe — restore the default `SIGPIPE` disposition
++
++**Decision**: at startup, `signal.signal(signal.SIGPIPE, signal.SIG_DFL)` where the signal
++exists, plus a `BrokenPipeError` guard around the final flush.
++
++**Rationale**: the spec's last edge case requires that a closed stdout ("for example by a pipe to
++`head`") terminate the tool "without an unhandled crash report". Python installs a `SIGPIPE`
++handler that converts the signal into an exception, so the default behaviour is a traceback.
++**Verified** by probe: without the change, `… | head -2` prints a 194-byte
++`BrokenPipeError` traceback to stderr and exits 1; with it, stderr is empty and the exit status
++is 141 (128+13), exactly how `cat` behaves in the same pipeline. The explicit
++`BrokenPipeError` catch covers interpreter shutdown flushes and platforms without `SIGPIPE`;
++catching one specific anticipated exception type is permitted by Principle II.
++
++**Alternatives considered**: catching `BrokenPipeError` alone and exiting 0 or 1 (rejected —
++reports success or an ambiguous failure for a truncated privacy-sensitive stream, and still risks
++a shutdown-time traceback unless stdout is redirected to `os.devnull` first).
++
++---
++
++## Throughput measurement (SC-006)
++
++| Input | Result |
++|---|---|
++| 100,000 lines / 10.3 MB, every line carrying an email, an IPv4 address, and a grouped card | **1.40 s**, 300,000 replacements, memory flat (one line resident) |
++
++Against the 10-second budget in SC-006 this leaves roughly a 7x margin, measured with both regex
++passes and the Luhn check active on every line. Because the loop holds exactly one line at a
++time, the 1 GB case in SC-006 is bounded by the longest line rather than by file size. No
++optimisation work is warranted; the simple implementation is already comfortably inside budget.
++
++## Consolidated decision summary
++
++| ID | Decision | Drives |
++|----|----------|--------|
++| D-001 | Single email regex anchored on a ≥2-letter final label | FR-007, FR-008, FR-009 |
++| D-002 | Range-checked octet alternation; forward *and* mirrored backward boundary guards | FR-010…FR-013 |
++| D-003 | Digit-counted window regex `(?:\d[ \-]?){12,18}\d` + Luhn | FR-014, FR-015, FR-016 |
++| D-004 | Email+IPv4 in one leftmost-first alternation; cards in a second pass | FR-017, FR-018 |
++| D-005 | Luhn failure leaves text unchanged; scan restarts at start+1 | FR-016 |
++| D-006 | Textbook Luhn, 8 lines, no table | FR-015 |
++| D-007 | Hand-written parser (`argparse` fails FR-001); no `--help` | FR-001, FR-024 |
++| D-008 | Explicit UTF-8, `newline=""`, strict errors on both streams | FR-005, FR-006 |
++| D-009 | `OSError`/`UnicodeDecodeError` per file → named diagnostic, exit 2 | FR-022, FR-023 |
++| D-010 | `SIGPIPE` → `SIG_DFL` + `BrokenPipeError` guard | Closed-output edge case |

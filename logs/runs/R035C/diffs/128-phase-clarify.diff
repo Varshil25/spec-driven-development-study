@@ -1,0 +1,317 @@
+diff --git a/specs/002-create-command/spec.md b/specs/002-create-command/spec.md
+index f2bfeb0..512e9fc 100644
+--- a/specs/002-create-command/spec.md
++++ b/specs/002-create-command/spec.md
+@@ -30,6 +30,16 @@ the next:
+   was.
+ - **Results to standard output, diagnostics to standard error, one problem per line.**
+ 
++## Clarifications
++
++### Session 2026-11-19
++
++- Q: When `create` encounters an entry it cannot read inside a named directory, must it detect that before writing (no archive left behind), or may it fail partway and leave an incomplete archive? → A: Detect before writing — validation walks every named path in full and confirms each entry can be opened for reading, so an unreadable entry exits 2 with no archive created; an incomplete archive can then only result from a genuine mid-write failure such as a full disk.
++- Q: In what order are the entries inside a named directory stored in the archive? → A: Sorted by full member path compared as text (for example `d/a.txt`, `d/b/c.txt`, `d/z.txt`), which also places a directory before the entries inside it; the same files therefore always produce the same archive.
++- Q: When two names in the tree are two names for the same file on disk (a hard link), is each stored as an ordinary file or is the second one skipped? → A: Each name is stored and counted as an independent regular file with its own copy of the contents; "hard link" is a member type only when reading archives, so FR-015's skip list covers only what the filesystem itself distinguishes from a regular file — symbolic links, device nodes, FIFOs and sockets.
++- Q: What happens when `ARCHIVE` names a path whose parent directory does not exist? → A: `create` refuses — a diagnostic naming the missing directory, exit status 2, and no archive and no directories created. `create` writes exactly one thing, the archive itself; it never creates directories, unlike `extract`'s destination.
++- Q: How is SC-010's "archives a file larger than available memory" made testable? → A: Restated as a bounded measurement — archive a file of tens of megabytes and assert peak additional memory stays under a small fixed ceiling that does not grow with file size, so an implementation that reads a whole file into memory fails the test.
++
+ ## User Scenarios & Testing *(mandatory)*
+ 
+ ### User Story 1 - Package files and folders into an archive (Priority: P1)
+@@ -44,17 +54,17 @@ in. Whether the archive is compressed follows from the name they chose for it.
+ delivers standalone value. A user who has only this capability can already package their work.
+ 
+ **Independent Test**: Build a known directory tree, run `create` with a `.tar` name and again with
+-a `.tar.gz` name, and confirm each archive holds exactly the expected members with the expected
+-relative names and byte-identical contents, that the gzip-named one is gzip-compressed and the
+-other is not, and that standard output is the single summary line with the correct count and the
+-exit status is 0.
++a `.tar.gz` name, and confirm each archive holds exactly the expected members in the expected
++order, with the expected relative names and byte-identical contents, that the gzip-named one is
++gzip-compressed and the other is not, and that standard output is the single summary line with the
++correct count and the exit status is 0.
+ 
+ **Acceptance Scenarios**:
+ 
+ 1. **Given** a directory `photos` containing `a.jpg` and `b.jpg`, **When** the user runs
+    `create photos.tar.gz photos`, **Then** standard output is exactly
+    `created photos.tar.gz with 2 files`, the exit status is 0, and the archive holds the members
+-   `photos`, `photos/a.jpg` and `photos/b.jpg`.
++   `photos`, `photos/a.jpg` and `photos/b.jpg` in exactly that order.
+ 2. **Given** the same directory, **When** the user runs `create photos.tar photos`, **Then** the
+    archive holds the same members with the same names and is an uncompressed tar archive.
+ 3. **Given** a file `notes.txt` in the current directory, **When** the user runs
+@@ -64,12 +74,15 @@ exit status is 0.
+    of them in one invocation, **Then** every one of them is in the archive, in the order the paths
+    were given, and the reported count is the total number of regular files across all of them.
+ 5. **Given** a directory tree nested several levels deep, **When** the user runs `create` on its
+-   top directory, **Then** every file at every depth is a member named by its full relative path.
++   top directory, **Then** every file at every depth is a member named by its full relative path,
++   and the members appear sorted by name as text — `d`, `d/a.txt`, `d/b/c.txt`, `d/z.txt`.
+ 6. **Given** a directory containing an empty subdirectory, **When** the user runs `create`,
+    **Then** the empty subdirectory is recorded in the archive and does not count toward the
+    reported file total.
+ 7. **Given** a directory containing a zero-length file, **When** the user runs `create`, **Then**
+    that file is a member of the archive and counts toward the reported total.
++8. **Given** the same unchanged tree and the same invocation run twice, **When** the user lists
++   both resulting archives, **Then** the two member sequences are identical.
+ 
+ ---
+ 
+@@ -106,6 +119,10 @@ and confirm it succeeds and the archive now reflects the current source tree.
+ 5. **Given** a directory sitting at the archive path, **When** the user runs `create` — with or
+    without the overwrite option — **Then** an error message naming that path is written to
+    standard error, the exit status is 2, and the directory is untouched.
++6. **Given** an archive name inside a directory that does not exist, **When** the user runs
++   `create` — with or without the overwrite option — **Then** an error message naming the missing
++   directory is written to standard error, the exit status is 2, and neither the archive nor any
++   directory is created.
+ 
+ ---
+ 
+@@ -142,6 +159,10 @@ exit status is 2, and no file exists at the archive path afterwards.
+ 6. **Given** no paths at all after the archive name, or an unrecognised option, **When** the user
+    invokes `create`, **Then** a usage message is written to standard error, the exit status is
+    non-zero, and nothing is read or written.
++7. **Given** a directory containing one file the user has no permission to read, **When** the user
++   runs `create` on that directory, **Then** an error message naming that unreadable file is
++   written to standard error, the exit status is 2, and no file exists at the archive path
++   afterwards.
+ 
+ ---
+ 
+@@ -189,25 +210,36 @@ compare the extracted tree against the original sources.
+ - **The archive would land inside a directory being archived** (`create photos/all.tar photos`):
+   the archive file itself is not added as a member of itself; everything else under the directory
+   is.
+-- **Entries that are neither regular files nor directories** (symbolic links, hard links, device
+-  nodes, FIFOs) encountered while adding a directory, or named directly as a path: they are not
+-  stored, each is named on standard error so the user knows it was left out, they do not count
+-  toward the reported total, and their presence alone is not a failure.
++- **Entries that are neither regular files nor directories** (symbolic links, device nodes, FIFOs,
++  sockets) encountered while adding a directory, or named directly as a path: they are not stored,
++  each is named on standard error so the user knows it was left out, they do not count toward the
++  reported total, and their presence alone is not a failure.
++- **Two names for the same file on disk** (a hard link — `notes.txt` and `backup/notes.txt` being
++  two names for one file rather than two copies): both names are stored as ordinary regular file
++  members, each with its own copy of the contents, and both count toward the reported total.
++  Nothing is skipped, because neither name is distinguishable on disk from any other regular file
++  (FR-015).
+ - **A path that exists but cannot be read** (permission denied on a file, or on a directory being
+-  walked): the run fails loudly with a diagnostic naming that path and exits 2.
++  walked): the run fails loudly with a diagnostic naming that path, exits 2, and creates no
++  archive — readability is established across the whole tree during validation, before any writing
++  begins (FR-016, FR-021).
+ - **An empty directory as the only path**: the archive is created holding that one directory
+   member and the summary reads `created ARCHIVE with 0 files`, exit 0.
+ - **A count of exactly one**: the summary stays `created ARCHIVE with 1 files`; the line is a
+   fixed template for scripts, not prose.
+ - **An archive name with no recognised extension at all** (`backup`, `data.bin`): treated as a
+   plain, uncompressed tar archive, because only `.tar.gz` and `.tgz` select compression.
++- **An archive name inside a directory that does not exist** (`backups/2026/photos.tar` with no
++  `backups/2026`): refused with a diagnostic naming the missing directory and exit 2. No
++  directories are created — `create` writes the archive and nothing else (FR-027).
+ - **An archive name whose extension disagrees with convention** (`photos.tar` asked to hold
+   compressed data, or `photos.tar.gz` holding plain data): not possible — the name alone decides,
+   and `list`/`extract` read either form regardless of name.
+ - **Non-ASCII and non-UTF-8 file names**: stored under the names the filesystem reports and
+   reproduced by `list` and `extract`.
+ - **A very large file, or a tree larger than available memory**: archived successfully without
+-  holding a whole file or the whole archive in memory.
++  holding a whole file or the whole archive in memory, which SC-010 checks as a bounded peak-memory
++  measurement rather than by building such a file.
+ - **Filesystem error after writing has begun** (disk full, permission revoked, the archive's
+   directory removed mid-run): the run fails loudly with a diagnostic and exits 2 with no summary
+   line. An incomplete archive may remain at the archive path and must not be assumed valid; the
+@@ -248,9 +280,9 @@ compare the extracted tree against the original sources.
+   the new archive, and MUST NOT touch that file until validation (FR-016) has found no problem, so
+   that a rejected run leaves the previous archive intact.
+ - **FR-012**: When `ARCHIVE` exists and is not a regular file — a directory, symbolic link, device
+-  node or FIFO — `create` MUST create no archive, MUST write an error message naming that path to
+-  standard error, and MUST exit with status 2, identically with and without `--overwrite`, which
+-  consents only to replacing a regular file.
++  node, FIFO or socket — `create` MUST create no archive, MUST write an error message naming that
++  path to standard error, and MUST exit with status 2, identically with and without
++  `--overwrite`, which consents only to replacing a regular file.
+ - **FR-013**: When any `PATH` does not exist, `create` MUST write an error message naming that
+   `PATH` to standard error, MUST create no archive, MUST leave any pre-existing file at `ARCHIVE`
+   unchanged, and MUST exit with status 2.
+@@ -259,10 +291,18 @@ compare the extracted tree against the original sources.
+   MUST exit with status 2.
+ - **FR-015**: Entries that are neither regular files nor directories MUST NOT be stored in the
+   archive. Each such entry MUST be named on standard error as skipped, MUST NOT be counted in `N`,
+-  and its presence alone MUST NOT cause a non-zero exit status.
++  and its presence alone MUST NOT cause a non-zero exit status. The entries this covers are those
++  the filesystem itself distinguishes from a regular file: symbolic links, device nodes, FIFOs and
++  sockets. A file that merely carries more than one name on disk is an ordinary regular file for
++  this purpose — each such name MUST be stored and counted as a regular file in its own right,
++  with its own copy of the contents, so that no name beneath a given `PATH` is missing from the
++  archive. The hard-link member type arises only when reading an archive, where `extract`
++  continues to skip it unchanged (`001-tarx-cli` behaviour).
+ - **FR-016**: `create` MUST complete every check it is capable of making — the usability of
+-  `ARCHIVE` and the existence and safety of every `PATH` — before creating or modifying any file,
+-  so that a failure the tool detects leaves the filesystem exactly as it was.
++  `ARCHIVE`, the existence and safety of every `PATH`, and the readability of every entry beneath
++  every `PATH` at every depth — before creating or modifying any file, so that a failure the tool
++  detects leaves the filesystem exactly as it was. This means the source tree is traversed in full
++  during validation, before the archive is opened for writing.
+ - **FR-017**: Every `create` run that completes its requested work MUST exit with status 0;
+   command results MUST go only to standard output and diagnostics only to standard error.
+ - **FR-018**: When validation finds multiple problems, `create` MUST report all of them on
+@@ -272,11 +312,17 @@ compare the extracted tree against the original sources.
+ - **FR-019**: The archive being written MUST NOT be added to itself as a member when `ARCHIVE`
+   lies inside a directory named by a `PATH`.
+ - **FR-020**: A file or directory that is reachable through more than one of the given `PATH`
+-  operands MUST appear in the archive exactly once and MUST be counted once in `N`.
+-- **FR-021**: When an entry that exists cannot be read, or an unexpected filesystem error
+-  interrupts `create` after writing has begun, the tool MUST write a diagnostic naming the path
+-  concerned to standard error, MUST NOT write the summary line to standard output, and MUST exit
+-  with status 2. An incomplete archive MAY remain at `ARCHIVE`; the tool does not undo it.
++  operands MUST appear in the archive exactly once and MUST be counted once in `N`, at the
++  position earned by the first `PATH` operand that reaches it. Identity for this purpose is the
++  member name, not the underlying file on disk, so two names for one file are two members
++  (FR-015) while two routes to one name are one member.
++- **FR-021**: When an entry that exists cannot be read, `create` MUST detect this during
++  validation (FR-016), MUST write a diagnostic naming that entry to standard error, MUST create no
++  archive, MUST leave any pre-existing file at `ARCHIVE` unchanged, and MUST exit with status 2.
++  Separately, when an unexpected filesystem error interrupts `create` after writing has begun, the
++  tool MUST write a diagnostic naming the path concerned to standard error, MUST NOT write the
++  summary line to standard output, and MUST exit with status 2; an incomplete archive MAY remain at
++  `ARCHIVE` and the tool does not undo it.
+ - **FR-022**: Invalid `create` invocations — a missing `ARCHIVE`, no `PATH` operands, an
+   unrecognised option — MUST produce a usage diagnostic on standard error, a non-zero exit status,
+   and no reads or writes of the archive or source paths.
+@@ -289,6 +335,17 @@ compare the extracted tree against the original sources.
+   automated test that fails when the requirement is unmet, with the covering test traceable to the
+   requirement identifier, and the pre-existing tests for `list` and `extract` MUST continue to
+   pass unmodified.
++- **FR-026**: Member order MUST be fully determined by the invocation and the source tree, with no
++  dependence on the order the filesystem happens to report directory entries. The members
++  contributed by each `PATH` MUST be stored sorted by their full member name, compared as text —
++  so `d`, `d/a.txt`, `d/b/c.txt`, `d/z.txt`, in that order — which also places a directory before
++  the entries inside it. `PATH` operands MUST contribute their members in the order the operands
++  were given. Archiving an unchanged tree with an unchanged invocation MUST therefore produce the
++  same member sequence every time.
++- **FR-027**: When the directory that would hold `ARCHIVE` does not exist, `create` MUST write an
++  error message naming it to standard error, MUST create no archive and no directories, and MUST
++  exit with status 2, identically with and without `--overwrite`. `create` MUST NOT create any
++  directory under any circumstances: the archive file is the only thing it writes.
+ 
+ ### Key Entities
+ 
+@@ -298,8 +355,9 @@ compare the extracted tree against the original sources.
+ - **Source path**: one `PATH` operand — a file or directory relative to the current directory.
+   Supplies one or many members and is only ever read.
+ - **Member**: one entry in an archive, named by its relative path, with a type (regular file,
+-  directory, or other) and, for regular files, contents. The order in which members are stored
+-  follows the order of the `PATH` operands and is observable through `list`.
++  directory, or other) and, for regular files, contents. The order in which members are stored is
++  observable through `list` and is fully determined (FR-026): `PATH` operands contribute in the
++  order they were given, and each operand's members are sorted by full member name as text.
+ - **Exit status**: the tool's machine-readable outcome — 0 for success, 3 for a refused overwrite
+   of an existing archive, 2 for an unusable archive path, source path, or invocation. Exactly one
+   status per run; when a run exhibits problems of both non-zero classes, 2 wins over 3.
+@@ -323,18 +381,24 @@ compare the extracted tree against the original sources.
+   exhibit more than one problem at once.
+ - **SC-006**: Every failing `create` run writes at least one non-empty diagnostic to standard
+   error, writes nothing to standard output, and — for every failure the tool detects before
+-  writing — leaves no file at the archive path that was not there beforehand.
++  writing — leaves no file at the archive path that was not there beforehand and creates no
++  directory anywhere.
+ - **SC-007**: An archive whose name ends in `.tar.gz` or `.tgz` is gzip-compressed and every other
+   archive is not, in 100% of runs, verifiable from the archive's own bytes.
+ - **SC-008**: Every archive produced by `create` is accepted by `list` and by `extract` with no
+   diagnostics and exit status 0, in 100% of trials.
+ - **SC-009**: The complete pre-existing behaviour of `list` and `extract` is unchanged: their
+   entire existing automated test suite passes without a single test being modified.
+-- **SC-010**: Creating an archive of 10,000 small files completes in under 10 seconds, and
+-  archiving a file larger than available memory completes successfully — memory use stays
+-  independent of file count and file size.
++- **SC-010**: Creating an archive of 10,000 small files completes in under 10 seconds. Peak
++  additional memory stays independent of both file count and file size: archiving a file of tens
++  of megabytes raises peak memory by no more than a small fixed ceiling that does not grow with
++  the file, so an implementation that holds a whole file or a whole archive in memory fails this
++  criterion. That bounded measurement stands in for the untestable absolute — it is the property a
++  file larger than available memory depends on.
+ - **SC-011**: Every functional requirement is traceable to at least one automated test that fails
+   when that requirement is violated, with no requirement left uncovered.
++- **SC-012**: Archiving the same unchanged tree with the same invocation produces the same member
++  sequence in 100% of runs, independent of the order the filesystem reports directory entries.
+ 
+ ## Assumptions
+ 
+@@ -346,7 +410,12 @@ compare the extracted tree against the original sources.
+   alternative — writing members until a bad path is hit — would leave a partial archive behind.
+ - **Validation, not rollback, is the safety mechanism**: as in `001-tarx-cli` FR-022, unexpected
+   filesystem errors *during* writing are not undone. The limit is stated in FR-021 rather than
+-  hidden, and an incomplete archive is explicitly not to be trusted.
++  hidden, and an incomplete archive is explicitly not to be trusted. Because rollback is off the
++  table, validation is made as complete as it can be: it traverses the whole source tree and
++  establishes that every entry is readable before the archive is opened, so an unreadable file
++  deep in a tree is a clean refusal rather than a partial archive. The cost is one extra traversal
++  of the source tree, which is well inside the budget in SC-010; the benefit is that every failure
++  the tool can foresee leaves the filesystem untouched.
+ - **Compression by name, reading by content**: `create` selects compression from the archive's
+   name because the description says so, while `list` and `extract` keep detecting it from content.
+   The two rules do not conflict: the name is load-bearing only at creation time.
+@@ -355,10 +424,18 @@ compare the extracted tree against the original sources.
+   the description; nothing is lost, because a plain archive under a compressed-looking name is
+   still read correctly by `list` and `extract`.
+ - **Non-regular entries are skipped, loudly**: the description scopes creation to "a file or a
+-  directory", so symbolic links, hard links, device nodes and FIFOs are not stored. Each skip is
++  directory", so symbolic links, device nodes, FIFOs and sockets are not stored. Each skip is
+   reported on standard error so the outcome is never silent, but a skip is not a failure — exactly
+   the stance `extract` already takes on the same member types. This applies equally to an entry
+   found while walking a directory and to a `PATH` that names such an entry directly.
++- **Hard links are a reading concept, not a writing one**: when `extract` reads an archive, a
++  hard-link member is a distinct member type it can recognise and skip. When `create` writes one,
++  there is no such thing to recognise: every name in a directory listing that resolves to file
++  contents is a regular file, and "which one is the original" is not a question the filesystem can
++  answer. Treating the second name as a skippable link would therefore drop one of the user's
++  files from the archive and leave `extract` rebuilding an incomplete tree — a silent wrong answer
++  of exactly the kind Constitution Principle II forbids. Each name is stored instead, at the cost
++  of duplicated bytes in the rare tree that uses hard links.
+ - **Symbolic links are not followed**: a link to a file or directory is skipped as a non-regular
+   entry rather than dereferenced, so the archive never silently holds a second copy of data or
+   descends outside the current directory through a link.
+@@ -366,6 +443,13 @@ compare the extracted tree against the original sources.
+   refused rather than rewritten, because a member name derived from them could not be a relative
+   path (FR-004) and `extract` would refuse the resulting archive as unsafe. The safety check is
+   lexical, so its verdict is a property of the operand rather than of the filesystem.
++- **Member order is sorted, not filesystem order**: directory entries are stored sorted by full
++  member name as text rather than in the order the filesystem reports them, because an arbitrary
++  order would make the archive differ between machines and runs for the same tree and would reduce
++  every ordering check to a weaker set comparison. Sorting the full member name, rather than
++  sorting within each directory, is what places a directory immediately before the entries inside
++  it without a separate rule. Operand order still governs the top level, so what the user typed
++  remains visible in the result.
+ - **Overlap is de-duplicated silently**: naming overlapping paths (`photos` and `photos/a.jpg`) is
+   a convenience, not an error, so each file is stored once and counted once. Storing duplicates
+   would make `N` disagree with the archive's content and would leave `extract` writing the same
+@@ -373,6 +457,12 @@ compare the extracted tree against the original sources.
+ - **The archive excludes itself**: writing an archive into a directory that is being archived is
+   allowed, with the archive file omitted from its own contents, because including a file while it
+   is being written could only store garbage.
++- **`create` writes one file and creates no directories**: the archive is the command's single
++  output, so a missing parent directory is refused rather than created (FR-027). This differs from
++  `extract`, which does create its `DEST` with missing parents — but there the user has named a
++  directory they are asking to have filled, whereas here they have named a file. Refusing also
++  keeps FR-016's promise literally true: a run the tool rejects leaves nothing at all behind, not
++  even an empty directory from a mistyped path.
+ - **`--overwrite` scope**: it consents to replacing a regular file at `ARCHIVE` and nothing else.
+   It never removes a directory and never resolves a type mismatch (FR-012) — the same boundary
+   `--overwrite` has in `extract`.
+@@ -398,9 +488,9 @@ implementation constraints rather than user-facing requirements.
+ 
+ ### Environment assumptions
+ 
+-- The user has read permission on the paths they name and write permission on the directory
+-  holding `ARCHIVE`; permission failures surface as unusable-input diagnostics rather than
+-  tracebacks.
++- The directory that will hold `ARCHIVE` already exists and the user has write permission on it,
++  and the user has read permission on the paths they name; a missing directory (FR-027) or a
++  permission failure surfaces as an unusable-input diagnostic rather than a traceback.
+ - Source files are on the local filesystem and are not being modified by another process while the
+   archive is written; the archive reflects the bytes read at the time each file was read.
+ - The terminal or consuming script treats standard output and standard error as separate streams,

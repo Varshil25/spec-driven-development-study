@@ -1,0 +1,140 @@
+<!--
+SYNC IMPACT REPORT (scratch material for review of this amendment; remove before commit)
+
+Version change: none (unratified scaffold) → 1.0.0
+Rationale: Initial ratification. The prior file was the unmodified template with all
+placeholders intact, so there is no earlier governance to bump from; MAJOR.0.0 establishes
+the baseline.
+
+Modified principles:
+- [PRINCIPLE_1_NAME] → I. Standard Library Only
+- [PRINCIPLE_2_NAME] → II. Fail Loudly
+- [PRINCIPLE_3_NAME] → III. Every Requirement Is Testable
+- [PRINCIPLE_4_NAME] → IV. Simplicity
+- [PRINCIPLE_5_NAME] → removed (user specified exactly four principles)
+
+Added sections:
+- Additional Constraints (was [SECTION_2_NAME])
+- Development Workflow and Quality Gates (was [SECTION_3_NAME])
+- Governance rules populated
+
+Removed sections:
+- Fifth principle slot, dropped to match the four principles supplied.
+
+Follow-up TODOs:
+- TODO(PROJECT_NAME): No product name exists yet (no README, no package metadata; the only
+  Python in the repo is the `tools/sddlog` harness). The title uses the generic "Python
+  Project". Rename the heading once the project is named.
+-->
+
+# Python Project Constitution
+
+## Core Principles
+
+### I. Standard Library Only
+
+The runtime MUST depend only on the Python standard library. No third-party package may be
+imported by shipped code, and the project MUST remain installable and runnable on a bare
+CPython interpreter with no `pip install` step.
+
+Development-time tooling is exempt in exactly one respect: `pytest` MAY be used as the test
+runner (see Principle III). Any other development dependency MUST be justified in the plan
+and MUST NOT be importable from runtime code.
+
+Rationale: a small project pays the full cost of a dependency — version drift, supply-chain
+exposure, install friction — while using a fraction of it. The standard library is already
+present, already audited, and already versioned with the interpreter.
+
+### II. Fail Loudly
+
+Invalid input MUST produce a clear, specific diagnostic message and a failure signal. It MUST
+NEVER produce a plausible-looking wrong answer.
+
+- Command-line entry points MUST write the diagnostic to stderr and exit with a non-zero
+  status.
+- Library and service entry points MUST raise an exception or return an explicit error
+  response; they MUST NOT return a sentinel that a caller can mistake for a valid result.
+- Bare `except:` and `except Exception: pass` are forbidden. Catching an exception is
+  permitted only to re-raise it, or to convert it into a clearer diagnostic that still fails.
+- Diagnostics MUST name what was wrong with the input, not merely that something was wrong.
+
+Rationale: a silent wrong answer is the most expensive failure mode available, because it is
+discovered downstream by someone who trusted it.
+
+### III. Every Requirement Is Testable
+
+Every functional requirement in a specification MUST map to at least one automated `pytest`
+test, and that mapping MUST be explicit — the test name or a comment on the test cites the
+requirement identifier.
+
+- A requirement that cannot be expressed as an automated test is not yet specified well
+  enough to implement; it MUST be rewritten or dropped.
+- Error behaviour required by Principle II is itself a requirement and MUST have tests
+  asserting both the message and the failure signal.
+- The full test suite MUST pass before any feature is considered complete.
+
+Rationale: an untested requirement is an intention, not a guarantee. Requiring the mapping to
+be visible keeps coverage honest as the spec changes.
+
+### IV. Simplicity
+
+The implementation MUST be the smallest design that satisfies the specification.
+
+- Build what the current specification requires. Speculative extension points, configuration
+  knobs with one caller, and abstractions with one implementation MUST NOT be added.
+- Prefer functions and plain data (`dict`, `list`, `dataclass`, `NamedTuple`) over class
+  hierarchies, frameworks, and plugin layers.
+- Any structure that is not obviously necessary MUST be justified in the plan against a
+  stated requirement, or removed.
+
+Rationale: in a small project, accidental complexity costs more than the duplication or
+rework it was meant to prevent, and it is harder to remove later than to omit now.
+
+## Additional Constraints
+
+- **Language**: Python 3.11 or newer. Version-specific syntax below that floor MUST NOT be
+  relied upon.
+- **Layout**: source and tests live in separate directories; tests are discoverable by
+  `pytest` from the repository root with no arguments.
+- **Interfaces**: command-line tools follow a text protocol — input via arguments or stdin,
+  results to stdout, diagnostics to stderr. Exit status 0 means success and nothing else.
+- **No hidden state**: no network calls, no writes outside paths the caller named, and no
+  reliance on the current working directory unless a requirement says so.
+
+## Development Workflow and Quality Gates
+
+1. **Specify** the feature and its functional requirements, each with an identifier.
+2. **Plan** the smallest design that meets them, and record any complexity justification
+   Principle IV demands.
+3. **Implement** with tests, satisfying Principle III's requirement-to-test mapping.
+4. **Verify** before declaring completion:
+   - the full `pytest` suite passes;
+   - every functional requirement has at least one citing test;
+   - no third-party import appears in runtime code;
+   - every invalid-input path has a test asserting its message and failure signal.
+
+A change that fails any gate is incomplete. Reporting it as done is a violation of this
+constitution in its own right.
+
+## Governance
+
+This constitution supersedes conflicting conventions, habits, and prior practice in this
+project. Where a tool's default behaviour conflicts with a principle, the principle wins.
+
+**Amendment procedure**: amendments MUST be made by editing this file in a dedicated change
+that states what is changing and why. The change MUST update the version line and record the
+old-to-new version transition in its description. Principles MUST NOT be weakened silently;
+removing or narrowing one MUST be stated explicitly.
+
+**Versioning policy**: semantic versioning applies to this document.
+- MAJOR: a principle is removed, or redefined in a way that permits what it previously
+  forbade.
+- MINOR: a principle or section is added, or its guidance materially expanded.
+- PATCH: clarification, wording, or formatting with no change to what is required.
+
+**Compliance review**: every review MUST verify that the quality gates above were met and
+that no principle was bypassed. A deliberate exception MUST be recorded in the feature's plan
+with its rationale and scope; an unrecorded exception MUST be fixed rather than ratified
+after the fact.
+
+**Version**: 1.0.0 | **Ratified**: 2026-11-20 | **Last Amended**: 2026-11-20

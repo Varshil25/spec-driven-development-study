@@ -48,18 +48,18 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R034 | 2026-11-16 | T-ACCOUNTS-01 | sdd | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $13.59 |
 | R034C | 2026-11-16 | T-ACCOUNTS-01-CR | sdd | OK | 0 | no | ok | change request on R034; operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $15.02 |
 | R035 | 2026-11-19 | T-TARX-01 | sdd_clarify | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); stopped at the weekly usage limit in constitution on 16 Nov and resumed in the same session on 19 Nov; Claude Code cost $21.41 |
-| R035C | | T-TARX-01-CR | sdd_clarify | | | | | change request on R035 |
-| R036 | | T-REDACT-01 | unstructured | | | | |  |
-| R036C | | T-REDACT-01-CR | unstructured | | | | | change request on R036 |
-| R037 | | T-PASTE-01 | sdd | | | | |  |
-| R037C | | T-PASTE-01-CR | sdd | | | | | change request on R037 |
-| R038 | | T-BOOKMARKS-01 | sdd_secure | | | | |  |
-| R038C | | T-BOOKMARKS-01-CR | sdd_secure | | | | | change request on R038 |
-| R021 | | T-REDACT-01 | sdd_clarify | | | | | replication |
-| R021C | | T-REDACT-01-CR | sdd_clarify | | | | | change request on R021 |
-| R022 | | T-REDACT-01 | sdd | | | | | replication |
-| R022C | | T-REDACT-01-CR | sdd | | | | | change request on R022 |
-| R023 | | T-REDACT-01 | unstructured | | | | | replication |
-| R023C | | T-REDACT-01-CR | unstructured | | | | | change request on R023 |
-| R039 | | T-REDACT-01 | sdd_secure | | | | | replication |
-| R039C | | T-REDACT-01-CR | sdd_secure | | | | | change request on R039 |
+| R035C | 2026-11-19 | T-TARX-01-CR | sdd_clarify | OK | 0 | no | ok | change request on R035; operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $26.99 |
+| R036 | 2026-11-19 | T-REDACT-01 | unstructured | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $2.09 |
+| R036C | 2026-11-20 | T-REDACT-01-CR | unstructured | OK | 0 | no | ok | change request on R036; operated by Claude; Claude Code 2.1.317 (pinned); resumed after the usage limit; Claude Code cost $2.43 |
+| R037 | 2026-11-20 | T-PASTE-01 | sdd | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); implement resumed after a workspace restart; Claude Code cost $24.04 |
+| R037C | 2026-11-20 | T-PASTE-01-CR | sdd | OK | 0 | no | ok | change request on R037; operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $16.30 |
+| R038 | 2026-11-20 | T-BOOKMARKS-01 | sdd_secure | OK | 0 | no | ok | operated by Claude; Claude Code 2.1.317 (pinned); specify stopped at the usage limit and was resumed in the same session; the operator first re-attached it under the wrong phase label, stopped the tool before any phase closed, and re-attached under specify (operator note in the log); Claude Code cost $16.07 |
+| R038C | 2026-11-20 | T-BOOKMARKS-01-CR | sdd_secure | OK | 0 | no | ok | change request on R038; operated by Claude; Claude Code 2.1.317 (pinned); Claude Code cost $22.27 |
+| R021 | 2026-11-20 | T-REDACT-01 | sdd_clarify | OK | 0 | no | ok | replication; operated by Claude; replication; Claude Code 2.1.317 (pinned); specify resumed after a workspace restart and plan after the usage limit (same sessions); Claude Code cost $23.32 |
+| R021C | 2026-11-20 | T-REDACT-01-CR | sdd_clarify | OK | 0 | no | ok | change request on R021; operated by Claude; replication; Claude Code 2.1.317 (pinned); sddlog crashed at the implement phase end on a non-UTF-8 fixture (as R011C); patched copy applied and the capture finished by hand (operator note); Claude Code cost $28.62 |
+| R022 | 2026-11-21 | T-REDACT-01 | sdd | OK | 0 | no | ok | replication; operated by Claude; replication; Claude Code 2.1.317 (pinned); sddlog decode fix committed by the operator before run start; plan resumed after the usage limit; Claude Code cost $13.28 |
+| R022C | 2026-11-21 | T-REDACT-01-CR | sdd | OK | 0 | no | ok | change request on R022; operated by Claude; replication; Claude Code 2.1.317 (pinned); Claude Code cost $14.79 |
+| R023 | 2026-11-21 | T-REDACT-01 | unstructured | OK | 0 | no | ok | replication; operated by Claude; replication; Claude Code 2.1.317 (pinned); Claude Code cost $1.74 |
+| R023C | 2026-11-21 | T-REDACT-01-CR | unstructured | OK | 0 | no | ok | change request on R023; operated by Claude; replication; Claude Code 2.1.317 (pinned); Claude Code cost $2.19 |
+| R039 | 2026-11-21 | T-REDACT-01 | sdd_secure | OK | 0 | no | ok | replication; operated by Claude; 255 events, archived; Claude Code cost $14.20 |
+| R039C | 2026-11-22 | T-REDACT-01-CR | sdd_secure | OK | 0 | no | ok | change request on R039; operated by Claude; implement completed, run_end status=completed, 325 events, archived; Claude Code cost $11.51 |
