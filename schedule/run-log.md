@@ -61,5 +61,5 @@ One line per run, filled in at step 4 of the runbook. Status is `ok`, `warn` (ex
 | R022C | 2026-11-21 | T-REDACT-01-CR | sdd | OK | 0 | no | ok | change request on R022; operated by Claude; replication; Claude Code 2.1.317 (pinned); Claude Code cost $14.79 |
 | R023 | 2026-11-21 | T-REDACT-01 | unstructured | OK | 0 | no | ok | replication; operated by Claude; replication; Claude Code 2.1.317 (pinned); Claude Code cost $1.74 |
 | R023C | 2026-11-21 | T-REDACT-01-CR | unstructured | OK | 0 | no | ok | change request on R023; operated by Claude; replication; Claude Code 2.1.317 (pinned); Claude Code cost $2.19 |
-| R039 | | T-REDACT-01 | sdd_secure | | | | | replication |
-| R039C | | T-REDACT-01-CR | sdd_secure | | | | | change request on R039 |
+| R039 | 2026-11-21 | T-REDACT-01 | sdd_secure | OK | 0 | no | ok | replication; operated by Claude; 255 events, archived; Claude Code cost $14.20 |
+| R039C | 2026-11-22 | T-REDACT-01-CR | sdd_secure | OK | 0 | no | ok | change request on R039; operated by Claude; implement completed, run_end status=completed, 325 events, archived; Claude Code cost $11.51 |

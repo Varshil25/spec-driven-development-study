@@ -1,0 +1,251 @@
+diff --git a/specs/001-log-data-redaction-cli/checklists/requirements.md b/specs/001-log-data-redaction-cli/checklists/requirements.md
+new file mode 100644
+index 0000000..ae5856a
+--- /dev/null
++++ b/specs/001-log-data-redaction-cli/checklists/requirements.md
+@@ -0,0 +1,46 @@
++# Specification Quality Checklist: Log Data Redaction CLI
++
++**Purpose**: Validate specification completeness and quality before proceeding to planning
++**Created**: 2026-11-21
++**Feature**: [spec.md](../spec.md)
++
++## Content Quality
++
++- [x] No implementation details (languages, frameworks, APIs)
++- [x] Focused on user value and business needs
++- [x] Written for non-technical stakeholders
++- [x] All mandatory sections completed
++
++## Requirement Completeness
++
++- [x] No [NEEDS CLARIFICATION] markers remain
++- [x] Requirements are testable and unambiguous
++- [x] Success criteria are measurable
++- [x] Success criteria are technology-agnostic (no implementation details)
++- [x] All acceptance scenarios are defined
++- [x] Edge cases are identified
++- [x] Scope is clearly bounded
++- [x] Dependencies and assumptions identified
++
++## Feature Readiness
++
++- [x] All functional requirements have clear acceptance criteria
++- [x] User scenarios cover primary flows
++- [x] Feature meets measurable outcomes defined in Success Criteria
++- [x] No implementation details leak into specification
++
++## Constitution Alignment (R039 Constitution v1.0.0)
++
++- [x] Principle I — no third-party runtime dependency assumed (FR-015)
++- [x] Principle II — every failure path states signal *and* message (FR-013, FR-014, SR-005, SR-007)
++- [x] Principle III — every requirement stated as an observable assertion; coverage mandated (FR-018, SC-009)
++- [x] Principle IV — scope limited to the described behavior; no speculative options (SR-003, "No configuration surface")
++- [x] Principle V — security requirements present with OWASP Top 10 / ASVS categories named and non-applicable ones justified (SR-001..SR-009 and the OWASP table)
++- [x] Security Baseline — untrusted input, no injection by concatenation, path handling, resource limits, output/log hygiene all addressed
++
++## Notes
++
++- **Technology references are user-mandated, not leaked design**: the specification names the `python -m logredact [--count] [FILE ...]` invocation, Python 3.11+, standard-library-only, and the `logredact` package under `src/`. These are part of the user's stated contract for the deliverable (a CLI's invocation form is its user interface), so they are recorded as requirements rather than treated as implementation leakage. No internal structure, module decomposition, or library choice is specified — those belong to `/speckit-plan`. `pytest` is named only because the constitution mandates it as the test runner.
++- **Resolved by informed guess rather than a clarification question** (all listed in Assumptions, all testable, all open to change in `/speckit-clarify`): redaction precedence and non-overlap; fail-fast on the first unreadable file; card group sizing, mixed separators, and digit-boundary rule; IPv4 leading zeros; email final-label rule; per-line byte limit; `-` not treated as standard input; counts as replacement totals.
++- **One requirement is constitution-derived, not user-derived**: SR-005's 1 MiB per-line limit with a loud failure comes from the constitution's resource-limit control, not the feature description. It is called out in Assumptions so it can be rejected deliberately if unwanted.
++- Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`. All items currently pass.
+diff --git a/specs/001-log-data-redaction-cli/spec.md b/specs/001-log-data-redaction-cli/spec.md
+new file mode 100644
+index 0000000..a9a9ebf
+--- /dev/null
++++ b/specs/001-log-data-redaction-cli/spec.md
+@@ -0,0 +1,193 @@
++# Feature Specification: Log Data Redaction CLI
++
++**Feature Branch**: `001-log-data-redaction-cli`
++
++**Created**: 2026-11-21
++
++**Status**: Draft
++
++**Input**: User description: "Build a command-line tool that removes personal data from log files before they are shared. Run it as `python -m logredact [--count] [FILE ...]`. It reads each FILE in the order given, or standard input when no FILE is given, and writes every line to standard output with email addresses replaced by `[EMAIL]`, IPv4 addresses replaced by `[IP]`, and Luhn-valid 13-19 digit payment card numbers (optionally grouped with single spaces or hyphens) replaced by `[CARD]`. Everything else is output unchanged. With `--count`, a summary `emails=N ips=N cards=N` is written to standard error after all output. An unreadable FILE produces an error on standard error naming the file and exit status 2; otherwise exit status 0. Python 3.11+, standard library only, package `logredact` under `src/`."
++
++## User Scenarios & Testing *(mandatory)*
++
++### User Story 1 - Redact a log stream before sharing it (Priority: P1)
++
++An engineer is about to attach application log output to a support ticket. They pipe the log through the tool and get back the same text with every email address, IPv4 address, and payment card number replaced by a fixed placeholder, so the text can be shared without disclosing personal data.
++
++**Why this priority**: This is the entire purpose of the tool. Streaming redaction alone is a usable product: a person with only this capability can already sanitize anything they can pipe.
++
++**Independent Test**: Feed a known log sample on standard input with no file arguments and no flags; confirm standard output contains the expected placeholders, contains none of the original sensitive values, and leaves all other text byte-for-byte identical.
++
++**Acceptance Scenarios**:
++
++1. **Given** the input line `user jane@example.com from 10.0.0.7`, **When** the tool is run with no arguments, **Then** standard output is exactly `user [EMAIL] from [IP]` followed by a newline and the exit status is 0.
++2. **Given** the input line `paid with 4111 1111 1111 1111, ref 1234567890123`, **When** the tool is run, **Then** standard output is exactly `paid with [CARD], ref 1234567890123` — the grouped Luhn-valid number is redacted and the Luhn-invalid 13-digit sequence is left alone.
++3. **Given** the input line `jane.doe+test@mail.example.com logged in`, **When** the tool is run, **Then** output is `[EMAIL] logged in`.
++4. **Given** a line containing `999.1.1.1`, **When** the tool is run, **Then** that text is output unchanged because no octet rule is satisfied.
++5. **Given** a line with no email, IPv4, or Luhn-valid card number, **When** the tool is run, **Then** the line is output exactly as it was received, including its original whitespace and punctuation.
++6. **Given** input whose final line has no trailing newline, **When** the tool is run, **Then** output also has no trailing newline added.
++
++---
++
++### User Story 2 - Redact one or more named log files in order (Priority: P2)
++
++A release engineer has several rotated log files to sanitize together. They name the files on the command line and receive one concatenated redacted stream on standard output, in exactly the order the files were named.
++
++**Why this priority**: Named-file input is the common batch case, but it is additive — the redaction engine from Story 1 must already work for it to have value.
++
++**Independent Test**: Create two small files with known content, run the tool with both paths, and confirm standard output is the redacted concatenation in argument order.
++
++**Acceptance Scenarios**:
++
++1. **Given** files `a.log` and `b.log`, **When** the tool is run as `python -m logredact a.log b.log`, **Then** all redacted lines of `a.log` appear before all redacted lines of `b.log` and the exit status is 0.
++2. **Given** the same two files named in the reverse order, **When** the tool is run, **Then** the output order reverses accordingly.
++3. **Given** a file argument naming an empty file, **When** the tool is run, **Then** nothing is written to standard output for that file and the exit status is 0.
++4. **Given** the same file named twice, **When** the tool is run, **Then** its redacted content is emitted twice.
++5. **Given** at least one file argument, **When** the tool is run, **Then** standard input is not read at all.
++
++---
++
++### User Story 3 - Confirm how much was redacted (Priority: P3)
++
++A privacy reviewer needs evidence that redaction actually fired before approving a log for sharing. They add `--count` and read a one-line tally on standard error, which they can capture separately from the redacted log on standard output.
++
++**Why this priority**: Valuable for review and for spot-checking, but the tool is fully functional without it.
++
++**Independent Test**: Run with `--count` on input with a known number of each category, redirect the two streams to separate destinations, and confirm the redacted log is unpolluted and the tally matches.
++
++**Acceptance Scenarios**:
++
++1. **Given** the input line `a@b.io 1.2.3.4`, **When** the tool is run with `--count`, **Then** standard output is `[EMAIL] [IP]` and standard error is exactly `emails=1 ips=1 cards=0`.
++2. **Given** input with no redactable values, **When** the tool is run with `--count`, **Then** standard error is exactly `emails=0 ips=0 cards=0`.
++3. **Given** multiple files and multiple occurrences per line, **When** the tool is run with `--count`, **Then** each count is the total number of replacements of that category across all input, not the number of lines or files affected.
++4. **Given** `--count`, **When** the tool runs, **Then** the summary is written only after all redacted output has been written and flushed, and the summary appears on standard error only — never on standard output.
++5. **Given** no `--count` flag, **When** the tool runs successfully, **Then** standard error is empty.
++
++---
++
++### User Story 4 - Learn immediately when an input cannot be read (Priority: P3)
++
++Someone scripting the tool mistypes a path or points at a file they lack permission to open. Instead of silently producing a short, apparently-complete log, the tool names the offending file on standard error and exits with status 2, so the surrounding script can stop.
++
++**Why this priority**: Essential for trustworthy automation, but it only matters once the success paths of Stories 1-3 exist.
++
++**Independent Test**: Run the tool against a non-existent path and against an unreadable path; confirm the message names the file, the exit status is 2, and the failure is distinguishable from success by status alone.
++
++**Acceptance Scenarios**:
++
++1. **Given** a path that does not exist, **When** the tool is run with that path, **Then** an error message naming that path is written to standard error and the exit status is 2.
++2. **Given** a file whose permissions deny reading, **When** the tool is run with that path, **Then** an error message naming that path is written to standard error and the exit status is 2.
++3. **Given** a directory path supplied as a FILE argument, **When** the tool is run, **Then** it is treated as unreadable: message naming it on standard error, exit status 2.
++4. **Given** two file arguments where the first is readable and the second is not, **When** the tool is run, **Then** the redacted content of the first file has already been written to standard output, the error naming the second file is on standard error, and the exit status is 2.
++5. **Given** a run that fails with status 2 and `--count` was requested, **When** the tool exits, **Then** no `emails=... ips=... cards=...` summary line is written, because not all output was produced.
++6. **Given** an unrecognized command-line option, **When** the tool is run, **Then** a usage error is written to standard error and the exit status is 2.
++
++---
++
++### Edge Cases
++
++- **Overlapping candidates**: text that could match more than one category is redacted once, under a fixed precedence (email, then IPv4, then card). `12345678903@example.com` becomes `[EMAIL]`, never a card match inside an email.
++- **Email with a bare IPv4 domain**: `a@1.2.3.4` does not satisfy the email rule (its final domain label is not alphabetic), so the IPv4 rule applies and the result is `a@[IP]`.
++- **Longer digit runs**: a digit run longer than 19 digits with no valid 13-19 digit candidate at a non-digit boundary is left alone; `4111 1111 1111 1111 1234` becomes `[CARD] 1234` because the 16-digit candidate ends at a non-digit boundary.
++- **Over-long IPv4-like text**: `1.2.3.4.5` is left alone — the candidate is bounded by a digit or dot on at least one side.
++- **Leading zeros in octets**: `010.0.0.7` is redacted as `[IP]`; each octet is 1-3 digits with a numeric value of 0-255.
++- **Multiple matches on one line**: every match on a line is replaced, and each replacement is counted.
++- **Match at line start or end**: a value flush against the start or end of a line is still redacted.
++- **Mixed separators in a card number**: `4111-1111 1111-1111` is redacted if the digits pass Luhn; single space and single hyphen separators may be mixed.
++- **Double separators**: `4111  1111 1111 1111` (two spaces) does not form a single card candidate across the double separator.
++- **Non-UTF-8 bytes in a log**: bytes that are not valid UTF-8 are passed through unchanged rather than causing a failure or a substitution.
++- **Very long single line**: a line longer than the documented maximum line length fails loudly (message on standard error, exit status 2) instead of consuming unbounded memory.
++- **Empty input**: no standard input content and no files yields empty standard output and exit status 0 (plus a zeroed summary if `--count` was given).
++- **Closed or full standard output**: if standard output cannot be written (for example a closed pipe or a full disk), the tool reports the failure on standard error with a non-zero exit status rather than exiting 0 with truncated output.
++
++## Requirements *(mandatory)*
++
++### Functional Requirements
++
++- **FR-001**: The tool MUST be invocable as `python -m logredact [--count] [FILE ...]` with `src/` on the module search path, with the code residing in a package named `logredact` under `src/`.
++- **FR-002**: The tool MUST read standard input when no FILE argument is given, and MUST read each named FILE in the order given when one or more are present; when FILE arguments are present it MUST NOT read standard input.
++- **FR-003**: The tool MUST write every input line to standard output, with redactions applied, preserving all non-matching characters and the original line structure exactly; no trailing newline may be added to input that lacked one.
++- **FR-004**: The tool MUST replace each email address with the literal text `[EMAIL]`. An email address is a local part of one or more characters drawn from letters, digits, and the characters `.`, `_`, `%`, `+`, and `-`, followed by `@`, followed by one or more dot-separated domain labels of letters, digits, and `-`, where the final label is at least two letters and contains only letters. The match MUST NOT be extended into, or truncated by, an adjacent character that is itself valid in a local part or a domain label.
++- **FR-005**: The tool MUST replace each IPv4 address with the literal text `[IP]`. An IPv4 address is four dot-separated groups of one to three digits, each with a numeric value from 0 to 255 inclusive. A candidate immediately preceded or followed by a digit or a `.` MUST NOT be redacted, so `999.1.1.1` and `1.2.3.4.5` are left unchanged.
++- **FR-006**: The tool MUST replace each payment card number with the literal text `[CARD]`. A payment card number is a sequence of 13 to 19 digits whose digits pass the Luhn checksum, written either contiguously or as groups of one or more digits joined by single `' '` or single `'-'` separators, with no separator at the start or end of the match.
++- **FR-007**: The tool MUST NOT redact a digit sequence that fails the Luhn checksum, has fewer than 13 or more than 19 digits, or is immediately preceded or followed by another digit.
++- **FR-008**: When a single span of text could match more than one category, the tool MUST redact it exactly once, choosing by a fixed, documented precedence of email, then IPv4, then card; placeholders MUST NOT be nested or doubly substituted, and the inserted placeholder text MUST NOT itself be re-scanned.
++- **FR-009**: Where candidates of the same category start at the same position, the tool MUST redact the longest valid candidate; matches MUST be found left to right and MUST NOT overlap.
++- **FR-010**: With `--count`, the tool MUST write exactly one summary line of the form `emails=N ips=N cards=N` to standard error after all redacted output has been written and flushed, where each N is the total number of replacements of that category across all input.
++- **FR-011**: Without `--count`, the tool MUST write nothing to standard error on a successful run.
++- **FR-012**: The tool MUST accept `--count` in any position among the arguments and MUST treat all non-option arguments as FILE paths in the order given.
++- **FR-013**: If a FILE cannot be opened or read, the tool MUST write an error message naming that file to standard error and MUST exit with status 2, without writing a `--count` summary.
++- **FR-014**: The tool MUST exit with status 0 when all input was read and all output written successfully, and MUST exit with a non-zero status otherwise; invalid command-line usage MUST exit with status 2 and a message on standard error.
++- **FR-015**: The tool MUST run on Python 3.11 or newer using only the Python standard library at runtime, importing no third-party package.
++- **FR-016**: The tool MUST process input as a stream of lines, holding no more than a bounded amount of input in memory at once, so that input of arbitrary total size can be redacted.
++- **FR-017**: Bytes in the input that are not valid UTF-8 MUST be passed through to standard output unchanged rather than causing a failure or being replaced by substitution characters.
++- **FR-018**: Every functional and security requirement in this specification MUST be covered by at least one automated `pytest` test, including negative tests for each failure path asserting both the exit status and the message content.
++
++### Security Requirements *(mandatory — Constitution Principle V)*
++
++Derived against the OWASP Top 10 (2021) and OWASP ASVS 4.0. The categories considered, and those judged not applicable, are recorded in the table below.
++
++- **SR-001** (Output hygiene; A09, ASVS 7.1.1, 8.3.4): No personal data from the input may appear anywhere other than as a placeholder in the redacted stream. Error messages, usage text, and the `--count` summary MUST NOT include any input line content, matched value, or fragment of one. Only the file path supplied by the invoking user may be named in an error.
++- **SR-002** (No partial disclosure; A04): A redaction MUST replace the whole matched value. Emitting a prefix or suffix of a matched email, IPv4 address, or card number is a defect; tests MUST assert the original value does not appear as a substring of the output.
++- **SR-003** (Secure default; A05): Redaction of all three categories MUST be on by default with no flag required, and the tool MUST provide no option to disable or weaken any redaction category. `--count` MUST affect only the summary, never the redaction applied.
++- **SR-004** (Input treated as inert data; A03, A08, ASVS 5.1.3, 5.3.x): Input MUST be treated as opaque text only. The tool MUST NOT evaluate, deserialize, interpolate, or execute any part of it; MUST NOT invoke a shell or subprocess; and replacement MUST be performed so that placeholder or backreference syntax appearing in the input cannot alter the substitution.
++- **SR-005** (Bounded processing; ASVS 5.1.x, Constitution Security Baseline "Resource limits"): Reads MUST be bounded, never whole-file. A per-line maximum of 1 MiB of decoded text MUST be enforced; a line exceeding it MUST fail loudly with a message on standard error that names the input source and does not quote the line, and exit status 2.
++- **SR-006** (No catastrophic backtracking; A04, ASVS 5.2.x): All matching MUST use bounded quantifiers only, with no nested unbounded repetition, so that matching time stays linear in line length. A test MUST assert that adversarial input — long digit runs, long `@`-and-dot runs, long separator runs — completes within a fixed time budget.
++- **SR-007** (Fail-closed on write failure; A04, Constitution Principle II): A failure to write or flush standard output MUST NOT be swallowed. It MUST be reported on standard error and produce a non-zero exit status, so a truncated redacted log is never reported as a success.
++- **SR-008** (No artifacts on disk; ASVS 8.3.4, 12.3.1): The tool MUST NOT create, write, or modify any file, temporary file, or cache; it MUST NOT write the unredacted input anywhere. Input files MUST be opened read-only.
++- **SR-009** (Path handling; A01, ASVS 12.3.1): FILE arguments are paths from the invoking user's own command line and are used verbatim with no containment base directory; the tool MUST NOT derive paths from file *contents* or from environment-supplied values, and MUST NOT follow a path into any write operation. A failure to open MUST surface as SR-001-compliant diagnostic plus exit status 2, never as a stack trace.
++
++| OWASP Top 10 (2021) | Applicable? | Where addressed / why not |
++|---------------------|-------------|---------------------------|
++| A01 Broken Access Control | Partially | Single-user local filter with no privilege boundary of its own; it reads only what the invoking user can already read and writes nothing (SR-008, SR-009). |
++| A02 Cryptographic Failures | Not applicable | No secrets, keys, or crypto are used or stored. Redaction uses a fixed, non-reversible placeholder, so no reversible encoding of personal data is produced (SR-002). |
++| A03 Injection | Applicable | Input is inert text; no shell, SQL, or template evaluation; substitution is literal (SR-004). |
++| A04 Insecure Design | Applicable | Whole-match replacement, no partial leakage, fail-closed on write failure, bounded matching (SR-002, SR-005, SR-006, SR-007). |
++| A05 Security Misconfiguration | Applicable | All redaction on by default, no opt-out (SR-003). |
++| A06 Vulnerable and Outdated Components | Applicable | Standard library only, no third-party runtime dependency (FR-015). |
++| A07 Identification and Authentication Failures | Not applicable | No identities, sessions, or credentials exist in the tool. |
++| A08 Software and Data Integrity Failures | Applicable | No deserialization of untrusted data; input is read as text only (SR-004). |
++| A09 Security Logging and Monitoring Failures | Applicable | Diagnostics and the counts summary carry no personal data (SR-001). |
++| A10 Server-Side Request Forgery | Not applicable | The tool performs no network access of any kind; tests are offline by construction. |
++
++### Key Entities
++
++- **Input source**: either standard input or one named file, consumed in argument order; carries a name used only for diagnostics.
++- **Line**: one unit of text read and emitted; the scope within which matches are found and replaced.
++- **Redaction rule**: a category (email, IPv4, card) paired with its recognition criteria, its placeholder text (`[EMAIL]`, `[IP]`, `[CARD]`), and its precedence rank.
++- **Match**: a span of a line recognized by exactly one rule, replaced in full by that rule's placeholder.
++- **Counts**: three non-negative totals, one per category, accumulated over all input and reported only when `--count` is given.
++
++## Success Criteria *(mandatory)*
++
++### Measurable Outcomes
++
++- **SC-001**: For a log sample containing a known set of email addresses, IPv4 addresses, and Luhn-valid card numbers, 100% of those values are absent from the output, and each is replaced by its category's placeholder.
++- **SC-002**: For a log sample containing values designed to look sensitive but not qualify — `999.1.1.1`, `1.2.3.4.5`, Luhn-invalid digit sequences, 12-digit and 20-digit runs, bare `@` text — 0% are altered; those lines are byte-for-byte identical to the input.
++- **SC-003**: Every line of input appears in the output, in input order, with the only differences being the redactions; a reviewer diffing input against output sees no other change.
++- **SC-004**: The `--count` summary matches an independent manual tally of replacements on a prepared sample, exactly, for all three categories.
++- **SC-005**: Separating the two output streams yields a redacted log with no summary text in it and a summary with no log text in it, in 100% of runs with `--count`.
++- **SC-006**: Every unreadable-input case (missing path, permission denied, directory, bad option) produces a non-empty message naming the problem on standard error and exit status 2 — no case exits 0.
++- **SC-007**: A 10 MB log file is redacted in under 10 seconds on a typical developer machine, and peak memory stays bounded by the per-line limit regardless of total input size, so a 1 GB input does not exhaust memory.
++- **SC-008**: Adversarial single lines (10,000-character digit runs, separator runs, `@`/dot runs) each complete in under 1 second, demonstrating no catastrophic backtracking.
++- **SC-009**: A reviewer can trace every requirement in this specification to at least one automated test, and the full test suite passes with no skipped or expected-failure tests.
++- **SC-010**: No output stream, diagnostic, or on-disk artifact produced by any test run contains an unredacted sample value.
++
++## Assumptions
++
++Reasonable defaults chosen where the feature description did not specify a detail. Each is testable as written and can be revisited in `/speckit-clarify`.
++
++- **Precedence**: email, then IPv4, then card, with non-overlapping leftmost-longest matching. Chosen because email is the most specific pattern and because it prevents a digit-heavy local part from being mistaken for a card number.
++- **Failure timing**: file arguments are processed in order and streamed, so an unreadable file is reported the moment it is reached and the tool exits 2 immediately, keeping the already-written redacted output. The tool does not pre-validate all files before producing output, and does not continue past the first unreadable file.
++- **Card group sizes**: the description places no constraint on group sizes, so any grouping of 1+ digits per group is accepted provided the total digit count is 13-19, separators are single, and Luhn passes. Separator kinds may be mixed within one number.
++- **Card boundaries**: a candidate is rejected if the character immediately before or after the matched span is a digit. A separator adjacent to the span is permitted, so `[CARD] 1234` is the expected result for a 16-digit valid number followed by a 4-digit group.
++- **IPv4 leading zeros**: accepted (`010.0.0.7` is an IPv4 address) since the rule given is numeric value 0-255 per octet.
++- **Email domain**: the final domain label must be two or more letters, so `a@b.io` matches and `a@1.2.3.4` does not; the latter yields `a@[IP]`.
++- **Line-oriented scope**: matches do not span line boundaries. A value split across two lines is not redacted.
++- **Encoding**: input and output are UTF-8; undecodable bytes round-trip unchanged (FR-017) rather than failing, so a mixed-encoding log is still usable.
++- **Per-line limit**: 1 MiB of decoded text, enforced per SR-005. This limit is required by the constitution's resource-limit control and is not part of the original description; it is set high enough that ordinary logs never reach it.
++- **`-` is not special**: a FILE argument of `-` is treated as a literal path name, not as standard input, and will normally fail with exit status 2 under FR-013.
++- **Counts semantics**: counts are replacement counts, not counts of affected lines or distinct values; the same email appearing twice counts twice.
++- **Summary format**: exactly `emails=N ips=N cards=N`, single spaces, terminated by a newline, with no leading or trailing padding.
++- **Test tooling**: `pytest` is the test runner per the constitution; it is developer tooling only and is never imported by shipped code.
++- **No configuration surface**: no config file, environment variable, or option other than `--count` influences behavior, per SR-003.
