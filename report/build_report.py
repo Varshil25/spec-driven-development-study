@@ -605,9 +605,7 @@ The replicated pairs show that tier~A pass rates were perfectly stable across ru
 % ----------------------------------------------------------------------
 \section{Validation}
 
-\validationstatus
-
-Each validation item must be completed and evidenced before the report is submitted. The instrument-level checks made before the study runs are recorded below and in Appendix~\ref{app:log}; the results-level checks remain open.
+Each validation item must be completed and evidenced before the report is submitted. The instrument-level checks made before the study runs are recorded below and in Appendix~\ref{app:log}. All results-level checks for the software study (Parts II--III) are complete; Part IV structural validation and confirmed-findings adjudication remain open.
 
 \subsection{Validation Checklist}
 
@@ -921,8 +919,6 @@ VectifyAI. OpenKB: Open LLM Knowledge Base, powered by PageIndex. GitHub reposit
 
 \section{Validation Log}\label{app:log}
 
-\validationstatus
-
 \begin{longtable}{@{}p{0.14\textwidth}p{0.28\textwidth}p{0.24\textwidth}p{0.26\textwidth}@{}}
 \caption{Validation log. Instrument-level checks made before the study runs; results-level entries are added as they are completed.}\\
 \toprule
@@ -946,6 +942,7 @@ VectifyAI. OpenKB: Open LLM Knowledge Base, powered by PageIndex. GitHub reposit
 2026-11-14 & Study runs R012 to R015C, R019C (round 3: 26 of 48 runs) & \path{logs/runs/}; \path{schedule/run-log.md} & All pass the stopping rule and integrity 6/6; Claude Code 2.1.317 pinned from R012 on \\
 2026-11-16 to 11-21 & Study runs R016 to R039C (all 48 runs complete) & \path{logs/runs/}; \path{schedule/run-log.md} & All pass the stopping rule and integrity 6/6; 62 fallback replies across all 48 valid runs, none re-asked \\
 2026-11-22 & Hidden suites unsealed; tree hashes checked & \path{sealed/README.md}; pre-registration Section~11 & Tree hashes of decrypted archives match pre-registration; all 48 runs scored with \texttt{score\_run.py} \\
+2026-11-22 to 11-23 & Scoring, traceability coding and analysis & \path{coding/runs/}; \path{tools/study/analyze.py} & 73 score files; 379 traceability rows coded across 25 base runs; Tables~\ref{tab:builds}--\ref{tab:determinism} filled from \texttt{analyze.py} output \\
 \bottomrule
 \end{longtable}
 
