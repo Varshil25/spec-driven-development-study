@@ -625,7 +625,7 @@ Requirement traceability & Every acceptance criterion coded to code change or ma
 Time and effort & Active time, turns and tokens logged consistently & Timestamped logs & Logging verified in R002 and R003; study runs: 48 runs logged, metrics extracted \\
 Output determinism & Replicated cells compared on every measure & Run-to-run variation table & Table~\ref{tab:determinism} filled \\
 Researcher bias & Rubrics and test suites pre-registered where feasible & Pre-registration record & Suites sealed 24 and 31 Oct 2026 with hashes; frozen 4 Nov 2026 (merge commit \texttt{5a58b4f}), hashes emailed to the advisor the same day; unsealing: suites unsealed 22 Nov 2026, hashes verified \\
-Part IV structural comparison & Fixed dimensions applied to both SD-KDP and OpenKB & Comparison table and notes & \emptycell \\
+Part IV structural comparison & Fixed dimensions applied to both SD-KDP and OpenKB & Comparison table and notes & Structural dimensions compared from documentation (Table~\ref{tab:partiv-comparison}); full-corpus pipeline execution deferred \\
 Reproducibility & Environment, model versions, and scripts documented & Repository and configuration files & Versions, base repository and run bundles in the repository; final check: confirmed---environment table, model and tool versions, run bundles and analysis scripts are in the repository \\
 Ethics and data handling & No sensitive data; sources documented & Data statement & Synthetic tasks, no personal data (Section~\ref{sec:repro}); final check: confirmed---all five tasks are synthetic, no personal or proprietary data, no human subjects \\
 \bottomrule
@@ -707,7 +707,7 @@ Stance toward bias & Explicit Oracle declaring a committed perspective and bound
 Execution model & Unattended nightly batch pipeline: collect $\rightarrow$ distill $\rightarrow$ index $\rightarrow$ backup & Incremental CLI workflow: init / add / query / chat; documents addable at any time \\
 Retrieval mechanism & Vector index built over the distilled wiki & PageIndex vectorless, reasoning-based retrieval over long documents \\
 Definition of done & Oracle's declared key questions answered accurately, in Oracle's voice, from distilled base & Compiled wiki's cross-references current and knowledge compounds across additions \\
-Observed result & \emptycell & \emptycell \\
+Observed result & Pipeline not executed in the study window; structural comparison drawn from documentation and published guides & Pipeline not executed in the study window; structural comparison drawn from documentation and repository README \\
 \bottomrule
 \end{tabular}
 \end{table}
