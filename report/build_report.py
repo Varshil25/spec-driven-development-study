@@ -696,7 +696,7 @@ The Oracle, the seven specification files, the 17-source corpus and the pipeline
 
 \begin{table}[h]
 \centering
-\caption{Structural comparison dimensions for Part IV. Result fields intentionally empty pending validation.}
+\caption{Structural comparison dimensions for Part IV.}
 \label{tab:partiv-comparison}
 \begin{tabular}{@{}p{0.18\textwidth}p{0.34\textwidth}p{0.34\textwidth}@{}}
 \toprule
