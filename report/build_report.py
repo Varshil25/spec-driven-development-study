@@ -288,11 +288,9 @@ Baltes et al.\ set out guidelines for empirical software engineering studies tha
 
 \subsection{Extending Spec-Driven Thinking to Knowledge Artifacts}
 
-OpenOwls SD-KDP applies the spec-first idea to knowledge distillation. A human declares an Oracle (a committed perspective with trusted and rejected sources and the key questions the knowledge base must answer) and writes seven Markdown specification files that an agent reads before every run of a collect, distill and index pipeline. OpenKB takes the specification-light route: documents are added incrementally and compiled automatically into a cross-referenced wiki, with reasoning-based retrieval over long documents instead of a vector index. Table~\ref{tab:partiv-comparison} sets the two side by side.
+OpenOwls SD-KDP~\cite{openowls} applies the spec-first idea to knowledge distillation. A human declares an Oracle (a committed perspective with trusted and rejected sources and the key questions the knowledge base must answer) and writes seven Markdown specification files that an agent reads before every run of a collect, distill and index pipeline. OpenKB takes the specification-light route: documents are added incrementally and compiled automatically into a cross-referenced wiki, with reasoning-based retrieval over long documents instead of a vector index. Table~\ref{tab:partiv-comparison} sets the two side by side.
 
 OpenKB~\cite{openkb} (VectifyAI, Apache-2.0) takes the opposite stance. It compiles documents added at any time into a wiki of plain Markdown pages (per-document summaries, concept and entity pages, an index and a log), connected by wiki links. Each new document is summarized and the existing concept pages are rewritten with cross-document synthesis; contradictions are flagged rather than resolved by a declared perspective. It runs as a command-line tool (\texttt{init}, \texttt{add}, \texttt{query}, \texttt{chat}, \texttt{watch}, \texttt{lint}), calls models through LiteLLM with a provider and model string, and uses PageIndex's reasoning-based retrieval rather than a vector database.
-
-% TODO: OpenOwls SD-KDP guide citation to be supplied by the author.
 
 % ----------------------------------------------------------------------
 % 5. METHODOLOGY
@@ -904,7 +902,7 @@ N.~Perry, M.~Srivastava, D.~Kumar, and D.~Boneh. Do Users Write More Insecure Co
 G.~Rosa, D.~Moreno-Lumbreras, G.~Robles, and J.~M.~Gonzalez-Barahona. Understanding Specification-Driven Code Generation with LLMs: An Empirical Study Design. Registered report, \emph{IEEE SANER 2026}. arXiv:2601.03878. \url{https://arxiv.org/abs/2601.03878}
 
 \bibitem{openowls}
-% TODO: OpenOwls SD-KDP guide reference to be supplied by the author.
+OpenOwls at Temple University. OpenOwls SD-KDP --- Spec-Driven Knowledge Distillation Process: Guide. 2026. \url{https://openowls-at-temple.github.io/openowls-sd-kdp-guide}. Accessed November 2026.
 
 \bibitem{openkb}
 VectifyAI. OpenKB: Open LLM Knowledge Base, powered by PageIndex. GitHub repository and README, Apache-2.0. \url{https://github.com/VectifyAI/OpenKB}. Accessed 14 November 2026.
