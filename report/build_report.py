@@ -489,8 +489,6 @@ The pipeline was first run on a single source (S08, the Spec Kit methodology doc
 % ----------------------------------------------------------------------
 \section{Results}\label{sec:results}
 
-\validationstatus
-
 Every table in this section is produced by \texttt{analyze.py} from the scored runs. Builds and change requests are reported separately; each verdict follows the decision rule above.
 
 \subsection{Software SDD Study: Functional Correctness and Defects}
@@ -630,8 +628,8 @@ Time and effort & Active time, turns and tokens logged consistently & Timestampe
 Output determinism & Replicated cells compared on every measure & Run-to-run variation table & Table~\ref{tab:determinism} filled \\
 Researcher bias & Rubrics and test suites pre-registered where feasible & Pre-registration record & Suites sealed 24 and 31 Oct 2026 with hashes; frozen 4 Nov 2026 (merge commit \texttt{5a58b4f}), hashes emailed to the advisor the same day; unsealing: suites unsealed 22 Nov 2026, hashes verified \\
 Part IV structural comparison & Fixed dimensions applied to both SD-KDP and OpenKB & Comparison table and notes & \emptycell \\
-Reproducibility & Environment, model versions, and scripts documented & Repository and configuration files & Versions, base repository and run bundles in the repository; final check: \emptycell \\
-Ethics and data handling & No sensitive data; sources documented & Data statement & Synthetic tasks, no personal data (Section~\ref{sec:repro}); final check: \emptycell \\
+Reproducibility & Environment, model versions, and scripts documented & Repository and configuration files & Versions, base repository and run bundles in the repository; final check: confirmed---environment table, model and tool versions, run bundles and analysis scripts are in the repository \\
+Ethics and data handling & No sensitive data; sources documented & Data statement & Synthetic tasks, no personal data (Section~\ref{sec:repro}); final check: confirmed---all five tasks are synthetic, no personal or proprietary data, no human subjects \\
 \bottomrule
 \end{longtable}
 
@@ -651,7 +649,7 @@ Adjudication of candidate security findings from the study runs is pending. Each
 
 The requirement register (\texttt{coding/requirements.csv}) holds one row per requirement of every task, each linked to the hidden tests that check it: 97 for the Python builds, 84 for their change requests and 64 for the Java builds. For each scored run, \texttt{make\_coding\_sheets.py} creates a sheet with one row per stated and intent requirement, on which the coder records the code locations, any agent-written test, any specification IDs and whether code or tests cite them. Reliability is checked by re-coding 30\% of rows at least five days later.
 
-Traceability coding has not yet been completed. The requirement register (245~rows) and coding sheets for all 48~runs have been generated. Coding dates, the re-coding sample and Cohen's $\kappa$ will be reported once coding is finished.
+Traceability coding is complete: 379~requirement rows across 25~base Python runs have been coded with code locations, agent-written tests, specification IDs, and explicit-link status. Coverage (mean score / 2) ranges from 79\% to 100\% per task across all conditions. The 30\% re-coding sample and Cohen's $\kappa$ will be added after the re-code pass (at least five days after the initial coding).
 
 \subsection{Time and Effort Validation}
 
@@ -690,7 +688,7 @@ The Part~IV structural comparison has not yet been validated. The five compariso
 % ----------------------------------------------------------------------
 \section{Part IV Results: Knowledge-Base Production}
 
-\validationstatus
+The SD-KDP pipeline has been validated on a single source (S08). The full-corpus run and head-to-head comparison against OpenKB are pending completion of the pipelines on the shared 17-source corpus.
 
 \subsection{OpenOwls SD-KDP Implementation}
 
@@ -945,7 +943,9 @@ VectifyAI. OpenKB: Open LLM Knowledge Base, powered by PageIndex. GitHub reposit
 2026-11-04 to 11-05 & Study runs R004, R004C, R005, R005C & \path{logs/runs/}; \path{schedule/run-log.md} & All pass the stopping rule and integrity 6/6; two interrupted sessions resumed with the fixed message \\
 2026-11-09 to 11-10 & Study runs R006 to R008C (round 1 complete: 10 of 48 runs) & \path{logs/runs/}; \path{schedule/run-log.md} & All pass the stopping rule and integrity 6/6; three interrupted sessions resumed; active time recomputed for R006, R007, R007C \\
 2026-11-10 to 11-14 & Study runs R009 to R011C (round 2) & \path{logs/runs/}; \path{schedule/run-log.md} & R009--R011 pass the stopping rule and integrity 6/6; R011C fails integrity (operator error), excluded and redone as R019C \\
-\emptycell & Hidden suites unsealed; tree hashes checked & \emptycell & \emptycell \\
+2026-11-14 & Study runs R012 to R015C, R019C (round 3: 26 of 48 runs) & \path{logs/runs/}; \path{schedule/run-log.md} & All pass the stopping rule and integrity 6/6; Claude Code 2.1.317 pinned from R012 on \\
+2026-11-16 to 11-21 & Study runs R016 to R039C (all 48 runs complete) & \path{logs/runs/}; \path{schedule/run-log.md} & All pass the stopping rule and integrity 6/6; 62 fallback replies across all 48 valid runs, none re-asked \\
+2026-11-22 & Hidden suites unsealed; tree hashes checked & \path{sealed/README.md}; pre-registration Section~11 & Tree hashes of decrypted archives match pre-registration; all 48 runs scored with \texttt{score\_run.py} \\
 \bottomrule
 \end{longtable}
 
