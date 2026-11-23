@@ -52,47 +52,47 @@ Complexity scaling (Spearman, exact): unstructured rho 0.21 (p 0.7333), sdd rho 
 
 | Task | unstructured | sdd | sdd_clarify | sdd_secure |
 | --- | --- | --- | --- | --- |
-| T-REDACT-01 | 0 | 0 | 0 | 0 |
+| T-REDACT-01 | 3 | 3 | 3 | 0 |
 | T-TARX-01 | 0 | 0 | 0 | 0 |
-| T-BOOKMARKS-01 | 0 | 0 | 0 | 0 |
+| T-BOOKMARKS-01 | 1 | 1 | 1 | 1 |
 | T-ACCOUNTS-01 | 0 | 0 | 0 | 0 |
-| T-PASTE-01 | 0 | 0 | 0 | 0 |
+| T-PASTE-01 | 2 | 1 | 1 | 0 |
 
 | Pair | Verdict | Same direction | Median effect | Wilcoxon p (Holm) | Rank-biserial |
 | --- | --- | --- | --- | --- | --- |
-| unstructured vs sdd | no consistent difference | 0 of 5 | +0 | - (-) | - |
-| unstructured vs sdd_clarify | no consistent difference | 0 of 5 | +0 | - (-) | - |
-| unstructured vs sdd_secure | no consistent difference | 0 of 5 | +0 | - (-) | - |
+| unstructured vs sdd | no consistent difference | 1 of 5 | +0 | 1.0000 (1.0000) | 1.00 |
+| unstructured vs sdd_clarify | no consistent difference | 1 of 5 | +0 | 1.0000 (1.0000) | 1.00 |
+| unstructured vs sdd_secure | no consistent difference | 2 of 5 | +0 | 0.5000 (1.0000) | 1.00 |
 | sdd vs sdd_clarify | no consistent difference | 0 of 5 | +0 | - (-) | - |
-| sdd vs sdd_secure | no consistent difference | 0 of 5 | +0 | - (-) | - |
-| sdd_clarify vs sdd_secure | no consistent difference | 0 of 5 | +0 | - (-) | - |
+| sdd vs sdd_secure | no consistent difference | 2 of 5 | +0 | 0.5000 (1.0000) | 1.00 |
+| sdd_clarify vs sdd_secure | no consistent difference | 2 of 5 | +0 | 0.5000 (1.0000) | 1.00 |
 
-Friedman (exact, 5 tasks): p = 1.0000.
+Friedman (exact, 5 tasks): p = 0.2500.
 
-Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho - (p -).
+Complexity scaling (Spearman, exact): unstructured rho -0.21 (p 0.7333), sdd rho -0.32 (p 0.6000), sdd_clarify rho -0.32 (p 0.6000), sdd_secure rho 0.00 (p 1.0000).
 
 ## Confirmed High+Medium findings (P2)
 
 | Task | unstructured | sdd | sdd_clarify | sdd_secure |
 | --- | --- | --- | --- | --- |
-| T-REDACT-01 | 0 | 0 | 0 | 0 |
+| T-REDACT-01 | 3 | 3 | 3 | 0 |
 | T-TARX-01 | 0 | 0 | 0 | 0 |
-| T-BOOKMARKS-01 | 0 | 0 | 0 | 0 |
+| T-BOOKMARKS-01 | 1 | 1 | 1 | 1 |
 | T-ACCOUNTS-01 | 0 | 0 | 0 | 0 |
-| T-PASTE-01 | 0 | 0 | 0 | 0 |
+| T-PASTE-01 | 1 | 1 | 1 | 0 |
 
 | Pair | Verdict | Same direction | Median effect | Wilcoxon p (Holm) | Rank-biserial |
 | --- | --- | --- | --- | --- | --- |
 | unstructured vs sdd | no consistent difference | 0 of 5 | +0 | - (-) | - |
 | unstructured vs sdd_clarify | no consistent difference | 0 of 5 | +0 | - (-) | - |
-| unstructured vs sdd_secure | no consistent difference | 0 of 5 | +0 | - (-) | - |
+| unstructured vs sdd_secure | no consistent difference | 2 of 5 | +0 | 0.5000 (1.0000) | 1.00 |
 | sdd vs sdd_clarify | no consistent difference | 0 of 5 | +0 | - (-) | - |
-| sdd vs sdd_secure | no consistent difference | 0 of 5 | +0 | - (-) | - |
-| sdd_clarify vs sdd_secure | no consistent difference | 0 of 5 | +0 | - (-) | - |
+| sdd vs sdd_secure | no consistent difference | 2 of 5 | +0 | 0.5000 (1.0000) | 1.00 |
+| sdd_clarify vs sdd_secure | no consistent difference | 2 of 5 | +0 | 0.5000 (1.0000) | 1.00 |
 
-Friedman (exact, 5 tasks): p = 1.0000.
+Friedman (exact, 5 tasks): p = 0.2500.
 
-Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho - (p -).
+Complexity scaling (Spearman, exact): unstructured rho -0.32 (p 0.6000), sdd rho -0.32 (p 0.6000), sdd_clarify rho -0.32 (p 0.6000), sdd_secure rho 0.00 (p 1.0000).
 
 ## Traceability coverage (P3)
 
@@ -144,70 +144,70 @@ Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -),
 
 | Task | unstructured | sdd | sdd_clarify | sdd_secure |
 | --- | --- | --- | --- | --- |
-| T-REDACT-01 | - | - | - | - |
-| T-TARX-01 | - | - | - | - |
-| T-BOOKMARKS-01 | - | - | - | - |
-| T-ACCOUNTS-01 | - | - | - | - |
-| T-PASTE-01 | - | - | - | - |
+| T-REDACT-01 | 471.20 | 94752.60 | 16144.50 | 410737.90 |
+| T-TARX-01 | 342.10 | 1955.90 | 243070.20 | 73408.90 |
+| T-BOOKMARKS-01 | 139.80 | 1427.80 | 44165.90 | 11495.90 |
+| T-ACCOUNTS-01 | 289.40 | 2240.80 | 17458.50 | 3941.80 |
+| T-PASTE-01 | 565.30 | 4047.70 | 15600.70 | 2900.80 |
 
 | Pair | Verdict | Same direction | Median effect | Wilcoxon p (Holm) | Rank-biserial |
 | --- | --- | --- | --- | --- | --- |
-| unstructured vs sdd | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd_clarify vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
+| unstructured vs sdd | consistent difference | 5 of 5 | 0.13x | 0.0625 (0.3750) | -1.00 |
+| unstructured vs sdd_clarify | consistent difference | 5 of 5 | 0.02x | 0.0625 (0.3750) | -1.00 |
+| unstructured vs sdd_secure | consistent difference | 5 of 5 | 0.01x | 0.0625 (0.3750) | -1.00 |
+| sdd vs sdd_clarify | consistent difference | 4 of 5 | 0.13x | 0.4375 (0.8750) | -0.47 |
+| sdd vs sdd_secure | consistent difference | 4 of 5 | 0.23x | 0.1250 (0.3750) | -0.87 |
+| sdd_clarify vs sdd_secure | consistent difference | 4 of 5 | 3.84x | 0.6250 (0.8750) | 0.33 |
 
-Friedman (exact, 0 tasks): p = -.
+Friedman (exact, 5 tasks): p = 0.0023.
 
-Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho - (p -).
+Complexity scaling (Spearman, exact): unstructured rho 0.10 (p 0.9500), sdd rho -0.10 (p 0.9500), sdd_clarify rho -0.40 (p 0.5167), sdd_secure rho -1.00 (p 0.0167).
 
 ## Human turns (P4)
 
 | Task | unstructured | sdd | sdd_clarify | sdd_secure |
 | --- | --- | --- | --- | --- |
-| T-REDACT-01 | - | - | - | - |
-| T-TARX-01 | - | - | - | - |
-| T-BOOKMARKS-01 | - | - | - | - |
-| T-ACCOUNTS-01 | - | - | - | - |
-| T-PASTE-01 | - | - | - | - |
+| T-REDACT-01 | 1 | 7 | 12 | 9 |
+| T-TARX-01 | 1 | 6 | 12 | 6 |
+| T-BOOKMARKS-01 | 1 | 5 | 12 | 7 |
+| T-ACCOUNTS-01 | 1 | 5 | 11 | 6 |
+| T-PASTE-01 | 1 | 11 | 12 | 5 |
 
 | Pair | Verdict | Same direction | Median effect | Wilcoxon p (Holm) | Rank-biserial |
 | --- | --- | --- | --- | --- | --- |
-| unstructured vs sdd | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd_clarify vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
+| unstructured vs sdd | consistent difference | 5 of 5 | 0.17x | 0.0625 (0.3750) | -1.00 |
+| unstructured vs sdd_clarify | consistent difference | 5 of 5 | 0.08x | 0.0625 (0.3750) | -1.00 |
+| unstructured vs sdd_secure | consistent difference | 5 of 5 | 0.17x | 0.0625 (0.3750) | -1.00 |
+| sdd vs sdd_clarify | consistent difference | 5 of 5 | 0.50x | 0.0625 (0.3750) | -1.00 |
+| sdd vs sdd_secure | no consistent difference | 3 of 5 | 0.83x | 0.8750 (0.8750) | -0.20 |
+| sdd_clarify vs sdd_secure | consistent difference | 5 of 5 | 1.83x | 0.0625 (0.3750) | 1.00 |
 
-Friedman (exact, 0 tasks): p = -.
+Friedman (exact, 5 tasks): p = 3.0e-05.
 
-Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho - (p -).
+Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho 0.05 (p 1.0000), sdd_clarify rho -0.35 (p 0.8000), sdd_secure rho -0.82 (p 0.1333).
 
 ## Tokens (input incl. cache + output) (P4)
 
 | Task | unstructured | sdd | sdd_clarify | sdd_secure |
 | --- | --- | --- | --- | --- |
-| T-REDACT-01 | - | - | - | - |
-| T-TARX-01 | - | - | - | - |
-| T-BOOKMARKS-01 | - | - | - | - |
-| T-ACCOUNTS-01 | - | - | - | - |
-| T-PASTE-01 | - | - | - | - |
+| T-REDACT-01 | 1.31268e+06 | 1.42924e+07 | 1.56975e+07 | 1.89679e+07 |
+| T-TARX-01 | 819390 | 1.34009e+07 | 1.44085e+07 | 1.41045e+07 |
+| T-BOOKMARKS-01 | 252924 | 8.19362e+06 | 1.31705e+07 | 1.49518e+07 |
+| T-ACCOUNTS-01 | 393389 | 1.19668e+07 | 1.35066e+07 | 1.71837e+07 |
+| T-PASTE-01 | 1.82013e+06 | 2.821e+07 | 1.81331e+07 | 1.20411e+07 |
 
 | Pair | Verdict | Same direction | Median effect | Wilcoxon p (Holm) | Rank-biserial |
 | --- | --- | --- | --- | --- | --- |
-| unstructured vs sdd | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd_clarify vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
+| unstructured vs sdd | consistent difference | 5 of 5 | 0.06x | 0.0625 (0.3750) | -1.00 |
+| unstructured vs sdd_clarify | consistent difference | 5 of 5 | 0.06x | 0.0625 (0.3750) | -1.00 |
+| unstructured vs sdd_secure | consistent difference | 5 of 5 | 0.06x | 0.0625 (0.3750) | -1.00 |
+| sdd vs sdd_clarify | no consistent difference | 4 of 5 | 0.91x | 0.6250 (1.0000) | -0.33 |
+| sdd vs sdd_secure | consistent difference | 4 of 5 | 0.75x | 0.6250 (1.0000) | -0.33 |
+| sdd_clarify vs sdd_secure | no consistent difference | 3 of 5 | 0.88x | 0.8125 (1.0000) | -0.20 |
 
-Friedman (exact, 0 tasks): p = -.
+Friedman (exact, 5 tasks): p = 0.0055.
 
-Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho - (p -).
+Complexity scaling (Spearman, exact): unstructured rho 0.10 (p 0.9500), sdd rho 0.10 (p 0.9500), sdd_clarify rho 0.10 (p 0.9500), sdd_secure rho -0.60 (p 0.3500).
 
 ## Tier B pass rate (P5)
 
@@ -236,29 +236,29 @@ Complexity scaling (Spearman, exact): unstructured rho -0.56 (p 0.3667), sdd rho
 
 | Task | unstructured | sdd | sdd_clarify | sdd_secure |
 | --- | --- | --- | --- | --- |
-| T-REDACT-01 | - | - | - | - |
-| T-TARX-01 | - | - | - | - |
-| T-BOOKMARKS-01 | - | - | - | - |
-| T-ACCOUNTS-01 | - | - | - | - |
-| T-PASTE-01 | - | - | - | - |
+| T-REDACT-01 | - | 4 | 0 | 1 |
+| T-TARX-01 | - | 1 | 2 | 0 |
+| T-BOOKMARKS-01 | - | 0 | 0 | 0 |
+| T-ACCOUNTS-01 | - | 0 | 0 | 0 |
+| T-PASTE-01 | - | 1 | 0 | 1 |
 
 Descriptive only (section 8.2).
 
-Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho - (p -).
+Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho -0.53 (p 0.4667), sdd_clarify rho -0.35 (p 0.8000), sdd_secure rho 0.00 (p 1.0000).
 
 ## Principles met (0-3) (P7)
 
 | Task | unstructured | sdd | sdd_clarify | sdd_secure |
 | --- | --- | --- | --- | --- |
-| T-REDACT-01 | - | - | - | - |
-| T-TARX-01 | - | - | - | - |
-| T-BOOKMARKS-01 | - | - | - | - |
-| T-ACCOUNTS-01 | - | - | - | - |
-| T-PASTE-01 | - | - | - | - |
+| T-REDACT-01 | 2 | 2 | 3 | 3 |
+| T-TARX-01 | 3 | 3 | 3 | 2 |
+| T-BOOKMARKS-01 | 3 | 3 | 3 | 2 |
+| T-ACCOUNTS-01 | 2 | 2 | 3 | 3 |
+| T-PASTE-01 | 2 | 2 | 3 | 2 |
 
 Descriptive only (section 8.2).
 
-Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho - (p -).
+Complexity scaling (Spearman, exact): unstructured rho -0.29 (p 0.8000), sdd rho -0.29 (p 0.8000), sdd_clarify rho - (p -), sdd_secure rho -0.29 (p 0.8000).
 
 ## Change request tier A (P9)
 
@@ -356,107 +356,107 @@ Complexity scaling (Spearman, exact): unstructured rho 0.71 (p 0.4000), sdd rho 
 
 | Task | unstructured | sdd | sdd_clarify | sdd_secure |
 | --- | --- | --- | --- | --- |
-| T-REDACT-01 | - | - | - | - |
-| T-TARX-01 | - | - | - | - |
-| T-BOOKMARKS-01 | - | - | - | - |
-| T-ACCOUNTS-01 | - | - | - | - |
-| T-PASTE-01 | - | - | - | - |
+| T-REDACT-01 | 3 | 3 | 2 | 1 |
+| T-TARX-01 | 0 | 0 | 0 | 0 |
+| T-BOOKMARKS-01 | 0 | 0 | 0 | 0 |
+| T-ACCOUNTS-01 | 0 | 0 | 0 | 0 |
+| T-PASTE-01 | 1 | 0 | 0 | 0 |
 
 | Pair | Verdict | Same direction | Median effect | Wilcoxon p (Holm) | Rank-biserial |
 | --- | --- | --- | --- | --- | --- |
-| unstructured vs sdd | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd_clarify vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
+| unstructured vs sdd | no consistent difference | 1 of 5 | +0 | 1.0000 (1.0000) | 1.00 |
+| unstructured vs sdd_clarify | no consistent difference | 2 of 5 | +0 | 0.5000 (1.0000) | 1.00 |
+| unstructured vs sdd_secure | no consistent difference | 2 of 5 | +0 | 0.5000 (1.0000) | 1.00 |
+| sdd vs sdd_clarify | no consistent difference | 1 of 5 | +0 | 1.0000 (1.0000) | 1.00 |
+| sdd vs sdd_secure | no consistent difference | 1 of 5 | +0 | 1.0000 (1.0000) | 1.00 |
+| sdd_clarify vs sdd_secure | no consistent difference | 1 of 5 | +0 | 1.0000 (1.0000) | 1.00 |
 
-Friedman (exact, 0 tasks): p = -.
+Friedman (exact, 5 tasks): p = 0.5000.
 
-Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho - (p -).
+Complexity scaling (Spearman, exact): unstructured rho -0.22 (p 0.8000), sdd rho -0.71 (p 0.4000), sdd_clarify rho -0.71 (p 0.4000), sdd_secure rho -0.71 (p 0.4000).
 
 ## Change request active time (s) (P9)
 
 | Task | unstructured | sdd | sdd_clarify | sdd_secure |
 | --- | --- | --- | --- | --- |
-| T-REDACT-01 | - | - | - | - |
-| T-TARX-01 | - | - | - | - |
-| T-BOOKMARKS-01 | - | - | - | - |
-| T-ACCOUNTS-01 | - | - | - | - |
-| T-PASTE-01 | - | - | - | - |
+| T-REDACT-01 | 12180.20 | 18987.60 | 113654.50 | 2845.50 |
+| T-TARX-01 | 335.30 | 2304.50 | 3220.80 | 23849.90 |
+| T-BOOKMARKS-01 | 244.50 | 1531.20 | 5242 | 2901.30 |
+| T-ACCOUNTS-01 | 363.40 | 2608.70 | 76356.10 | 8733.20 |
+| T-PASTE-01 | 7247.50 | 4088.60 | 68835.20 | 2872.30 |
 
 | Pair | Verdict | Same direction | Median effect | Wilcoxon p (Holm) | Rank-biserial |
 | --- | --- | --- | --- | --- | --- |
-| unstructured vs sdd | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd_clarify vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
+| unstructured vs sdd | consistent difference | 4 of 5 | 0.16x | 0.4375 (1.0000) | -0.47 |
+| unstructured vs sdd_clarify | consistent difference | 5 of 5 | 0.10x | 0.0625 (0.3750) | -1.00 |
+| unstructured vs sdd_secure | no consistent difference | 3 of 5 | 0.08x | 0.8125 (1.0000) | -0.20 |
+| sdd vs sdd_clarify | consistent difference | 5 of 5 | 0.17x | 0.0625 (0.3750) | -1.00 |
+| sdd vs sdd_secure | no consistent difference | 3 of 5 | 0.53x | 0.6250 (1.0000) | -0.33 |
+| sdd_clarify vs sdd_secure | consistent difference | 4 of 5 | 8.74x | 0.1875 (0.7500) | 0.73 |
 
-Friedman (exact, 0 tasks): p = -.
+Friedman (exact, 5 tasks): p = 0.0443.
 
-Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho - (p -).
+Complexity scaling (Spearman, exact): unstructured rho -0.10 (p 0.9500), sdd rho -0.10 (p 0.9500), sdd_clarify rho -0.10 (p 0.9500), sdd_secure rho 0.10 (p 0.9500).
 
 ## Change request tokens (P9)
 
 | Task | unstructured | sdd | sdd_clarify | sdd_secure |
 | --- | --- | --- | --- | --- |
-| T-REDACT-01 | - | - | - | - |
-| T-TARX-01 | - | - | - | - |
-| T-BOOKMARKS-01 | - | - | - | - |
-| T-ACCOUNTS-01 | - | - | - | - |
-| T-PASTE-01 | - | - | - | - |
+| T-REDACT-01 | 1.95144e+06 | 1.51831e+07 | 2.31588e+07 | 1.547e+07 |
+| T-TARX-01 | 1.44718e+06 | 9.35166e+06 | 1.66259e+07 | 2.04065e+07 |
+| T-BOOKMARKS-01 | 731019 | 7.44811e+06 | 1.16861e+07 | 2.30879e+07 |
+| T-ACCOUNTS-01 | 2.00337e+06 | 1.28454e+07 | 1.77059e+07 | 2.93514e+07 |
+| T-PASTE-01 | 835326 | 1.50423e+07 | 2.38031e+07 | 1.51996e+07 |
 
 | Pair | Verdict | Same direction | Median effect | Wilcoxon p (Holm) | Rank-biserial |
 | --- | --- | --- | --- | --- | --- |
-| unstructured vs sdd | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd_clarify vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
+| unstructured vs sdd | consistent difference | 5 of 5 | 0.13x | 0.0625 (0.3750) | -1.00 |
+| unstructured vs sdd_clarify | consistent difference | 5 of 5 | 0.08x | 0.0625 (0.3750) | -1.00 |
+| unstructured vs sdd_secure | consistent difference | 5 of 5 | 0.07x | 0.0625 (0.3750) | -1.00 |
+| sdd vs sdd_clarify | consistent difference | 5 of 5 | 0.64x | 0.0625 (0.3750) | -1.00 |
+| sdd vs sdd_secure | consistent difference | 5 of 5 | 0.46x | 0.0625 (0.3750) | -1.00 |
+| sdd_clarify vs sdd_secure | no consistent difference | 3 of 5 | 0.81x | 0.6250 (0.6250) | -0.33 |
 
-Friedman (exact, 0 tasks): p = -.
+Friedman (exact, 5 tasks): p = 0.0001.
 
-Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho - (p -).
+Complexity scaling (Spearman, exact): unstructured rho -0.20 (p 0.7833), sdd rho -0.10 (p 0.9500), sdd_clarify rho 0.30 (p 0.6833), sdd_secure rho 0.00 (p 1.0000).
 
 ## Change request human turns (P9)
 
 | Task | unstructured | sdd | sdd_clarify | sdd_secure |
 | --- | --- | --- | --- | --- |
-| T-REDACT-01 | - | - | - | - |
-| T-TARX-01 | - | - | - | - |
-| T-BOOKMARKS-01 | - | - | - | - |
-| T-ACCOUNTS-01 | - | - | - | - |
-| T-PASTE-01 | - | - | - | - |
+| T-REDACT-01 | 2 | 6 | 13 | 4 |
+| T-TARX-01 | 1 | 4 | 10 | 5 |
+| T-BOOKMARKS-01 | 1 | 4 | 11 | 4 |
+| T-ACCOUNTS-01 | 1 | 4 | 12 | 9 |
+| T-PASTE-01 | 3 | 5 | 12 | 7 |
 
 | Pair | Verdict | Same direction | Median effect | Wilcoxon p (Holm) | Rank-biserial |
 | --- | --- | --- | --- | --- | --- |
-| unstructured vs sdd | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| unstructured vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_clarify | no data | 0 of 0 | - | - (-) | - |
-| sdd vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
-| sdd_clarify vs sdd_secure | no data | 0 of 0 | - | - (-) | - |
+| unstructured vs sdd | consistent difference | 5 of 5 | 0.25x | 0.0625 (0.3750) | -1.00 |
+| unstructured vs sdd_clarify | consistent difference | 5 of 5 | 0.10x | 0.0625 (0.3750) | -1.00 |
+| unstructured vs sdd_secure | consistent difference | 5 of 5 | 0.25x | 0.0625 (0.3750) | -1.00 |
+| sdd vs sdd_clarify | consistent difference | 5 of 5 | 0.40x | 0.0625 (0.3750) | -1.00 |
+| sdd vs sdd_secure | no consistent difference | 3 of 5 | 0.80x | 0.5000 (0.5000) | -0.50 |
+| sdd_clarify vs sdd_secure | consistent difference | 5 of 5 | 2.00x | 0.0625 (0.3750) | 1.00 |
 
-Friedman (exact, 0 tasks): p = -.
+Friedman (exact, 5 tasks): p = 3.0e-05.
 
-Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho - (p -).
+Complexity scaling (Spearman, exact): unstructured rho 0.22 (p 0.8000), sdd rho -0.22 (p 0.8000), sdd_clarify rho -0.05 (p 1.0000), sdd_secure rho 0.72 (p 0.1667).
 
 ## Change request edits the original spec (0/1) (P11)
 
 | Task | unstructured | sdd | sdd_clarify | sdd_secure |
 | --- | --- | --- | --- | --- |
-| T-REDACT-01 | - | - | - | - |
-| T-TARX-01 | - | - | - | - |
-| T-BOOKMARKS-01 | - | - | - | - |
-| T-ACCOUNTS-01 | - | - | - | - |
-| T-PASTE-01 | - | - | - | - |
+| T-REDACT-01 | - | 0 | 0 | 1 |
+| T-TARX-01 | - | 0 | 0 | 0 |
+| T-BOOKMARKS-01 | - | 0 | 0 | 0 |
+| T-ACCOUNTS-01 | - | 0 | 0 | 0 |
+| T-PASTE-01 | - | 0 | 0 | 0 |
 
 Descriptive only (section 8.2).
 
-Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho - (p -).
+Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -), sdd_clarify rho - (p -), sdd_secure rho -0.71 (p 0.4000).
 
 ## Replication: second run minus first run, T-REDACT-01
 
@@ -464,23 +464,23 @@ Complexity scaling (Spearman, exact): unstructured rho - (p -), sdd rho - (p -),
 | --- | --- | --- | --- | --- |
 | Tier A pass rate | +0 pp | +0 pp | +0 pp | +0 pp |
 | Tier C pass rate | +0 pp | +30 pp | +0 pp | +0 pp |
-| Confirmed findings | +0 | +0 | +0 | +0 |
-| Confirmed High+Medium findings | +0 | +0 | +0 | +0 |
+| Confirmed findings | +0 | -3 | +0 | +0 |
+| Confirmed High+Medium findings | +0 | -3 | +0 | +0 |
 | Traceability coverage | +0 pp | +0 pp | +7 pp | -7 pp |
 | Explicit-link rate | +0 pp | +0 pp | +0 pp | +0 pp |
-| Active time (s) | - | - | - | - |
-| Human turns | - | - | - | - |
-| Tokens (input incl. cache + output) | - | - | - | - |
+| Active time (s) | -1090.8 | -48658.2 | -5 | -346640 |
+| Human turns | +2 | -1 | +0 | -1 |
+| Tokens (input incl. cache + output) | -1.23045e+06 | -3.78785e+06 | -307936 | -7.14098e+06 |
 | Tier B pass rate | +0 pp | +0 pp | +0 pp | -25 pp |
-| Post-plan revisions | - | - | - | - |
-| Principles met (0-3) | - | - | - | - |
+| Post-plan revisions | +1 | -4 | - | -1 |
+| Principles met (0-3) | +0 | +0 | +0 | +0 |
 | Change request tier A | +0 pp | +0 pp | +0 pp | +0 pp |
 | Regression: original tiers A and C after the change | +0 pp | +8 pp | +0 pp | +0 pp |
 | Change request tier B | +0 pp | +0 pp | +0 pp | -25 pp |
 | Change request tier C | -11 pp | +11 pp | +11 pp | +0 pp |
-| Confirmed findings in the change | - | - | - | - |
-| Change request active time (s) | - | - | - | - |
-| Change request tokens | - | - | - | - |
-| Change request human turns | - | - | - | - |
-| Change request edits the original spec (0/1) | - | - | - | - |
+| Confirmed findings in the change | +1 | -1 | -1 | +0 |
+| Change request active time (s) | -110210 | -16985.5 | -11844.6 | +66790.1 |
+| Change request tokens | +28019 | -2.04535e+06 | -47441 | -8.05083e+06 |
+| Change request human turns | -2 | -2 | -1 | +1 |
+| Change request edits the original spec (0/1) | +0 | +0 | - | -1 |
 

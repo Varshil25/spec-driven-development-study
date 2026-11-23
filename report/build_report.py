@@ -495,7 +495,7 @@ Every table in this section is produced by \texttt{analyze.py} from the scored r
 
 \begingroup\small\setlength{\tabcolsep}{4pt}
 \begin{longtable}{@{}llccccc@{}}
-\caption{Builds: correctness and security by task and condition. All cells intentionally empty pending validation.}\label{tab:correctness-defects}\\
+\caption{Builds: correctness and security by task and condition.}\label{tab:correctness-defects}\\
 \toprule
 \textbf{Task} & \textbf{Condition} & \textbf{Tier A} & \textbf{Tier B} & \textbf{Tier C} & \textbf{Findings} & \textbf{High+Med} \\
 \midrule
@@ -511,7 +511,7 @@ GRID5
 
 \begingroup\small\setlength{\tabcolsep}{4pt}
 \begin{longtable}{@{}llcccc@{}}
-\caption{Change requests: correctness, security and regression. All cells intentionally empty pending validation.}\label{tab:change-requests}\\
+\caption{Change requests: correctness, security and regression.}\label{tab:change-requests}\\
 \toprule
 \textbf{Task} & \textbf{Condition} & \textbf{CR tier A} & \textbf{CR tier C} & \textbf{Regression} & \textbf{Findings} \\
 \midrule
@@ -525,7 +525,7 @@ GRID4
 \end{longtable}
 \endgroup
 
-\textbf{Verdicts.} \emph{Tier~A (P1):} No pairwise comparison reached the consistency threshold; Friedman $p = 1.00$. \emph{Tier~C (P2):} No pair was consistent (Friedman $p = 0.25$), though \texttt{sdd\_secure} improved over all other conditions on 2 of 5 tasks (T-REDACT-01: 70\% $\to$ 100\%; T-PASTE-01: 83\% $\to$ 100\%). \emph{CR tier~A (P9):} All conditions achieved 100\% on every task; Friedman $p = 1.00$. \emph{Regression (P9):} No consistent pairwise difference; Friedman $p = 1.00$. \emph{CR tier~C (P10):} No consistent pairwise difference; Friedman $p = 1.00$; \texttt{sdd\_secure} scored 89\% versus 67\% on T-REDACT-01-CR. Confirmed findings by CWE are pending manual coding of the Bandit and probe results.
+\textbf{Verdicts.} \emph{Tier~A (P1):} No pairwise comparison reached the consistency threshold; Friedman $p = 1.00$. \emph{Tier~C (P2):} No pair was consistent (Friedman $p = 0.25$), though \texttt{sdd\_secure} improved over all other conditions on 2 of 5 tasks (T-REDACT-01: 70\% $\to$ 100\%; T-PASTE-01: 83\% $\to$ 100\%). \emph{CR tier~A (P9):} All conditions achieved 100\% on every task; Friedman $p = 1.00$. \emph{Regression (P9):} No consistent pairwise difference; Friedman $p = 1.00$. \emph{CR tier~C (P10):} No consistent pairwise difference; Friedman $p = 1.00$; \texttt{sdd\_secure} scored 89\% versus 67\% on T-REDACT-01-CR. Confirmed findings by CWE: across the 25 builds, 26 of 55 candidate findings were confirmed---CWE-1333/400 (ReDoS timeout, 18), CWE-1236 (CSV formula injection, 4), CWE-79 (missing \texttt{nosniff}, 3), CWE-703 (\texttt{assert} in production, 1). All 29 Bandit B105 (CWE-259) findings were false positives (error messages, CLI argument names and field names matching the ``hardcoded password'' pattern). Across the 25 change-request runs, 20 of 49 candidates were confirmed---CWE-59 (link following, 15), CWE-1333/400 (3), CWE-703 (1), plus 1 from R006C.
 
 \subsection{Requirement Traceability}
 
@@ -573,7 +573,7 @@ GRIDTIME
 
 \textbf{P6 (Post-plan revisions).} Specification revisions after the plan was written were rare: across 15 SDD builds (excluding unstructured, which has no specification), there were 10 total revisions, concentrated in T-REDACT-01 (5 of 10). The median was 0 revisions per run.
 
-\textbf{P7 (Principles met).} Principles-met coding is pending completion of traceability coding.
+\textbf{P7 (Principles met).} The three constitution principles---standard library only, fail loudly, every requirement testable---were coded for all 25 builds (75 rows). All 25 runs met ``standard library only'' and ``every requirement testable'' ($\geq$80\% of stated requirements scored~2). ``Fail loudly'' was met by 14 of 25 runs; the 11 violations were \texttt{except} blocks with \texttt{pass} in product code (e.g.\ cleanup, shutdown, retry patterns). By condition: \texttt{sdd\_clarify} met all three principles in every run (7/7); \texttt{sdd\_secure} and \texttt{sdd} each had violations in 3--4 of 6 runs; \texttt{unstructured} had violations in 4 of 6. No pairwise comparison reached the consistency threshold (Friedman $p > 0.05$).
 
 \textbf{P8 (Security in the constitution).} The \texttt{sdd\_secure} condition wrote CWE-derived security constraints into the constitution. On the two tasks where the hidden probes test for those specific weaknesses (T-REDACT-01 and T-PASTE-01), \texttt{sdd\_secure} achieved 100\% tier~C versus 70\% and 83\% for all other conditions. On the other three tasks, security scores were identical across conditions. CR tier~C showed a similar but smaller pattern on T-REDACT-01-CR (89\% vs.\ 67--78\%).
 
@@ -584,7 +584,7 @@ GRIDTIME
 \begin{table}[h]
 \centering
 \small
-\caption{Run-to-run variation: \texttt{T-REDACT-01} built twice per condition. All cells intentionally empty pending validation.}
+\caption{Run-to-run variation: \texttt{T-REDACT-01} built twice per condition.}
 \label{tab:determinism}
 \begin{tabular}{@{}lcccc@{}}
 \toprule
@@ -605,7 +605,7 @@ The replicated pairs show that tier~A pass rates were perfectly stable across ru
 % ----------------------------------------------------------------------
 \section{Validation}
 
-Each validation item must be completed and evidenced before the report is submitted. The instrument-level checks made before the study runs are recorded below and in Appendix~\ref{app:log}. All results-level checks for the software study (Parts II--III) are complete; Part IV structural validation and confirmed-findings adjudication remain open.
+Each validation item must be completed and evidenced before the report is submitted. The instrument-level checks made before the study runs are recorded below and in Appendix~\ref{app:log}. All results-level checks for the software study (Parts II--III) are complete, including confirmed-findings adjudication; Part IV structural validation remains open.
 
 \subsection{Validation Checklist}
 
@@ -641,7 +641,7 @@ The sealed suites were unsealed on 22 November 2026 after the last study run (R0
 
 Security findings come from three sources: failed tier C probes, Bandit 1.9.4 over product code (tests, logs, tools and Spec Kit files excluded), and a manual review against a fixed checklist (for example, SQL built by string formatting even where no probe exploits it, or a password hash that meets no OWASP Password Storage configuration). Every candidate is coded with CWE, location, severity and \emph{confirmed} (yes or no), and only confirmed findings count. On the change-request validation code, Bandit flagged only the string-built SQL and the use of \texttt{random} for tokens. It missed link following, archive dereferencing, missing HTML escaping, plaintext secrets and a burn-after-reading race, which the probes caught. This is why the three sources are combined.
 
-Adjudication of candidate security findings from the study runs is pending. Each candidate finding from failed tier~C probes and Bandit reports will be coded with CWE, location, severity and confirmed status.
+Adjudication of candidate security findings from the study runs is complete. Each candidate finding from failed tier~C probes and Bandit reports was coded with CWE, location, severity and confirmed status. \textbf{Builds:} 55 candidates across 25 runs; 26 confirmed (CWE-1333/400: 18, CWE-1236: 4, CWE-79: 3, CWE-703: 1), 29 not confirmed (all 29 Bandit B105/CWE-259 ``hardcoded password'' findings were false positives---error messages, CLI argument names, field names, header names, replacement tags, algorithm names and CLI separators). \textbf{Change requests:} 49 candidates across 25 CR runs; 20 confirmed (CWE-59: 15, CWE-1333/400: 3, CWE-703: 1, plus 1 from R006C), 29 not confirmed. The confirmed-findings table (Table~\ref{tab:results}) reports only confirmed findings.
 
 \subsection{Traceability Validation}
 
